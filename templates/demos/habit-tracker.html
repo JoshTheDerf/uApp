@@ -19,7 +19,8 @@
   th, td { padding:10px 8px; border-bottom:1px solid #f0ede6; text-align:center; font-size:13px }
   th:first-child, td:first-child { text-align:left; padding-left:14px }
   th { color:var(--mut); font-size:11px; text-transform:uppercase }
-  .dot { width:26px; height:26px; border-radius:50%; border:none; background:var(--off); cursor:pointer; font-size:13px }
+  .dot { width:26px; height:26px; padding:0; border-radius:50%; border:none; background:var(--off); cursor:pointer;
+         font-size:13px; line-height:1; display:inline-flex; align-items:center; justify-content:center; vertical-align:middle }
   .dot.on { background:var(--on); color:#fff }
   .streak { color:var(--mut); font-size:12px }
   .rm { background:none; border:none; color:#c66; cursor:pointer; font-size:15px }
@@ -28,7 +29,7 @@
 <body>
 <div class="wrap">
   <h1>Habit Tracker</h1>
-  <p class=”sub”>Tap to log today or the last 7 days. Ask the AI for streaks or charts.</p>
+  <p class="sub">Tap to log today or the last 7 days. Ask the AI for streaks or charts.</p>
   <form id="f"><input id="n" placeholder="New habit…" required><button>Add</button></form>
   <table><thead id="head"></thead><tbody id="body"></tbody></table>
 </div>
