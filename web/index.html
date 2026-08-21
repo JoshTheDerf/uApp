@@ -6,6 +6,39 @@
 <title>uapp</title>
 <link rel="stylesheet" href="./shell.css">
 <link rel="icon" href="./icon-256.png">
+<style>
+  /* Boot splash. Self-contained (no shell.css tokens) so it paints even if
+     the shell has not loaded yet — this is the first thing on screen. */
+  #boot-splash {
+    position: fixed; inset: 0; z-index: 9999;
+    display: flex; align-items: center; justify-content: center;
+    background: #eef0f3; color: #1d2129;
+    font: 14px/1.5 system-ui, sans-serif;
+    transition: opacity .25s ease;
+  }
+  #boot-splash.gone { opacity: 0; pointer-events: none; }
+  #boot-splash .card { width: min(320px, 84vw); text-align: center; }
+  #boot-splash img { width: 56px; height: 56px; border-radius: 14px; margin-bottom: 14px; }
+  #boot-status { font-size: 15px; font-weight: 600; }
+  #boot-track {
+    margin-top: 14px; height: 5px; border-radius: 999px;
+    background: #dfe3e9; overflow: hidden;
+  }
+  #boot-bar {
+    height: 100%; width: 35%; border-radius: 999px; background: #2f6df6;
+    transform: translateX(-100%); animation: boot-slide 1.1s ease-in-out infinite;
+  }
+  /* With a byte count we switch to a real bar. */
+  #boot-bar.determinate {
+    animation: none; transform: none; width: 0; transition: width .12s linear;
+  }
+  #boot-detail { margin-top: 8px; min-height: 17px; font-size: 12px; color: #7a8494; }
+  @keyframes boot-slide { from { transform: translateX(-100%); } to { transform: translateX(320%); } }
+  @media (prefers-reduced-motion: reduce) {
+    #boot-splash { transition: none; }
+    #boot-bar { animation: none; transform: none; width: 100%; opacity: .45; }
+  }
+</style>
 </head>
 <body>
 <!-- The shell is a set of Web Components; each bundles its template, style
@@ -14,10 +47,14 @@
 <shell-topbar id="topbar"></shell-topbar>
 
 <main id="main">
-  <iframe id="appframe" src="/app/"></iframe>
+  <!-- No src: the archive URLs only resolve once the service worker controls
+       the page AND an app is open, and the demo may be hosted under a subpath,
+       so a static "/app/" would hit the site root and paint a "refused to
+       connect" error until boot.js corrected it. boot.js sets both srcs. -->
+  <iframe id="appframe"></iframe>
   <!-- Hidden eval context for the AI's run_js tool: uapp.js only, no app code.
        Never reloaded, so scratch state survives across tool calls. -->
-  <iframe id="scratchframe" src="/scratch/" style="display:none" title="scratchpad"></iframe>
+  <iframe id="scratchframe" style="display:none" title="scratchpad"></iframe>
 
   <!-- Overlay panels: the topbar button toggles, X / Esc closes, opening one
        closes the others (they slide in/out; open state = .open). -->
@@ -29,6 +66,18 @@
 </main>
 
 <file-viewer></file-viewer>
+
+<!-- Painted on every load (switching documents is a full reload) and removed
+     by boot.js once the app frame is up; it also carries the download bar for
+     the sample .uapp files, some of which are several megabytes. -->
+<div id="boot-splash">
+  <div class="card">
+    <img src="./icon-256.png" alt="">
+    <div id="boot-status">Starting uapp…</div>
+    <div id="boot-track"><div id="boot-bar"></div></div>
+    <div id="boot-detail"></div>
+  </div>
+</div>
 
 <script src="./icons.js"></script>
 <script type="module" src="./boot.js"></script>

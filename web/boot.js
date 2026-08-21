@@ -21,6 +21,85 @@ const LEGACY_FILE = "app.uapp";
 const BASE = new URL("./", import.meta.url);
 window.__uappBase = BASE.pathname;
 
+// ---- boot splash ------------------------------------------------------------
+// index.html paints it on every load; we keep it up until the app frame is
+// showing. Switching documents is a full reload and the samples are real
+// downloads (the CAD one is 8 MB), so without this the page just sits there
+// looking stalled after a click.
+
+const splashEl = document.getElementById("boot-splash");
+const splashStatus = document.getElementById("boot-status");
+const splashDetail = document.getElementById("boot-detail");
+const splashBar = document.getElementById("boot-bar");
+let splashHidden = false;
+
+const mb = (n) => (n / 1048576).toFixed(1) + " MB";
+
+function splashShow(status, detail) {
+  if (!splashEl) return;
+  splashHidden = false;
+  splashEl.style.display = "";
+  splashEl.classList.remove("gone");
+  if (status) splashStatus.textContent = status;
+  splashBar.classList.remove("determinate");
+  splashBar.style.width = "";
+  splashDetail.textContent = detail || "";
+}
+// Detail line only — keeps whatever the status says (usually the app name).
+function splashNote(detail) {
+  if (splashEl) splashDetail.textContent = detail || "";
+}
+function splashProgress(loaded, total) {
+  if (!splashEl) return;
+  if (total && loaded <= total) {
+    splashBar.classList.add("determinate");
+    splashBar.style.width = Math.round((loaded / total) * 100) + "%";
+    splashDetail.textContent = `${mb(loaded)} of ${mb(total)}`;
+  } else {
+    // No content-length (or a compressed transfer, where it undercounts):
+    // back to the indeterminate bar and just report what has arrived.
+    splashBar.classList.remove("determinate");
+    splashBar.style.width = "";
+    splashDetail.textContent = mb(loaded) + " downloaded";
+  }
+}
+function splashHide() {
+  if (!splashEl || splashHidden) return;
+  splashHidden = true;
+  splashEl.classList.add("gone");
+  setTimeout(() => { if (splashHidden) splashEl.style.display = "none"; }, 300);
+}
+
+// A document switch is a reload, so name the app we are heading for instead of
+// showing a generic "Starting" (the boot below consumes these keys).
+{
+  const pendingName = sessionStorage.getItem("uapp-open-name");
+  if (pendingName) splashStatus.textContent = "Opening " + pendingName + "…";
+}
+
+// Download with a real progress bar when the server gives us a length.
+async function fetchWithProgress(url, what) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`could not fetch ${what} (HTTP ${r.status})`);
+  const total = Number(r.headers.get("content-length")) || 0;
+  if (!r.body || !r.body.getReader) return new Uint8Array(await r.arrayBuffer());
+  const reader = r.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  splashProgress(0, total);
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.length;
+    splashProgress(loaded, total);
+  }
+  const out = new Uint8Array(loaded);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
 let worker = null;
 let sab = null;
 // Resolved once the worker has an app open — every archive fetch and iframe
@@ -373,12 +452,15 @@ async function handleHostRpc(m) {
     case "host.open": {
       const e = appsIndex().find((a) => a.id === p.id);
       if (!e) throw new Error("no stored app with that id");
+      splashShow("Opening " + e.name + "…");
       setTimeout(() => switchTo(e.id, e.name), 50); // reply first, then reload
       return { ok: true };
     }
     case "host.create": {
       const id = genId();
-      indexTouch(id, (p.name || "New App").slice(0, 80));
+      const name = (p.name || "New App").slice(0, 80);
+      splashShow("Creating " + name + "…");
+      indexTouch(id, name);
       setTimeout(() => switchTo(id, p.name), 50);
       return { ok: true, id };
     }
@@ -387,19 +469,31 @@ async function handleHostRpc(m) {
       if (bytes.length < 16 || String.fromCharCode(...bytes.slice(0, 15)) !== "SQLite format 3") {
         throw new Error("not a plain .uapp file (encrypted apps can't be opened in the browser demo)");
       }
+      const name = (p.name || "Imported app").replace(/\.uapp$/i, "").slice(0, 80);
+      splashShow("Opening " + name + "…", "Saving…");
       const id = genId();
       await opfsWrite(id, bytes);
-      indexTouch(id, (p.name || "Imported app").replace(/\.uapp$/i, "").slice(0, 80));
+      indexTouch(id, name);
       setTimeout(() => switchTo(id, p.name), 50);
       return { ok: true, id };
     }
     case "host.sample": {
-      const r = await fetch(new URL(String(p.url || "").replace(/^\//, ""), BASE));
-      if (!r.ok) throw new Error("could not fetch the sample (HTTP " + r.status + ")");
-      const bytes = new Uint8Array(await r.arrayBuffer());
+      const name = (p.name || "Sample").slice(0, 80);
+      // Several megabytes for some samples: show the bar before the request
+      // goes out, and put the splash away again if it fails.
+      splashShow("Opening " + name + "…", "Downloading…");
+      let bytes;
+      try {
+        bytes = await fetchWithProgress(
+          new URL(String(p.url || "").replace(/^\//, ""), BASE), "the sample");
+      } catch (e) {
+        splashHide();
+        throw e;
+      }
+      splashShow("Opening " + name + "…", "Saving…");
       const id = genId();
       await opfsWrite(id, bytes);
-      indexTouch(id, (p.name || "Sample").slice(0, 80));
+      indexTouch(id, name);
       setTimeout(() => switchTo(id, p.name), 50);
       return { ok: true, id };
     }
@@ -538,6 +632,7 @@ function switchTo(id, name) {
   } else {
     sessionStorage.removeItem("uapp-open-app");
     sessionStorage.removeItem("uapp-open-name");
+    splashShow("Returning to your apps…"); // covers the reload gap
   }
   location.reload();
 }
@@ -603,6 +698,7 @@ if (tabChannel) {
       fatal("This browser has no service-worker support (or the page is not served over HTTPS/localhost).");
       return;
     }
+    splashNote("Starting the service worker…");
     await navigator.serviceWorker.register(new URL("sw.js", BASE));
     await navigator.serviceWorker.ready;
     if (!navigator.serviceWorker.controller || (!crossOriginIsolated && !sessionStorage.getItem("uapp-coi-reload"))) {
@@ -617,6 +713,7 @@ if (tabChannel) {
     sab = crossOriginIsolated ? new SharedArrayBuffer(4 * 1024 * 1024) : null;
     if (!sab) console.warn("uapp: not cross-origin isolated — run_js/app-action tools are disabled");
 
+    splashNote("Loading the runtime…"); // ~1.5 MB of wasm on a cold cache
     worker = new Worker(new URL("worker.js", BASE), { type: "module" });
     worker.addEventListener("message", (ev) => {
       const m = ev.data || {};
@@ -653,6 +750,7 @@ if (tabChannel) {
     sessionStorage.removeItem("uapp-open-app");
     sessionStorage.removeItem("uapp-open-name");
     if (wantId) {
+      splashShow("Opening " + wantName + "…", "Opening the document…");
       const bytes = await opfsRead(wantId); // null = brand-new app (host.create)
       try {
         info = await openApp(bytes, wantName);
@@ -664,9 +762,9 @@ if (tabChannel) {
     }
     if (!info) {
       currentAppId = null;
-      const r = await fetch(new URL("launcher.uapp", BASE));
-      if (!r.ok) throw new Error("the launcher app is missing (HTTP " + r.status + ")");
-      info = await openApp(new Uint8Array(await r.arrayBuffer()), "Apps");
+      splashShow("Starting uapp…", "Loading the app library…");
+      const bytes = await fetchWithProgress(new URL("launcher.uapp", BASE), "the launcher app");
+      info = await openApp(bytes, "Apps");
     }
     lastInfoName = info.name || "uapp";
     document.title = `${lastInfoName} — uapp`;
@@ -700,15 +798,26 @@ if (tabChannel) {
       onMessage(fn) { shellOnMessage = fn; },
     };
 
-    // The static iframes in index.html raced ahead of the app being opened
-    // (and of service-worker control on the very first visit) — load them now
-    // that archive URLs actually resolve.
+    // The iframes in index.html start empty: their archive URLs only resolve
+    // once the service worker controls the page and an app is open. Point them
+    // at the real (base-relative) paths now.
+    splashNote("Loading the app…");
+    const appFrame = document.getElementById("appframe");
+    // Hold the splash until the app has actually painted, with a cap in case
+    // the frame never fires load.
+    const framePainted = new Promise((resolve) => {
+      if (!appFrame) return resolve();
+      appFrame.addEventListener("load", resolve, { once: true });
+      setTimeout(resolve, 8000);
+    });
     for (const [id, path] of [["appframe", "app/"], ["scratchframe", "scratch/"]]) {
       const f = document.getElementById(id);
       if (f) f.src = BASE.pathname + path + "?r=" + Date.now();
     }
 
     await import(new URL("shell/main.js", BASE));
+    await framePainted;
+    splashHide();
   } catch (e) {
     console.error(e);
     fatal(String((e && e.message) || e));
