@@ -1,0 +1,295 @@
+/* uapp shell — global layer: design tokens and the shared primitives every
+ * component builds from. Component-specific styles live in each component's
+ * own file (src/shell/js/*.js) and are installed as <style data-for="…">. */
+
+/* ---------- design tokens ----------
+   One palette for the whole shell. Chrome is dark slate, the working canvas
+   is cool paper, brand blue does selection + primary actions, and the four
+   status hues (ok/err/warn/brand) each come as solid / soft / ink. */
+:root {
+  --ink: #23293a;            /* chrome (topbar, media backdrops) */
+  --chrome-text: #f2f4f8;
+  --chrome-dim: #cfd6e6;
+  --bg: #eef0f3;             /* app canvas behind the iframe */
+  --surface: #fff;
+  --surface-2: #f6f7f9;      /* code panes, soft heads */
+  --surface-3: #fafbfc;      /* panel bodies */
+  --code-bg: #f0f2f5;
+  --hover: #eef2f7;
+  --hover-2: #e7eaef;
+  --text: #1d2129;
+  --text-2: #55606f;
+  --muted: #7a8494;
+  --faint: #98a1b0;
+  --ghost: #b6bdc9;
+  --line: #e3e6ea;
+  --line-soft: #eef1f4;
+  --line-strong: #cfd5de;
+  --brand: #2f6df6;
+  --brand-strong: #1f5be8;
+  --brand-soft: #dbe7ff;
+  --brand-wash: #f0f5ff;
+  --brand-line: #a9c3f2;
+  --brand-ink: #22448f;
+  --ok: #2e9e4f;  --ok-soft: #d9f2df;  --ok-ink: #1c7c3b;  --ok-line: #cadfd1;
+  --err: #d64545; --err-soft: #fbdcdc; --err-ink: #a12c2c; --err-wash: #fdf0f0;
+  --warn: #e2b93f; --warn-soft: #fdf1cf; --warn-bg: #fdf8e9;
+  --warn-line: #f0e3bb; --warn-ink: #8a6d00;
+  --r-s: 6px; --r-m: 8px; --r-l: 12px; --r-pill: 999px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --shadow-panel: -8px 0 24px rgba(20, 26, 40, .18);
+  --shadow-pop: 0 10px 30px rgba(20, 26, 40, .22);
+  --shadow-modal: 0 12px 40px rgba(0, 0, 0, .25);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 14px/1.45 system-ui, sans-serif;
+  display: flex; flex-direction: column;
+  background: var(--bg); color: var(--text);
+}
+.hidden { display: none !important; }
+.spacer { flex: 1; }
+.hint { font-size: 12px; color: var(--muted); }
+.hint.pad { padding: 12px; display: block; }
+.hint.err { color: var(--err-ink); }
+.hint.ok { color: var(--ok-ink); }
+
+/* overflow CLIP, not hidden: closed panels sit translated off the right edge.
+   `hidden` would still leave #main a scroll container, and focusing anything
+   inside a panel mid-slide scrolls it sideways permanently; `clip` clips the
+   same overflow but can never scroll. */
+#main { flex: 1; display: flex; min-height: 0; position: relative; overflow: clip; }
+#appframe { flex: 1; border: none; background: #fff; min-width: 0; }
+
+/* ---------- buttons ----------
+   Three kinds everywhere: .btn (labelled action, .primary/.danger variants),
+   .icon-btn (bare glyph for panel heads and inline affordances), and
+   .chip-btn (small labelled pill for toolbars). */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: var(--r-m);
+  border: 1px solid var(--line-strong); background: var(--surface);
+  color: var(--text); font: inherit; cursor: pointer;
+}
+.btn:hover { background: var(--hover); }
+.btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+.btn.primary:hover { background: var(--brand-strong); }
+.btn.danger { background: var(--err); border-color: var(--err); color: #fff; }
+.btn.sm { padding: 4px 11px; font-size: 12.5px; }
+.btn:disabled { opacity: .55; cursor: default; }
+.btn svg { display: block; }
+
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: none; cursor: pointer; color: var(--text-2);
+  padding: 5px; border-radius: var(--r-s); opacity: .7;
+}
+.icon-btn:hover { background: var(--hover); opacity: 1; }
+.icon-btn:disabled { opacity: .25; cursor: default; background: none; }
+.icon-btn svg { display: block; }
+.icon-btn.boxed {
+  width: 30px; height: 30px; opacity: 1;
+  border: 1px solid var(--line-strong); background: var(--surface); border-radius: var(--r-m);
+}
+.icon-btn.boxed:hover { background: var(--hover); }
+
+.chip-btn {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
+  border: 1px solid var(--line); background: var(--surface); cursor: pointer;
+  font: inherit; font-size: 12px; color: var(--text-2);
+  padding: 4px 11px; border-radius: var(--r-pill);
+}
+.chip-btn:hover { background: var(--hover); }
+.chip-btn svg { display: block; }
+.chip-btn.active {
+  background: var(--brand-soft); border-color: var(--brand-line);
+  color: var(--brand-ink); font-weight: 600;
+}
+
+/* ---------- form controls (native, one look everywhere) ---------- */
+input, select, textarea { font: inherit; color: var(--text); }
+input:not([type="checkbox"]):not([type="radio"]):not(.cell-edit), select, textarea {
+  border: 1px solid var(--line-strong); border-radius: var(--r-s);
+  background: var(--surface); padding: 6px 8px;
+}
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: none; border-color: var(--brand);
+}
+input.mini, select.mini {
+  padding: 4px 7px; font-size: 12.5px; border-radius: var(--r-s);
+}
+.pwfield { display: flex; align-items: center; gap: 4px; }
+.pwfield input { flex: 1; min-width: 0; }
+
+/* ---------- overlay panels ----------
+   Chat, SQL, Files, Settings and Tools share one grammar: they float over the
+   app on the right, with a .panel-head (title · actions · X) on top and an
+   optional .panel-foot. Open/close is the .open class — a transform slide
+   (display can't transition); visibility flips after the slide-out so hidden
+   panels are unreachable by focus/clicks. */
+.overlay-panel {
+  position: absolute; top: 0; right: 0; bottom: 0;
+  display: flex; flex-direction: column;
+  background: var(--surface-3); z-index: 10;
+  box-shadow: var(--shadow-panel);
+  border-left: 1px solid var(--line-strong);
+  transform: translateX(calc(100% + 32px));
+  visibility: hidden;
+  transition: transform .22s ease, visibility 0s linear .22s;
+}
+.overlay-panel.open {
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform .22s ease;
+}
+.panel-head {
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  padding: 8px 10px; border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+/* drag-resize handle on every panel's left edge */
+.panel-resizer {
+  position: absolute; left: -4px; top: 0; bottom: 0; width: 9px;
+  cursor: ew-resize; z-index: 20; touch-action: none;
+}
+.panel-resizer::after {
+  content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 3px;
+  background: transparent; transition: background .12s;
+}
+.panel-resizer:hover::after,
+.overlay-panel.resizing .panel-resizer::after { background: var(--brand); opacity: .5; }
+.overlay-panel.resizing { transition: none; }
+body.panel-resizing { cursor: ew-resize; user-select: none; }
+body.panel-resizing iframe { pointer-events: none; }
+@media (max-width: 700px) { .panel-resizer { display: none; } } /* panels are full-width there */
+.panel-title {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-weight: 600; font-size: 13.5px;
+}
+.panel-title svg { display: block; color: var(--text-2); }
+.panel-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px; }
+.panel-foot {
+  display: flex; gap: 8px; justify-content: flex-end; flex: 0 0 auto;
+  padding: 10px 16px; border-top: 1px solid var(--line-soft); background: var(--surface);
+}
+.panel-body label { display: block; font-size: 12px; color: var(--text-2); margin: 10px 0; }
+.panel-body label > input, .panel-body label > select, .panel-body label > .pwfield {
+  width: 100%; margin-top: 3px;
+}
+.panel-body hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
+.panel-body .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+
+/* ---------- dialogs ----------
+   Every dialog is a native <dialog class="dlg"> with .dlg-head / .dlg-body /
+   .dlg-foot. .dlg-s is the compact prompt variant (alerts, confirms, input). */
+dialog.dlg {
+  border: none; border-radius: var(--r-l); padding: 0;
+  background: var(--surface); color: var(--text);
+  box-shadow: var(--shadow-modal);
+  width: min(480px, 92vw); max-height: 86vh;
+}
+dialog.dlg[open] { display: flex; flex-direction: column; }
+dialog.dlg::backdrop { background: rgba(24, 29, 40, .45); }
+dialog.dlg.dlg-s { width: min(400px, 92vw); }
+.dlg-head {
+  display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+  padding: 10px 14px; border-bottom: 1px solid var(--line);
+}
+.dlg-head h2 {
+  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  margin: 0; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dlg-head h2 svg { display: block; color: var(--text-2); flex: 0 0 auto; }
+.dlg-body { padding: 12px 16px; overflow-y: auto; min-height: 0; }
+.dlg-body .dlg-msg { margin: 2px 0 4px; white-space: pre-wrap; }
+.dlg-body .dlg-input { width: 100%; margin-top: 6px; }
+.dlg-foot {
+  display: flex; gap: 8px; justify-content: flex-end; flex: 0 0 auto;
+  padding: 10px 16px; border-top: 1px solid var(--line-soft);
+}
+.dlg-body label { display: block; font-size: 12px; color: var(--text-2); margin: 10px 0; }
+.dlg-body label > input, .dlg-body label > select, .dlg-body label > .pwfield {
+  width: 100%; margin-top: 3px;
+}
+.dlg-body hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
+.dlg-body .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+
+/* ---------- context / overflow menus ---------- */
+.ctxmenu {
+  position: fixed; z-index: 60; min-width: 176px; padding: 5px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+}
+.ctxmenu button {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  border: none; background: none; font: inherit; font-size: 13px; cursor: pointer;
+  padding: 6px 9px; border-radius: 7px; color: var(--text);
+}
+.ctxmenu button:hover { background: var(--hover); }
+.ctxmenu button.danger { color: var(--err-ink); }
+.ctxmenu button.danger:hover { background: var(--err-wash); }
+.ctxmenu .ticon { display: inline-flex; color: var(--muted); }
+.ctxmenu button.danger .ticon { color: var(--err-ink); }
+.ctxsep { height: 1px; background: var(--line-soft); margin: 4px 2px; }
+
+/* ---------- small shared bits ---------- */
+.ticon { display: inline-flex; color: var(--text-2); }
+.ticon svg { display: block; }
+.tsection {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--faint); margin: 12px 0 4px; font-weight: 600;
+}
+.fmeta { font-size: 11px; color: var(--faint); white-space: nowrap; }
+.attchip {
+  display: inline-flex; align-items: center; gap: 3px;
+  background: var(--hover); border: 1px solid var(--line);
+  border-radius: var(--r-pill); padding: 1px 9px; font-size: 11px; margin: 2px 3px 0 0;
+}
+.attchip svg { display: block; }
+.attchip button { display: inline-flex; align-items: center; padding: 0; border: none; background: none; cursor: pointer; }
+
+#shutdown-overlay {
+  position: fixed; inset: 0; z-index: 50; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(29, 33, 41, .85); backdrop-filter: blur(2px);
+}
+#shutdown-overlay .card {
+  background: var(--surface); border-radius: 14px; padding: 26px 30px;
+  max-width: 26rem; text-align: center; box-shadow: 0 16px 50px rgba(0,0,0,.4);
+}
+#shutdown-overlay h2 { margin: 0 0 8px; font-size: 17px; }
+#shutdown-overlay p { margin: 6px 0; color: #444; }
+#shutdown-overlay .dim { color: var(--faint); font-size: 12px; }
+
+/* ---------- quality floor ---------- */
+:is(button, input, textarea, select):focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ---------- small screens ---------- */
+@media (max-width: 700px) {
+  .overlay-panel { width: 100vw !important; max-width: 100vw !important; border-left: none; }
+}
+
+/* ---------- touch ergonomics ---------- */
+/* Coarse pointer (phones/tablets, whatever the viewport width): grow every
+   tap target toward the ~40px comfortable minimum. Keyed on pointer type,
+   not width, so a narrow desktop window keeps its dense mouse layout. The
+   three shared button classes cover most of the shell; panels bump their
+   own bespoke controls under the same query. */
+@media (pointer: coarse) {
+  .btn { padding: 9px 16px; }
+  .btn.sm { padding: 7px 13px; }
+  .icon-btn { padding: 9px; }
+  .icon-btn.boxed { width: 40px; height: 40px; }
+  .chip-btn { padding: 8px 14px; }
+  input:not([type="checkbox"]):not([type="radio"]):not(.cell-edit), select, textarea {
+    padding: 9px 10px;
+  }
+  input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; }
+}

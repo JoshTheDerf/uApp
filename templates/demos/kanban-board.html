@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kanban Board</title>
+<script src="/uapp.js"></script>
+<style>
+  :root { --bg:#1e2230; --col:#272c3f; --card:#333a54; --ink:#eef1f8; --mut:#9aa3bd; --acc:#7c9cff; }
+  * { box-sizing:border-box }
+  body { margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--ink) }
+  .wrap { max-width:1000px; margin:0 auto; padding:20px 14px }
+  h1 { font-size:20px; margin:0 0 2px } .sub { color:var(--mut); font-size:12.5px; margin:0 0 16px }
+  form { display:flex; gap:8px; margin-bottom:16px }
+  input { flex:1; padding:9px 11px; border:1px solid #3d445f; border-radius:8px; background:var(--col); color:var(--ink); font:inherit }
+  button { border:none; border-radius:8px; background:var(--acc); color:#101528; font:inherit; font-weight:600; padding:9px 14px; cursor:pointer }
+  .board { display:grid; grid-template-columns:repeat(3,1fr); gap:12px }
+  .col { background:var(--col); border-radius:12px; padding:10px }
+  .col h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); margin:2px 4px 10px }
+  .card { background:var(--card); border-radius:9px; padding:9px 10px; margin-bottom:8px }
+  .card .t { word-break:break-word }
+  .card .row { display:flex; gap:4px; margin-top:6px }
+  .card .row button { background:#454e70; color:var(--ink); font-weight:400; font-size:12px; padding:3px 8px }
+  .card .row .del { background:none; color:#e08a8a; margin-left:auto }
+  @media (max-width:640px) { .board { grid-template-columns:1fr } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Kanban Board</h1>
+  <p class=”sub”>Tasks in SQLite. Ask the AI for reports or to add fields.</p>
+  <form id="f"><input id="t" placeholder="New task…" required><button>Add</button></form>
+  <div class="board" id="board"></div>
+</div>
+<script>
+const COLS = ["todo", "doing", "done"];
+const LABEL = { todo: "To do", doing: "In progress", done: "Done" };
+const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+
+uapp.action("add_task", {
+  description: "Add a task to the board. status: todo|doing|done (default todo). Returns {id}.",
+  params: { title: {type: "string"}, status: {type: "string", required: false} },
+}, async ({title, status}) => {
+  if (!title) throw new Error("title is required");
+  if (status && !COLS.includes(status)) throw new Error("status must be todo, doing or done");
+  const {insertId} = await uapp.exec(
+    "INSERT INTO tasks(title, status, created) VALUES(?,?,?)", [title, status || "todo", Date.now()]);
+  return {id: insertId};
+});
+uapp.action("move_task", {
+  description: "Move a task to another column. status: todo|doing|done.",
+  params: { id: {type: "number"}, status: {type: "string"} },
+}, async ({id, status}) => {
+  if (!COLS.includes(status)) throw new Error("status must be todo, doing or done");
+  await uapp.exec("UPDATE tasks SET status=? WHERE id=?", [status, id]);
+  return {ok: true};
+});
+uapp.action("delete_task", {
+  description: "Delete a task by id.",
+  params: { id: {type: "number"} },
+}, async ({id}) => { await uapp.exec("DELETE FROM tasks WHERE id=?", [id]); return {ok: true}; });
+uapp.action("board_summary", {
+  description: "Task counts per column plus every task title grouped by status.",
+  readonly: true, params: {},
+}, async () => {
+  const rows = (await uapp.query("SELECT status, title FROM tasks ORDER BY id")).rows;
+  const out = {todo: [], doing: [], done: []};
+  for (const r of rows) (out[r.status] || out.todo).push(r.title);
+  return {counts: Object.fromEntries(COLS.map((c) => [c, out[c].length])), tasks: out};
+});
+
+async function refresh() {
+  const rows = (await uapp.query("SELECT id, title, status FROM tasks ORDER BY id DESC")).rows;
+  document.getElementById("board").innerHTML = COLS.map((c) => `
+    <div class="col"><h2>${LABEL[c]} · ${rows.filter((r) => r.status === c).length}</h2>
+      ${rows.filter((r) => r.status === c).map((r) => `
+        <div class="card"><div class="t">${esc(r.title)}</div>
+          <div class="row">
+            ${c !== "todo" ? `<button data-mv="${COLS[COLS.indexOf(c)-1]}" data-id="${r.id}">◀ ${LABEL[COLS[COLS.indexOf(c)-1]]}</button>` : ""}
+            ${c !== "done" ? `<button data-mv="${COLS[COLS.indexOf(c)+1]}" data-id="${r.id}">${LABEL[COLS[COLS.indexOf(c)+1]]} ▶</button>` : ""}
+            <button class="del" data-del="${r.id}">×</button>
+          </div></div>`).join("")}
+    </div>`).join("");
+}
+document.getElementById("board").onclick = async (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.del) await uapp.call("delete_task", {id: Number(b.dataset.del)});
+  else if (b.dataset.mv) await uapp.call("move_task", {id: Number(b.dataset.id), status: b.dataset.mv});
+};
+document.getElementById("f").onsubmit = async (e) => {
+  e.preventDefault();
+  await uapp.call("add_task", {title: document.getElementById("t").value.trim()});
+  e.target.reset();
+};
+uapp.onChange(refresh);
+uapp.ready.then(refresh);
+</script>
+</body>
+</html>

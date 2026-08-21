@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uApp Demo</title>
+<script src="/uapp.js"></script>
+<style>
+  * { box-sizing:border-box }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,sans-serif; background:#fafafa; color:#1a1a1a; padding:20px }
+  .wrap { max-width:700px; margin:0 auto }
+  code { font:13px ui-monospace,monospace; background:#eee; padding:2px 5px; border-radius:3px }
+
+  h1 { font-size:20px; margin:0 0 10px }
+  p { margin:0 0 15px; line-height:1.6; color:#444 }
+
+  h2 { font-size:14px; margin:30px 0 10px; text-transform:uppercase; letter-spacing:0.5px; color:#888 }
+  ul { list-style:none; margin:0; padding:0 }
+  li { margin:0 0 8px }
+  li a { color:#0066cc; text-decoration:none }
+  li a:hover { text-decoration:underline }
+  .meta { font-size:12px; color:#888; margin-left:8px }
+  .web-link { font-size:12px; margin-left:8px }
+
+  .your-apps { margin-bottom:30px }
+  .your-apps button { margin:10px 0; padding:8px 14px; border:1px solid #ccc; background:#fff; border-radius:4px; cursor:pointer; font-size:13px }
+  .your-apps button:hover { background:#f5f5f5 }
+
+  .app-item { display:flex; align-items:center; padding:8px 0; border-bottom:1px solid #eee }
+  .app-item:last-child { border-bottom:none }
+  .app-item .emoji { margin-right:10px; font-size:18px }
+  .app-item .name { font-weight:500 }
+  .app-item .time { margin-left:auto; font-size:12px; color:#888 }
+  .app-item .actions { margin-left:15px; display:flex; gap:8px }
+  .app-item button { background:none; border:none; color:#666; cursor:pointer; padding:2px 6px; font-size:13px }
+  .app-item button:hover { color:#000 }
+
+  input[type=file] { display:none }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>uApp Demo</h1>
+  <p>
+    A <code>.uapp</code> file is a single-file application. It contains the UI, database, and files all together, like
+    a spreadsheet, but it runs like an app. Open it, edit it, share it via email or network share. No server needed.
+  </p>
+  <p>
+    These sample apps run entirely in your browser. Changes are saved locally. Download your modified copy to share with others.
+  </p>
+
+  <h2>Your apps</h2>
+  <div class="your-apps">
+    <button id="new-app">New blank app</button>
+    <button id="import-file">Open a .uapp file…</button>
+    <ul id="your-list"></ul>
+  </div>
+
+  <h2>Sample apps</h2>
+  <ul id="sample-list"></ul>
+
+  <h2>How it works</h2>
+  <p>
+    A <code>.uapp</code> file is a SQLite database containing:
+  </p>
+  <ul style="list-style:disc; padding-left:20px; line-height:1.6">
+    <li>Compressed web app files in sqlar archive format (the app UI)</li>
+    <li>Whatever tables and data the app stores (user data)</li>
+  </ul>
+  <p style="margin-bottom:30px">
+    When opened, a built-in web server serves the files in the <code>/app</code> folder and injects plumbing to let the app read and write to the database. Apps can also be modified with an integrated AI chat, SQL browser, and file editor.
+  </p>
+
+  <p style="font-size:13px; color:#666">
+    <a href="https://github.com/JoshTheDerf/uApp/#uapp--single-file-shareable-apps" target="_blank" rel="noopener">View project on GitHub</a>
+  </p>
+
+  <input type="file" id="file" accept=".uapp">
+</div>
+
+<script>
+const esc = (s) => String(s).replace(/[<>&"]/g, (c) => ({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+const ago = (t) => {
+  const m = Math.round((Date.now() - t) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return m + " min ago";
+  if (m < 48 * 60) return Math.round(m / 60) + " h ago";
+  return new Date(t).toLocaleDateString();
+};
+
+async function refreshYourApps() {
+  const { apps } = await uapp.rpc("host.apps");
+  const list = document.getElementById("your-list");
+  if (apps.length === 0) {
+    list.innerHTML = '<li style="color:#999; font-size:13px">No apps yet. Create one or open a sample.</li>';
+  } else {
+    list.innerHTML = apps.map((a) => `
+      <li class="app-item">
+        <span class="emoji">&#128196;</span>
+        <span class="name">${esc(a.name)}</span>
+        <span class="time">${ago(a.updated)}</span>
+        <div class="actions">
+          <button data-open="${a.id}" title="Open">Open</button>
+          <button data-dl="${a.id}" title="Download">&#8681;</button>
+          <button data-del="${a.id}" title="Delete">&#215;</button>
+        </div>
+      </li>
+    `).join("");
+  }
+}
+
+document.getElementById("new-app").onclick = async () => {
+  const name = prompt("App name:");
+  if (name) await uapp.rpc("host.create", { name });
+};
+
+document.getElementById("import-file").onclick = () => document.getElementById("file").click();
+
+document.getElementById("your-list").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  if (btn.dataset.del) {
+    if (confirm("Delete this app?")) {
+      await uapp.rpc("host.delete", { id: btn.dataset.del });
+    }
+  } else if (btn.dataset.dl) {
+    const { b64, name } = await uapp.rpc("host.export", { id: btn.dataset.dl });
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+    a.download = name + ".uapp";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } else if (btn.dataset.open) {
+    await uapp.rpc("host.open", { id: btn.dataset.open });
+  }
+});
+
+document.getElementById("file").onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const buf = new Uint8Array(await f.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < buf.length; i += 32768) {
+    bin += String.fromCharCode.apply(null, buf.subarray(i, i + 32768));
+  }
+  try {
+    await uapp.rpc("host.import", { name: f.name, b64: btoa(bin) });
+  } catch (err) { alert(err.message); }
+};
+
+uapp.query("SELECT name, url, emoji, description, website FROM samples ORDER BY rowid").then(({ rows }) => {
+  const list = document.getElementById("sample-list");
+  list.innerHTML = rows.map((s) => `
+    <li class="app-item">
+      <span class="emoji">${s.emoji || "&#127916;"}</span>
+      <a href="#" data-url="${s.url}" data-name="${esc(s.name)}">${esc(s.name)}</a>
+      ${s.description ? `<span class="meta">${esc(s.description)}</span>` : ""}
+      ${s.website ? `<a href="${esc(s.website)}" target="_blank" rel="noopener" class="web-link">website &#8599;</a>` : ""}
+    </li>
+  `).join("");
+
+  list.addEventListener("click", (e) => {
+    const a = e.target.closest("a");
+    if (!a || a.target === "_blank") return;
+    e.preventDefault();
+    uapp.rpc("host.sample", { url: a.dataset.url, name: a.dataset.name });
+  });
+});
+
+refreshYourApps();
+</script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{APP_NAME}} — uapp</title>
+<link rel="stylesheet" href="./shell.css">
+<link rel="icon" href="./icon-256.png">
+</head>
+<body>
+<!-- The shell is a set of Web Components; each bundles its template, style
+     and behavior in src/shell/js/<name>.js. shell.css carries the design
+     tokens and shared primitives (buttons, dialogs, menus, panels). -->
+<shell-topbar id="topbar"></shell-topbar>
+
+<main id="main">
+  <iframe id="appframe" src="/app/"></iframe>
+  <!-- Hidden eval context for the AI's run_js tool: uapp.js only, no app code.
+       Never reloaded, so scratch state survives across tool calls. -->
+  <iframe id="scratchframe" src="/scratch/" style="display:none" title="scratchpad"></iframe>
+
+  <!-- Overlay panels: the topbar button toggles, X / Esc closes, opening one
+       closes the others (they slide in/out; open state = .open). -->
+  <chat-panel id="sidebar" class="overlay-panel"></chat-panel>
+  <sql-panel id="sqlpanel" class="overlay-panel"></sql-panel>
+  <files-panel id="filebrowser" class="overlay-panel"></files-panel>
+  <settings-panel id="settingspanel" class="overlay-panel"></settings-panel>
+  <tools-panel id="toolspanel" class="overlay-panel"></tools-panel>
+</main>
+
+<file-viewer></file-viewer>
+
+<script src="./icons.js"></script>
+<script type="module" src="./shell/main.js"></script>
+</body>
+</html>

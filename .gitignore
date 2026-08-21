@@ -1,0 +1,25 @@
+/target
+
+# Local .uapp apps (they contain user data and API keys — never commit).
+# examples/ is the exception: generated sample apps, no credentials ever.
+*.uapp
+!examples/*.uapp
+*.uapp.sync/
+
+# Installer build staging (CI copies these in before running iscc)
+installer/windows/uapp.exe
+installer/windows/LICENSE.txt
+installer/windows/*-setup.exe
+
+# Tauri build-time codegen (JSON schemas). gen/android is a COMMITTED project
+# (the standard Tauri v2 workflow) — its own .gitignore excludes build output.
+/gen/schemas/
+
+.DS_Store
+.chat-tmp/
+
+# Local running-app artifacts (contain user data and live session tokens)
+serve
+serve.sync/
+*.addr
+dist-web/

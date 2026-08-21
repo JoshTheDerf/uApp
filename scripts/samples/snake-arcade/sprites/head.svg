@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- Snake head, drawn facing RIGHT; rotate at draw time per direction. -->
+  <defs>
+    <linearGradient id="skin" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#9dfcbb"/>
+      <stop offset="100%" stop-color="#4cd98c"/>
+    </linearGradient>
+  </defs>
+  <path d="M2 5 h10 a10 7 0 0 1 10 7 a10 7 0 0 1 -10 7 h-10 a3 3 0 0 1 -3 -3 v-8 a3 3 0 0 1 3 -3 z"
+        fill="url(#skin)" stroke="#2e9c5f" stroke-width="1"/>
+  <!-- eyes -->
+  <circle cx="13.5" cy="8.5" r="2.4" fill="#ffffff"/>
+  <circle cx="13.5" cy="15.5" r="2.4" fill="#ffffff"/>
+  <circle cx="14.5" cy="8.5" r="1.2" fill="#0d1220"/>
+  <circle cx="14.5" cy="15.5" r="1.2" fill="#0d1220"/>
+  <!-- tongue -->
+  <path d="M22 12 h2 M24 12 l-1.5 -1 M24 12 l-1.5 1" stroke="#ff5470" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+</svg>

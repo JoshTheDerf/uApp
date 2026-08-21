@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contact Book</title>
+<script src="/uapp.js"></script>
+<style>
+  :root { --bg:#f2f5f7; --card:#fff; --ink:#1d2b33; --mut:#7b8a94; --acc:#0f766e; }
+  * { box-sizing:border-box }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--ink) }
+  .wrap { max-width:720px; margin:0 auto; padding:24px 16px }
+  h1 { font-size:22px; margin:0 } .sub { color:var(--mut); font-size:13px; margin:2px 0 16px }
+  .bar { display:flex; gap:8px; margin-bottom:14px }
+  input, select { padding:9px 11px; border:1px solid #d7dfe4; border-radius:8px; font:inherit }
+  #q { flex:1 }
+  button { border:none; border-radius:8px; background:var(--acc); color:#fff; font:inherit; font-weight:600; padding:9px 14px; cursor:pointer }
+  form { display:flex; gap:8px; flex-wrap:wrap; background:var(--card); border-radius:12px; padding:12px; margin-bottom:16px;
+         box-shadow:0 1px 4px rgba(20,50,60,.08) }
+  form input { flex:1; min-width:130px }
+  .person { background:var(--card); border-radius:12px; padding:12px 16px; margin-bottom:10px;
+            box-shadow:0 1px 4px rgba(20,50,60,.08) }
+  .person b { font-size:15px } .person .tag { display:inline-block; background:#e0f2f0; color:var(--acc);
+    border-radius:20px; font-size:11px; padding:2px 9px; margin-left:8px; vertical-align:1px }
+  .person .meta { color:var(--mut); font-size:13px }
+  .person .note { font-size:13px; background:#f6f8f9; border-radius:8px; padding:6px 9px; margin-top:8px }
+  .person .note span { color:var(--mut); font-size:11px; display:block }
+  .person .actions { float:right } .person .actions button { background:none; color:var(--mut); font-weight:400; padding:2px 6px }
+  .person .actions button:hover { color:var(--ink) }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Contact Book</h1>
+  <p class=”sub”>A tiny CRM. Ask the AI to find contacts or add fields.</p>
+  <form id="add">
+    <input id="an" placeholder="Name" required>
+    <input id="ae" placeholder="Email" type="email">
+    <input id="at" placeholder="Tag (client, friend…)">
+    <button>Add contact</button>
+  </form>
+  <div class="bar"><input id="q" placeholder="Search name, email, tag, notes…"></div>
+  <div id="list"></div>
+</div>
+<script>
+const esc = (s) => String(s == null ? "" : s).replace(/[<>&]/g, (c) => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+
+uapp.action("add_contact", {
+  description: "Add a contact. Returns {id}.",
+  params: { name: {type: "string"}, email: {type: "string", required: false},
+            tag: {type: "string", required: false, description: "e.g. client, vendor, friend"} },
+}, async ({name, email, tag}) => {
+  if (!name) throw new Error("name is required");
+  const {insertId} = await uapp.exec(
+    "INSERT INTO contacts(name, email, tag, created) VALUES(?,?,?,?)",
+    [name, email || null, tag || null, Date.now()]);
+  return {id: insertId};
+});
+uapp.action("add_note", {
+  description: "Attach a dated note to a contact (call log, meeting, reminder).",
+  params: { contact_id: {type: "number"}, text: {type: "string"} },
+}, async ({contact_id, text}) => {
+  if (!text) throw new Error("text is required");
+  await uapp.exec("INSERT INTO notes(contact_id, text, ts) VALUES(?,?,?)", [contact_id, text, Date.now()]);
+  return {ok: true};
+});
+uapp.action("find_contacts", {
+  description: "Search contacts by name/email/tag/notes. Returns contacts with their latest note.",
+  readonly: true,
+  params: { query: {type: "string", required: false} },
+}, async ({query}) => {
+  const q = "%" + (query || "") + "%";
+  return (await uapp.query(`
+    SELECT c.id, c.name, c.email, c.tag,
+           (SELECT text FROM notes n WHERE n.contact_id = c.id ORDER BY ts DESC LIMIT 1) AS last_note,
+           (SELECT ts   FROM notes n WHERE n.contact_id = c.id ORDER BY ts DESC LIMIT 1) AS last_ts
+    FROM contacts c
+    WHERE c.name LIKE ?1 OR c.email LIKE ?1 OR COALESCE(c.tag,'') LIKE ?1
+       OR c.id IN (SELECT contact_id FROM notes WHERE text LIKE ?1)
+    ORDER BY c.name`, [q])).rows;
+});
+uapp.action("delete_contact", {
+  description: "Delete a contact and their notes.",
+  params: { id: {type: "number"} },
+}, async ({id}) => {
+  await uapp.exec("DELETE FROM notes WHERE contact_id=?", [id]);
+  await uapp.exec("DELETE FROM contacts WHERE id=?", [id]);
+  return {ok: true};
+});
+
+async function refresh() {
+  const rows = await uapp.call("find_contacts", {query: document.getElementById("q").value.trim()});
+  document.getElementById("list").innerHTML = rows.map((c) => `
+    <div class="person">
+      <div class="actions">
+        <button data-note="${c.id}" title="Add note">✎ note</button>
+        <button data-del="${c.id}" title="Delete">×</button>
+      </div>
+      <b>${esc(c.name)}</b>${c.tag ? `<span class="tag">${esc(c.tag)}</span>` : ""}
+      <div class="meta">${esc(c.email || "")}</div>
+      ${c.last_note ? `<div class="note">${esc(c.last_note)}<span>${new Date(c.last_ts).toLocaleDateString()}</span></div>` : ""}
+    </div>`).join("") || '<p style="color:var(--mut)">No matches.</p>';
+}
+document.getElementById("list").onclick = async (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.del && confirm("Delete this contact?")) await uapp.call("delete_contact", {id: Number(b.dataset.del)});
+  if (b.dataset.note) {
+    const text = prompt("Note:");
+    if (text) await uapp.call("add_note", {contact_id: Number(b.dataset.note), text});
+  }
+};
+document.getElementById("add").onsubmit = async (e) => {
+  e.preventDefault();
+  await uapp.call("add_contact", {
+    name: document.getElementById("an").value.trim(),
+    email: document.getElementById("ae").value.trim(),
+    tag: document.getElementById("at").value.trim(),
+  });
+  e.target.reset();
+};
+document.getElementById("q").oninput = () => { clearTimeout(window.__qt); window.__qt = setTimeout(refresh, 150); };
+uapp.onChange(refresh);
+uapp.ready.then(refresh);
+</script>
+</body>
+</html>

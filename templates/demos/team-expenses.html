@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Team Expenses</title>
+<script src="/uapp.js"></script>
+<style>
+  :root { --bg:#f5f6fa; --card:#fff; --ink:#1d2433; --mut:#7a8299; --acc:#3f6de6; }
+  * { box-sizing:border-box }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--ink) }
+  .wrap { max-width:720px; margin:0 auto; padding:24px 16px }
+  h1 { font-size:22px; margin:0 0 2px } .sub { color:var(--mut); font-size:13px; margin:0 0 18px }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:18px }
+  .card { background:var(--card); border-radius:12px; padding:14px 16px; box-shadow:0 1px 4px rgba(20,30,60,.08) }
+  .card b { display:block; font-size:20px } .card span { color:var(--mut); font-size:12px }
+  form { display:flex; gap:8px; flex-wrap:wrap; background:var(--card); padding:12px; border-radius:12px;
+         box-shadow:0 1px 4px rgba(20,30,60,.08); margin-bottom:18px }
+  input, select { flex:1; min-width:110px; padding:9px 10px; border:1px solid #d6dae6; border-radius:8px; font:inherit }
+  button { padding:9px 16px; border:none; border-radius:8px; background:var(--acc); color:#fff; font:inherit; cursor:pointer }
+  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:12px; overflow:hidden;
+          box-shadow:0 1px 4px rgba(20,30,60,.08) }
+  th, td { text-align:left; padding:10px 14px; border-bottom:1px solid #eef0f6; font-size:14px }
+  th { color:var(--mut); font-size:12px; text-transform:uppercase; letter-spacing:.04em }
+  td.amt, th.amt { text-align:right; font-variant-numeric:tabular-nums }
+  .del { background:none; color:#c33; padding:2px 6px; font-size:16px }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Team Expenses</h1>
+  <p class=”sub”>A sample uapp. Data lives in SQLite. The AI sidebar can filter, summarize, or check against the policy in data/.</p>
+  <div class="cards" id="cards"></div>
+  <form id="f">
+    <input id="what" placeholder="What was it?" required>
+    <select id="cat"><option>Travel</option><option>Meals</option><option>Software</option><option>Office</option><option>Other</option></select>
+    <input id="amt" type="number" step="0.01" min="0" placeholder="Amount" required style="max-width:120px">
+    <button>Add</button>
+  </form>
+  <table><thead><tr><th>Date</th><th>Description</th><th>Category</th><th class="amt">Amount</th><th></th></tr></thead>
+  <tbody id="rows"></tbody></table>
+</div>
+<script>
+const fmt = (n) => "$" + Number(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+uapp.action("add_expense", {
+  description: "Record one expense. date is YYYY-MM-DD (defaults to today). Returns {id}.",
+  params: {
+    description: {type: "string"},
+    category: {type: "string", description: "Travel | Meals | Software | Office | Other"},
+    amount: {type: "number"},
+    date: {type: "string", required: false, description: "YYYY-MM-DD"},
+  },
+}, async ({description, category, amount, date}) => {
+  if (!description || !(amount > 0)) throw new Error("description and a positive amount are required");
+  const d = date || new Date().toISOString().slice(0, 10);
+  const {insertId} = await uapp.exec(
+    "INSERT INTO expenses(date, description, category, amount) VALUES(?,?,?,?)",
+    [d, description, category || "Other", amount]);
+  return {id: insertId};
+});
+
+uapp.action("delete_expense", {
+  description: "Delete one expense by id.",
+  params: {id: {type: "number"}},
+}, async ({id}) => {
+  await uapp.exec("DELETE FROM expenses WHERE id = ?", [id]);
+  return {ok: true};
+});
+
+uapp.action("spending_summary", {
+  description: "Totals: overall, this month, and per category.",
+  readonly: true, params: {},
+}, async () => {
+  const month = new Date().toISOString().slice(0, 7);
+  const total = (await uapp.query("SELECT COALESCE(SUM(amount),0) AS t FROM expenses")).rows[0].t;
+  const thisMonth = (await uapp.query(
+    "SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE date LIKE ? || '%'", [month])).rows[0].t;
+  const byCat = (await uapp.query(
+    "SELECT category, SUM(amount) AS total FROM expenses GROUP BY category ORDER BY total DESC")).rows;
+  return {total, thisMonth, byCategory: byCat};
+});
+
+async function refresh() {
+  const s = await uapp.call("spending_summary", {});
+  const top = s.byCategory[0];
+  document.getElementById("cards").innerHTML = `
+    <div class="card"><b>${fmt(s.total)}</b><span>All time</span></div>
+    <div class="card"><b>${fmt(s.thisMonth)}</b><span>This month</span></div>
+    <div class="card"><b>${top ? top.category : "—"}</b><span>Top category${top ? " (" + fmt(top.total) + ")" : ""}</span></div>`;
+  const rows = (await uapp.query(
+    "SELECT id, date, description, category, amount FROM expenses ORDER BY date DESC, id DESC LIMIT 200")).rows;
+  document.getElementById("rows").innerHTML = rows.map((r) => `
+    <tr><td>${r.date}</td><td>${r.description.replace(/[<>&]/g, (c) => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]))}</td>
+    <td>${r.category}</td><td class="amt">${fmt(r.amount)}</td>
+    <td><button class="del" data-id="${r.id}" title="delete">×</button></td></tr>`).join("");
+}
+
+document.getElementById("f").onsubmit = async (e) => {
+  e.preventDefault();
+  await uapp.call("add_expense", {
+    description: document.getElementById("what").value.trim(),
+    category: document.getElementById("cat").value,
+    amount: Number(document.getElementById("amt").value),
+  });
+  e.target.reset();
+};
+document.getElementById("rows").onclick = async (e) => {
+  const id = e.target.dataset && e.target.dataset.id;
+  if (id) await uapp.call("delete_expense", {id: Number(id)});
+};
+uapp.onChange(refresh);
+uapp.ready.then(refresh);
+</script>
+</body>
+</html>

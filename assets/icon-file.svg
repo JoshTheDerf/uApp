@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- .uapp file-type icon (placeholder): a document with the u mark. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="pg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef2f9"/>
+    </linearGradient>
+  </defs>
+  <!-- page with folded corner -->
+  <path d="M120 40 h200 l72 72 v344 a16 16 0 0 1 -16 16 H120 a16 16 0 0 1 -16 -16 V56 a16 16 0 0 1 16 -16 z"
+        fill="url(#pg)" stroke="#94a3b8" stroke-width="12"/>
+  <path d="M320 40 l72 72 h-60 a12 12 0 0 1 -12 -12 z" fill="#cbd5e1" stroke="#94a3b8" stroke-width="12" stroke-linejoin="round"/>
+  <!-- u badge -->
+  <rect x="164" y="216" width="184" height="184" rx="44" fill="#2563eb"/>
+  <path d="M222 268 v52 a34 34 0 0 0 68 0 v-52"
+        fill="none" stroke="#ffffff" stroke-width="24" stroke-linecap="round"/>
+  <path d="M290 320 v30" fill="none" stroke="#ffffff" stroke-width="24" stroke-linecap="round"/>
+  <!-- data dots -->
+  <circle cx="205" cy="452" r="14" fill="#94a3b8"/>
+  <circle cx="256" cy="452" r="14" fill="#94a3b8"/>
+  <circle cx="307" cy="452" r="14" fill="#94a3b8"/>
+</svg>

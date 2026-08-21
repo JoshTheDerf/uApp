@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New App</title>
+<style>
+  body { font-family: system-ui, sans-serif; display: flex; align-items: center;
+         justify-content: center; min-height: 90vh; background: #f6f7f9; color: #333;
+         margin: 0; padding: 1rem; box-sizing: border-box; }
+  .card { width: 100%; max-width: 30rem; text-align: center; padding: clamp(1rem, 4vw, 2rem);
+          background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+  h1 { font-size: clamp(1.1rem, 4.5vw, 1.3rem); }
+  p { line-height: 1.5; color: #555; font-size: clamp(.9rem, 3.5vw, 1rem); }
+  code { background: #eef1f4; padding: .1em .35em; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <script src="/uapp.js"></script>
+  <div class="card">
+    <h1>This app is empty</h1>
+    <p>Open the chat (message icon, top right) and describe what you want to build.
+       For example, <em>&ldquo;a job tracker with customer, status and due date.&rdquo;</em></p>
+    <p>You can also drag a CSV or spreadsheet into the chat to import data.</p>
+    <p style=”font-size:.9em;color:#788”>Apps come with built-in components
+       (tables, sidebars, charts) so they look polished right away.</p>
+  </div>
+</body>
+</html>

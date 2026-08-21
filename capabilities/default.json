@@ -1,0 +1,7 @@
+{
+  "$schema": "gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Baseline capability. The UApp UI talks to the embedded server, not the Tauri JS API, so almost no permissions are needed.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

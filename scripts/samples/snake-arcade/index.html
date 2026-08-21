@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Snake Arcade</title>
+  <script src="/uapp.js"></script>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🐍 Snake Arcade</h1>
+      <div class="hud">
+        <span>Score <b id="score">0</b></span>
+        <span>Level <b id="level">1</b> <em id="level-name"></em></span>
+        <span>Best <b id="best">0</b></span>
+      </div>
+    </header>
+
+    <main>
+      <div class="stage">
+        <canvas id="board" width="500" height="480"></canvas>
+
+        <!-- overlay shown when paused / game over / at start -->
+        <div class="overlay" id="overlay">
+          <h2 id="overlay-title">Snake Arcade</h2>
+          <p id="overlay-msg">Arrows / WASD to move · Space to pause</p>
+          <form id="score-form" class="hidden" autocomplete="off">
+            <input id="player-name" maxlength="24" placeholder="Your name" required>
+            <button type="submit">Save score</button>
+          </form>
+          <p id="save-result" class="hidden"></p>
+          <div class="overlay-actions">
+            <button id="btn-start" type="button">Play</button>
+            <button id="btn-resume" type="button" class="hidden">Resume</button>
+          </div>
+        </div>
+
+        <!-- on-screen controls for touch devices -->
+        <div class="pad" id="pad">
+          <button data-dir="up" aria-label="Up">▲</button>
+          <div class="pad-row">
+            <button data-dir="left" aria-label="Left">◀</button>
+            <button id="pause-btn" aria-label="Pause">⏸</button>
+            <button data-dir="right" aria-label="Right">▶</button>
+          </div>
+          <button data-dir="down" aria-label="Down">▼</button>
+        </div>
+      </div>
+
+      <aside class="leaderboard">
+        <h2>Top 10</h2>
+        <ol id="scores"></ol>
+      </aside>
+    </main>
+  </div>
+
+  <script src="js/game.js"></script>
+</body>
+</html>

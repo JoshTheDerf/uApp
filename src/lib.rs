@@ -1,0 +1,329 @@
+//! uapp core, exposed as a library so the native Tauri shells — the PRIMARY
+//! UApp experience, desktop and mobile (`--features gui`) — embed the exact
+//! same engine + server + UI. The CLI in `main.rs` wraps the same server and
+//! uses the system browser only as the fallback shell.
+
+pub mod ai;
+pub mod app;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cipher;
+pub mod engine;
+#[cfg(feature = "gui")]
+pub mod gui;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod install;
+pub mod mcp;
+pub mod native;
+pub mod net;
+pub mod prefs;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod registry;
+pub mod rpc;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod server;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod shortcut;
+pub mod store;
+pub mod tools;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::{Context, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicBool;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::sync::broadcast;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native_serve {
+use super::*;
+
+/// Called once the server is listening: `(url, port, reused)`. The CLI uses it
+/// to open a browser or print JSON; an embedder uses it to load the URL into a
+/// webview.
+pub type OnReady = Box<dyn FnOnce(&str, u16, bool) + Send>;
+
+/// Stable per-user-per-machine device id, e.g. "karen-a3f9k2".
+/// UAPP_DEVICE overrides (useful for testing several "devices" on one box).
+pub fn device_id() -> Result<String> {
+    if let Ok(d) = std::env::var("UAPP_DEVICE") {
+        if !d.is_empty() {
+            return Ok(d);
+        }
+    }
+    let dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("uapp");
+    std::fs::create_dir_all(&dir)?;
+    let f = dir.join("device");
+    if let Ok(s) = std::fs::read_to_string(&f) {
+        let s = s.trim().to_string();
+        if !s.is_empty() {
+            return Ok(s);
+        }
+    }
+    let user: String = whoami::username()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(12)
+        .collect::<String>()
+        .to_lowercase();
+    let rand: String = (0..6).map(|_| fastrand::lowercase()).collect();
+    let id = format!("{}-{}", if user.is_empty() { "user".into() } else { user }, rand);
+    std::fs::write(&f, &id)?;
+    Ok(id)
+}
+
+/// If this machine already serves this file, the running server can be reused.
+/// Returns its `(url, port)` if it is healthy.
+fn reusable_server(path: &Path) -> Option<(String, u16)> {
+    let (port, token) = registry::read_addr(path)?;
+    let url = format!("http://127.0.0.1:{port}/?t={token}");
+    let health = ureq::get(&format!("http://127.0.0.1:{port}/health"))
+        .timeout(std::time::Duration::from_millis(1500))
+        .call()
+        .is_ok();
+    if !health {
+        return None;
+    }
+    Some((url, port))
+}
+
+/// Open a .uapp and serve it on 127.0.0.1. Blocks until the server exits.
+/// `on_ready` fires once the listener is bound (or a reusable server is found).
+/// `unsaved` marks a scratch app (opened with no file) so the shell shows a
+/// "not saved yet — download to keep it" banner.
+pub fn serve_opts(
+    path: PathBuf,
+    fixed_port: u16,
+    unsaved: bool,
+    passphrase: Option<String>,
+    on_ready: OnReady,
+) -> Result<()> {
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let device = device_id()?;
+    let user = {
+        let real = whoami::realname();
+        if real.trim().is_empty() { whoami::username() } else { real }
+    };
+
+    let token: String = (0..32).map(|_| fastrand::alphanumeric()).collect();
+    let rt = tokio::runtime::Runtime::new()?;
+    let mut passphrase = passphrase;
+    let mut on_ready = Some(on_ready);
+
+    // Bind the app's socket up front. It's already listening, so a request sent
+    // to it (the unlock page's redirect) just queues until we start serving —
+    // no re-binding or polling needed.
+    let listener = rt.block_on(tokio::net::TcpListener::bind(("127.0.0.1", fixed_port)))?;
+    let port = listener.local_addr()?.port();
+    let app_url = format!("http://127.0.0.1:{port}/?t={token}");
+
+    // Encrypted file without a usable password? Show a small web unlock page —
+    // the prompt the browser and Tauri window get instead of failing — and
+    // block until it's entered. On success it redirects to the app server above.
+    if store::is_encrypted_file(&path) {
+        let have_valid = passphrase
+            .as_deref()
+            .map_or(false, |pw| crate::cipher::open_file(&path, pw).is_ok());
+        if !have_valid {
+            // Already open (and unlocked) on this machine? Redirect to it
+            // instead of prompting a second time.
+            if let Some((url, port)) = reusable_server(&path) {
+                if let Some(or) = on_ready.take() {
+                    or(&url, port, true);
+                }
+                return Ok(());
+            }
+            // Point the browser / native window at the app URL now: the same
+            // socket serves the unlock page until it's unlocked, then the app.
+            if let Some(or) = on_ready.take() {
+                or(&app_url, port, false);
+            }
+            passphrase = Some(rt.block_on(server::run_unlock(&listener, &path))?);
+        }
+    }
+
+    let opened =
+        engine::Engine::open_with_passphrase(path.clone(), device.clone(), user.clone(), passphrase);
+    let eng = match opened {
+        Ok(e) => e,
+        Err(e) => {
+            // Locked (or a race): another instance has this file open — hand
+            // the caller its window instead.
+            if let Some((url, port)) = reusable_server(&path) {
+                if let Some(or) = on_ready.take() {
+                    or(&url, port, true);
+                }
+                return Ok(());
+            }
+            return Err(e).with_context(|| format!("opening {}", path.display()));
+        }
+    };
+    let name = store::meta_get(&eng.db, "name")?
+        .unwrap_or_else(|| "uapp".into());
+    let (events, _) = broadcast::channel(1024);
+    let app = Arc::new(app::App {
+        engine: Mutex::new(eng),
+        events,
+        token: token.clone(),
+        name,
+        ai_runs: Mutex::new(std::collections::HashMap::new()),
+        unsaved: AtomicBool::new(unsaved),
+        ai_mode: Mutex::new("auto".into()),
+        pending: Mutex::new(std::collections::HashMap::new()),
+        questions: Mutex::new(std::collections::HashMap::new()),
+        always_allow: Mutex::new(std::collections::HashSet::new()),
+        clients: std::sync::atomic::AtomicUsize::new(0),
+        port: std::sync::atomic::AtomicU16::new(0),
+        conns: Mutex::new(std::collections::HashMap::new()),
+        actions: Mutex::new(std::collections::HashMap::new()),
+        invokes: Mutex::new(std::collections::HashMap::new()),
+        drops: Mutex::new(std::collections::HashMap::new()),
+        contexts: Mutex::new(Vec::new()),
+        console: Mutex::new(std::collections::VecDeque::new()),
+        console_seq: std::sync::atomic::AtomicU64::new(0),
+        console_gen: std::sync::atomic::AtomicU64::new(0),
+        console_ack: std::sync::atomic::AtomicU64::new(0),
+    });
+
+    // Native window only: forward OS file drops to the shell (see native.rs +
+    // App::native_drop). The webview never gets HTML5 drop events for them, so
+    // this is the path that makes drag-and-drop work in the desktop app.
+    {
+        let app = app.clone();
+        native::install_drop_sink(Box::new(move |info| app.native_drop(info)));
+    }
+
+    rt.block_on(async move {
+        // The socket was bound up front (and may have just served the unlock
+        // page); the app now takes it over — same port, no rebind.
+        app.port.store(port, std::sync::atomic::Ordering::Relaxed);
+        let url = app_url;
+
+        // Advertise for double-open reuse (rewritten by app.save when the
+        // backing file changes — see rpc.rs).
+        {
+            let eng = app.engine.lock().unwrap();
+            registry::write_addr(&eng.path, port, &token);
+        }
+
+        // Background snapshot timer: refresh the rolling rescue snapshot while
+        // writes keep happening (commits themselves are already durable).
+        {
+            let app = app.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tick.tick().await;
+                    let app2 = app.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        app2.engine.lock().unwrap().maybe_snapshot();
+                    })
+                    .await;
+                }
+            });
+        }
+
+        // Exit when the last browser tab disconnects (or none ever connects).
+        // The op log makes this always safe — nothing in memory is precious.
+        {
+            let app = app.clone();
+            // "never" disables this entirely — used by the mobile GUI (gui.rs):
+            // there the OS owns the process lifecycle, and Android suspends the
+            // WebView (dropping every socket, freezing every timer) whenever
+            // the app is backgrounded. Exiting on zero clients there would kill
+            // an in-flight AI turn the moment the user switches apps for a
+            // couple of minutes.
+            let linger_never = std::env::var("UAPP_LINGER_SECS")
+                .map(|v| v.eq_ignore_ascii_case("never") || v.eq_ignore_ascii_case("off"))
+                .unwrap_or(false);
+            let linger_ms: u64 = std::env::var("UAPP_LINGER_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(90)
+                * 1000;
+            if !linger_never {
+                tokio::spawn(async move {
+                let mut zero_since = Some(std::time::Instant::now());
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+                loop {
+                    tick.tick().await;
+                    let n = app.clients.load(std::sync::atomic::Ordering::SeqCst);
+                    if n > 0 {
+                        zero_since = None;
+                        continue;
+                    }
+                    let since = *zero_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed().as_millis() as u64 >= linger_ms
+                        && !app.ai_busy_any()
+                    {
+                        eprintln!("uapp: last client disconnected — shutting down");
+                        app.graceful_cleanup();
+                        // A native window whose webview dropped the socket
+                        // (frozen/suspended) may still be up — close it too.
+                        crate::native::dispatch(crate::native::NativeReq::Close);
+                        std::process::exit(0);
+                    }
+                }
+                });
+            }
+        }
+
+        if let Some(or) = on_ready {
+            or(&url, port, false);
+        }
+
+        // The native desktop window's close (X button) runs the same cleanup
+        // via this hook before the process exits with the window.
+        crate::native::install_shutdown(Box::new({
+            let app = app.clone();
+            move || app.graceful_cleanup()
+        }));
+
+        let router = server::router(app.clone());
+        let shutdown_app = app.clone();
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                shutdown_app.graceful_cleanup();
+                eprintln!("uapp: shutting down");
+            })
+            .await?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+/// Embedder entry (native shells): open `path` on a background thread and
+/// return the URL to load into a webview once the server is listening. The
+/// server runs until the process exits.
+pub fn serve_background(path: PathBuf, fixed_port: u16, unsaved: bool) -> Result<String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    std::thread::spawn(move || {
+        let tx2 = tx.clone();
+        let on_ready: OnReady = Box::new(move |url, _port, _reused| {
+            let _ = tx2.send(Ok(url.to_string()));
+        });
+        if let Err(e) = serve_opts(path, fixed_port, unsaved, None, on_ready) {
+            let _ = tx.send(Err(format!("{e:#}")));
+        }
+    });
+    match rx.recv() {
+        Ok(Ok(url)) => Ok(url),
+        Ok(Err(e)) => anyhow::bail!("{e}"),
+        Err(_) => anyhow::bail!("server thread exited before binding"),
+    }
+}
+
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_serve::*;

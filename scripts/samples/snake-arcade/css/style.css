@@ -1,0 +1,135 @@
+/* Snake Arcade — dark arcade look, mobile-friendly down to 380px. */
+* { box-sizing: border-box; margin: 0; }
+
+body {
+  background: #090c16;
+  color: #e8ecf6;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  min-height: 100vh;
+  padding: 16px;
+}
+
+.wrap { max-width: 860px; margin: 0 auto; }
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 20px;
+  margin-bottom: 14px;
+}
+h1 { font-size: 1.4rem; letter-spacing: 0.02em; }
+.hud { display: flex; gap: 16px; font-size: 0.9rem; color: #9aa5c0; }
+.hud b { color: #7cf7a4; font-variant-numeric: tabular-nums; }
+.hud em { font-style: normal; color: #c6cee4; }
+
+main { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+
+.stage { position: relative; flex: 1 1 320px; min-width: 0; }
+
+canvas {
+  display: block;
+  width: 100%;
+  max-width: 500px;
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid #232c48;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  touch-action: none;
+}
+
+/* overlay (start / pause / game over) */
+.overlay {
+  position: absolute;
+  inset: 0;
+  max-width: 500px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(9, 12, 22, 0.82);
+  backdrop-filter: blur(3px);
+  border-radius: 12px;
+  text-align: center;
+  padding: 16px;
+}
+.overlay h2 { font-size: 1.6rem; color: #7cf7a4; }
+.overlay p { color: #9aa5c0; font-size: 0.9rem; }
+.hidden { display: none !important; }
+
+button {
+  font: inherit;
+  color: #0d1220;
+  background: #7cf7a4;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 20px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:active { transform: scale(0.97); }
+
+#score-form { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+#score-form input {
+  font: inherit;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #33406a;
+  background: #131a2e;
+  color: #e8ecf6;
+  width: 160px;
+}
+#save-result { color: #7cf7a4 !important; }
+
+.overlay-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+#btn-resume { background: #1a2440; color: #7cf7a4; border: 1px solid #2e9c5f; }
+
+/* touch pad — hidden where hover (mouse) is available */
+.pad {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 14px;
+  user-select: none;
+}
+.pad-row { display: flex; gap: 6px; }
+.pad button {
+  width: 58px;
+  height: 48px;
+  background: #1a2440;
+  color: #c6cee4;
+  border: 1px solid #2c3a63;
+  font-size: 1.1rem;
+}
+@media (hover: none) and (pointer: coarse) {
+  .pad { display: flex; }
+}
+
+/* leaderboard */
+.leaderboard {
+  flex: 0 1 260px;
+  background: #10162a;
+  border: 1px solid #232c48;
+  border-radius: 12px;
+  padding: 14px 16px;
+  min-width: 220px;
+}
+.leaderboard h2 { font-size: 0.95rem; color: #9aa5c0; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
+.leaderboard ol { padding-left: 1.4em; }
+.leaderboard li {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.9rem;
+}
+.leaderboard li .p { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.leaderboard li .s { color: #7cf7a4; font-variant-numeric: tabular-nums; }
+.leaderboard li .l { color: #667096; font-size: 0.8rem; }
+.leaderboard li.empty { color: #667096; border: none; list-style: none; }
+
+@media (max-width: 640px) {
+  .leaderboard { flex: 1 1 100%; }
+}

@@ -1,0 +1,213 @@
+name: Release
+
+# Tag a commit `v*` (e.g. v0.1.0) to build binaries for every platform and
+# attach them to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Desktop GUI builds — gui is the default feature.
+          # Linux — gnu build on the oldest supported runner for broad glibc
+          # compatibility (Ubuntu/Debian/Fedora/openSUSE/...).
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: uapp-linux-x86_64
+            packages: libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev
+          # macOS
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: uapp-macos-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: uapp-macos-x86_64
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: uapp-windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system packages
+        if: matrix.packages
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+      # Vendored OpenSSL (for SQLCipher) assembles with NASM on Windows; Perl is
+      # already on the runners. Linux/macOS use their system assemblers.
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # gui is the default feature, so no explicit --features needed.
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist/${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/uapp dist/${{ matrix.artifact }}/
+          cp LICENSE README.md dist/${{ matrix.artifact }}/
+          tar -C dist -czf dist/${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/${{ matrix.artifact }} | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/uapp.exe dist/${{ matrix.artifact }}/
+          Copy-Item LICENSE,README.md dist/${{ matrix.artifact }}/
+          Compress-Archive -Path dist/${{ matrix.artifact }} -DestinationPath dist/${{ matrix.artifact }}.zip
+      - name: Build Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $ver = "${{ github.ref_name }}" -replace '^v',''
+          if (-not $ver) { $ver = "0.0.0" }
+          $stage = "installer/windows"
+          Copy-Item target/${{ matrix.target }}/release/uapp.exe $stage/
+          Copy-Item LICENSE "$stage/LICENSE.txt"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$ver" "$stage/uapp.iss"
+          Copy-Item "$stage/uapp-setup.exe" dist/uapp-windows-x86_64-setup.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*-setup.exe
+
+  # Android APK, built from the committed gen/android project for all
+  # realistic device ABIs, then signed with apksigner. The signing keystore
+  # comes from repo secrets (ANDROID_KEYSTORE_BASE64 & co.) so the signature
+  # is stable across releases — without it an ephemeral keystore is generated
+  # (installable, but upgrades need an uninstall first).
+  build-android:
+    name: Android APK (universal)
+    runs-on: ubuntu-24.04
+    env:
+      NDK_VERSION: 27.1.12297006
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2.11.4
+      - name: Add Rust Android targets
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+      # The hosted runners no longer ship Android cmdline-tools, so install
+      # them (provides sdkmanager on PATH + ANDROID_HOME).
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK pieces (NDK ${{ env.NDK_VERSION }})
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "ndk;${NDK_VERSION}" "build-tools;36.0.0" "platforms;android-36" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      # Vendored OpenSSL (SQLCipher) invokes the legacy unprefixed binutils
+      # names that NDK r24+ no longer ships — symlink them to the LLVM tools.
+      - name: NDK binutils symlinks (vendored OpenSSL)
+        run: |
+          NDKBIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for p in aarch64-linux-android armv7a-linux-androideabi armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
+            for t in ar ranlib strip nm objdump readelf; do
+              ln -sf "llvm-$t" "$NDKBIN/$p-$t"
+            done
+          done
+          echo "$NDKBIN" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-aarch64
+      # The gradle glue invokes the CLI as `cargo tauri android
+      # android-studio-script`, so it must be installed as cargo-tauri (the
+      # npm-distributed `tauri` shim can't serve that). rust-cache caches
+      # ~/.cargo/bin, so this compiles once and is restored afterwards.
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      # gen/android is committed (the standard Tauri v2 workflow) — no init or
+      # patching; MainActivity/manifest/icons are edited in place in the repo.
+      # gui is the default feature.
+      - name: Build release APK
+        run: |
+          cargo tauri android build --apk \
+            --target aarch64 armv7 x86_64
+      - name: Sign APKs
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > release.keystore
+          else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret — using an ephemeral keystore (upgrades will require uninstall)."
+            KEYSTORE_PASSWORD=uapp-ci
+            KEY_ALIAS=uapp
+            KEY_PASSWORD=uapp-ci
+            keytool -genkeypair -keystore release.keystore -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 4096 -validity 10950 \
+              -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=UApp Release, OU=uApp, O=JoshTheDerf, C=US"
+          fi
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          mkdir -p dist
+          find gen/android/app/build/outputs/apk -name '*.apk' | while read -r apk; do
+            case "$apk" in
+              *universal*)  out=uapp-android-universal.apk ;;
+              *aarch64*)    out=uapp-android-arm64-v8a.apk ;;
+              *armv7*)      out=uapp-android-armeabi-v7a.apk ;;
+              *x86_64*)     out=uapp-android-x86_64.apk ;;
+              *i686*|*x86*) out=uapp-android-x86.apk ;;
+              *)            out=uapp-android.apk ;;
+            esac
+            echo "Signing $apk -> dist/$out"
+            "$BT/zipalign" -f -p 4 "$apk" "dist/$out"
+            "$BT/apksigner" sign --ks release.keystore --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass "pass:$KEYSTORE_PASSWORD" --key-pass "pass:$KEY_PASSWORD" \
+              "dist/$out"
+          done
+          rm -f release.keystore
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uapp-android
+          path: dist/*.apk
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [build, build-android]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -1,0 +1,44 @@
+[
+  {
+    "name": "Team Expenses",
+    "file": "team-expenses.uapp",
+    "emoji": "💵",
+    "description": "Expense tracker with actions",
+    "website": null
+  },
+  {
+    "name": "Kanban Board",
+    "file": "kanban-board.uapp",
+    "emoji": "🗂️",
+    "description": "Task board",
+    "website": null
+  },
+  {
+    "name": "Habit Tracker",
+    "file": "habit-tracker.uapp",
+    "emoji": "🔥",
+    "description": "Check-in grid with streaks",
+    "website": null
+  },
+  {
+    "name": "Contact Book",
+    "file": "contact-book.uapp",
+    "emoji": "📇",
+    "description": "Contacts with tags and notes",
+    "website": null
+  },
+  {
+    "name": "Snake Arcade",
+    "file": "snake-arcade.uapp",
+    "emoji": "🐍",
+    "description": "Canvas snake game with SQL leaderboard",
+    "website": null
+  },
+  {
+    "name": "CubbyCAD",
+    "file": "CubbyCAD.uapp",
+    "emoji": "🧊",
+    "description": "A friendly web CAD package, with CSG, SDF primitives, and sculpting.",
+    "website": "https://cubbycad.com"
+  }
+]

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Habit Tracker</title>
+<script src="/uapp.js"></script>
+<style>
+  :root { --bg:#f7f5f0; --card:#fff; --ink:#2c2a26; --mut:#8d887e; --on:#3aa06b; --off:#e8e4dc; }
+  * { box-sizing:border-box }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--ink) }
+  .wrap { max-width:680px; margin:0 auto; padding:24px 16px }
+  h1 { font-size:22px; margin:0 } .sub { color:var(--mut); font-size:13px; margin:2px 0 18px }
+  form { display:flex; gap:8px; margin-bottom:16px }
+  input { flex:1; padding:9px 11px; border:1px solid #ddd8ce; border-radius:8px; font:inherit }
+  button { border:none; border-radius:8px; background:var(--on); color:#fff; font:inherit; font-weight:600; padding:9px 14px; cursor:pointer }
+  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:12px; overflow:hidden;
+          box-shadow:0 1px 4px rgba(60,50,30,.08) }
+  th, td { padding:10px 8px; border-bottom:1px solid #f0ede6; text-align:center; font-size:13px }
+  th:first-child, td:first-child { text-align:left; padding-left:14px }
+  th { color:var(--mut); font-size:11px; text-transform:uppercase }
+  .dot { width:26px; height:26px; border-radius:50%; border:none; background:var(--off); cursor:pointer; font-size:13px }
+  .dot.on { background:var(--on); color:#fff }
+  .streak { color:var(--mut); font-size:12px }
+  .rm { background:none; border:none; color:#c66; cursor:pointer; font-size:15px }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Habit Tracker</h1>
+  <p class=”sub”>Tap to log today or the last 7 days. Ask the AI for streaks or charts.</p>
+  <form id="f"><input id="n" placeholder="New habit…" required><button>Add</button></form>
+  <table><thead id="head"></thead><tbody id="body"></tbody></table>
+</div>
+<script>
+const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+const dstr = (d) => d.toISOString().slice(0, 10);
+const days = () => Array.from({length: 7}, (_, i) => { const d = new Date(); d.setDate(d.getDate() - (6 - i)); return dstr(d); });
+
+uapp.action("add_habit", {
+  description: "Add a habit to track. Returns {id}.",
+  params: { name: {type: "string"} },
+}, async ({name}) => {
+  if (!name) throw new Error("name is required");
+  const {insertId} = await uapp.exec("INSERT INTO habits(name, created) VALUES(?,?)", [name, Date.now()]);
+  return {id: insertId};
+});
+uapp.action("log_habit", {
+  description: "Mark a habit done (or not) on a date. date YYYY-MM-DD (default today), done true/false (default true).",
+  params: { habit_id: {type: "number"}, date: {type: "string", required: false}, done: {type: "boolean", required: false} },
+}, async ({habit_id, date, done}) => {
+  const d = date || dstr(new Date());
+  if (done === false) await uapp.exec("DELETE FROM checkins WHERE habit_id=? AND date=?", [habit_id, d]);
+  else await uapp.exec("INSERT OR IGNORE INTO checkins(habit_id, date) VALUES(?,?)", [habit_id, d]);
+  return {ok: true, date: d};
+});
+uapp.action("habit_stats", {
+  description: "Per habit: total check-ins and current streak (consecutive days ending today or yesterday).",
+  readonly: true, params: {},
+}, async () => {
+  const habits = (await uapp.query("SELECT id, name FROM habits ORDER BY id")).rows;
+  const out = [];
+  for (const h of habits) {
+    const dates = new Set((await uapp.query(
+      "SELECT date FROM checkins WHERE habit_id=? ORDER BY date DESC", [h.id])).rows.map((r) => r.date));
+    let streak = 0;
+    const cur = new Date();
+    if (!dates.has(dstr(cur))) cur.setDate(cur.getDate() - 1); // yesterday still counts
+    while (dates.has(dstr(cur))) { streak++; cur.setDate(cur.getDate() - 1); }
+    out.push({habit: h.name, total: dates.size, streak});
+  }
+  return out;
+});
+uapp.action("delete_habit", {
+  description: "Delete a habit and its history.",
+  params: { id: {type: "number"} },
+}, async ({id}) => {
+  await uapp.exec("DELETE FROM checkins WHERE habit_id=?", [id]);
+  await uapp.exec("DELETE FROM habits WHERE id=?", [id]);
+  return {ok: true};
+});
+
+async function refresh() {
+  const week = days();
+  document.getElementById("head").innerHTML = "<tr><th>Habit</th>" +
+    week.map((d) => `<th>${d.slice(5).replace("-", "/")}</th>`).join("") + "<th></th><th></th></tr>";
+  const habits = (await uapp.query("SELECT id, name FROM habits ORDER BY id")).rows;
+  const stats = Object.fromEntries((await uapp.call("habit_stats", {})).map((s) => [s.habit, s]));
+  const checks = (await uapp.query("SELECT habit_id, date FROM checkins WHERE date >= ?", [week[0]])).rows;
+  const done = new Set(checks.map((c) => c.habit_id + "|" + c.date));
+  document.getElementById("body").innerHTML = habits.map((h) => "<tr><td>" + esc(h.name) + "</td>" +
+    week.map((d) => `<td><button class="dot ${done.has(h.id + "|" + d) ? "on" : ""}"
+      data-h="${h.id}" data-d="${d}">${done.has(h.id + "|" + d) ? "✓" : ""}</button></td>`).join("") +
+    `<td class="streak">${stats[h.name] ? stats[h.name].streak + "🔥" : ""}</td>
+     <td><button class="rm" data-rm="${h.id}">×</button></td></tr>`).join("");
+}
+document.getElementById("body").onclick = async (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.rm) { await uapp.call("delete_habit", {id: Number(b.dataset.rm)}); return; }
+  if (b.dataset.h) await uapp.call("log_habit",
+    {habit_id: Number(b.dataset.h), date: b.dataset.d, done: !b.classList.contains("on")});
+};
+document.getElementById("f").onsubmit = async (e) => {
+  e.preventDefault();
+  await uapp.call("add_habit", {name: document.getElementById("n").value.trim()});
+  e.target.reset();
+};
+uapp.onChange(refresh);
+uapp.ready.then(refresh);
+</script>
+</body>
+</html>

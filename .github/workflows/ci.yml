@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build & test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install sqlite3 CLI (used by tests) + Tauri GUI deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 libwebkit2gtk-4.1-dev libgtk-3-dev \
+            librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev
+      - uses: Swatinem/rust-cache@v2
+      # gui is the default feature, so `cargo build` builds the desktop app.
+      # Also build the server binary (uapp-server) for tests.
+      - name: Build (debug — the test suites use the dev server)
+        run: |
+          cargo build
+          cargo build --bin uapp-server --no-default-features
+      - name: Rust unit/integration tests
+        run: cargo test
+      - name: Run test suites
+        run: |
+          fail=0
+          for t in tests/test_*.mjs; do
+            echo "::group::$t"
+            UAPP_BIN="$PWD/target/debug/uapp-server" node "$t" || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  # Smoke-test the Android (local-mode) build: a debug arm64 APK through the
+  # real toolchain (NDK + vendored OpenSSL + gradle). Catches mobile-only
+  # regressions (cfg!(desktop) splits, mobile entry point, data-dir anchoring).
+  android:
+    name: Android APK (debug, arm64)
+    runs-on: ubuntu-24.04
+    env:
+      NDK_VERSION: 27.1.12297006
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2.11.4
+      - name: Add Rust Android target
+        run: rustup target add aarch64-linux-android
+      # The hosted runners no longer ship Android cmdline-tools, so install
+      # them (provides sdkmanager on PATH + ANDROID_HOME).
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK pieces (NDK ${{ env.NDK_VERSION }})
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "ndk;${NDK_VERSION}" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      # Vendored OpenSSL (SQLCipher) invokes the legacy unprefixed binutils
+      # names that NDK r24+ no longer ships — symlink them to the LLVM tools.
+      - name: NDK binutils symlinks (vendored OpenSSL)
+        run: |
+          NDKBIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for p in aarch64-linux-android armv7a-linux-androideabi armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
+            for t in ar ranlib strip nm objdump readelf; do
+              ln -sf "llvm-$t" "$NDKBIN/$p-$t"
+            done
+          done
+          echo "$NDKBIN" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-aarch64
+      # The gradle glue invokes the CLI as `cargo tauri android
+      # android-studio-script`, so it must be installed as cargo-tauri (the
+      # npm-distributed `tauri` shim can't serve that). rust-cache caches
+      # ~/.cargo/bin, so this compiles once and is restored afterwards.
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      # gen/android is committed (the standard Tauri v2 workflow) — no init or
+      # patching; MainActivity/manifest/icons are edited in place in the repo.
+      - name: Build debug APK
+        run: cargo tauri android build --apk --debug --target aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uapp-android-debug-arm64
+          path: gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+  check-cross:
+    name: cargo check (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      # Vendored OpenSSL (for SQLCipher) assembles with NASM on Windows; Perl is
+      # already on the runners. Linux/macOS use their system assemblers.
+      - name: Install NASM (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+      - uses: Swatinem/rust-cache@v2
+      # gui is the default feature — Windows/macOS Tauri builds need no extra
+      # system libs at check time.
+      - run: cargo check --target ${{ matrix.target }}

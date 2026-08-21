@@ -1,0 +1,8 @@
+{
+  "name": "Snake Arcade",
+  "file": "snake-arcade.uapp",
+  "emoji": "🐍",
+  "description": "canvas snake game — levels from a stored file, SQL leaderboard",
+  "sql": "CREATE TABLE scores(id INTEGER PRIMARY KEY AUTOINCREMENT, player TEXT NOT NULL, score INTEGER NOT NULL, level INTEGER NOT NULL DEFAULT 1, ts INTEGER); CREATE TABLE game_state(id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL, updated INTEGER);",
+  "seeds": [["INSERT INTO scores(player,score,level,ts) VALUES(?,?,?,?)", [["Ada", 340, 2, 1755000000001], ["Marcus", 210, 1, 1755000000002], ["Priya", 520, 3, 1755000000003]]]]
+}

@@ -1,0 +1,328 @@
+// Server binary (uapp-server) — for future work, not distributed.
+// Built as `uapp-server` via `--bin uapp-server --no-default-features`.
+// The primary distributed binary is the native Tauri desktop app (uapp).
+use anyhow::{Context, Result};
+use serde_json::json;
+use std::path::{Path, PathBuf};
+use uapp::{device_id, install, serve_opts, store, OnReady};
+
+/// How to present the UI for a launch. `--window`/`--tauri`/`--native` force
+/// the native UApp desktop window (the primary path, and the default);
+/// `--browser`/`--web` force the system browser (the fallback shell).
+#[derive(Clone, Copy, PartialEq)]
+enum ShellMode {
+    Browser,
+    Native,
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "uapp {}\n\nUsage:\n  uapp <file.uapp>            open an app (creates it if empty/missing)\n  uapp open <file.uapp>       same, explicit\n  uapp new <file.uapp>        create a blank app without opening it\n  uapp encrypt <file.uapp>    encrypt a (plaintext) app with a master password\n  uapp decrypt <file.uapp>    remove encryption (needs the master password)\n  uapp passwd <file.uapp>     change the master password\n  uapp install                register .uapp with your desktop + file manager\n\nOptions:\n  --headless                  don't open a browser; print the URL as JSON\n  --port <n>                  bind a fixed port (default: random)\n  --window                    force the native UApp window (the primary path\n                              and the default when the UApp app is installed)\n  --browser                   force the system browser (the fallback shell)\n  --password <pw>             master password for an encrypted app (else\n                              UAPP_PASSWORD, else a hidden prompt). Opening a\n                              plaintext app with a password encrypts it.\n  --encrypt                   with `new`: create the app encrypted\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    std::process::exit(2);
+}
+
+/// Resolve a master password: --password flag, else UAPP_PASSWORD, else a
+/// hidden prompt (only possible on a tty; headless callers must use one of
+/// the other two). `confirm` asks twice (for setting a new password).
+fn get_password(flag: Option<String>, confirm: bool) -> Result<String> {
+    if let Some(p) = flag {
+        return Ok(p);
+    }
+    if let Ok(p) = std::env::var("UAPP_PASSWORD") {
+        if !p.is_empty() {
+            return Ok(p);
+        }
+    }
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("no terminal available for a password prompt — pass --password or set UAPP_PASSWORD");
+    }
+    let p = rpassword::prompt_password("master password: ")?;
+    if p.is_empty() {
+        anyhow::bail!("empty password");
+    }
+    if confirm {
+        let p2 = rpassword::prompt_password("master password (again): ")?;
+        if p != p2 {
+            anyhow::bail!("passwords do not match");
+        }
+    }
+    Ok(p)
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("uapp: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut positional = Vec::new();
+    let mut headless = false;
+    let mut port: u16 = 0;
+    let mut shell: Option<ShellMode> = None;
+    let mut password_flag: Option<String> = None;
+    let mut encrypt_new = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--headless" => headless = true,
+            "--browser" | "--web" => shell = Some(ShellMode::Browser),
+            "--window" | "--tauri" | "--native" => shell = Some(ShellMode::Native),
+            "--port" => {
+                port = it.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+            }
+            "--password" => {
+                password_flag = Some(it.next().cloned().unwrap_or_else(|| usage()));
+            }
+            "--encrypt" => encrypt_new = true,
+            "-h" | "--help" => usage(),
+            "-V" | "--version" => {
+                println!("uapp {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            _ => positional.push(a.clone()),
+        }
+    }
+    let open_path = |positional: &[String], idx: usize| -> PathBuf {
+        positional.get(idx).map(PathBuf::from).unwrap_or_else(|| usage())
+    };
+    match positional.first().map(|s| s.as_str()) {
+        Some("install") => install::install(),
+        Some("new") => {
+            let f = open_path(&positional, 1);
+            let name = f
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "app".into());
+            if encrypt_new || password_flag.is_some() {
+                let pw = get_password(password_flag, true)?;
+                store::bootstrap(&f, &name, Some(&pw))?;
+                println!("created {} (encrypted)", f.display());
+            } else {
+                store::bootstrap(&f, &name, None)?;
+                println!("created {}", f.display());
+            }
+            Ok(())
+        }
+        Some("encrypt") => {
+            let f = open_path(&positional, 1);
+            let len = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
+            if len == 0 {
+                anyhow::bail!("{} is empty — use `uapp new --encrypt` to create it", f.display());
+            }
+            if !store::looks_like_sqlite(&f) {
+                // Already encrypted (verify with the password) or foreign.
+                let pw = get_password(password_flag, false)?;
+                uapp::cipher::open_file(&f, &pw)?;
+                anyhow::bail!("{} is already encrypted (use `uapp passwd` to change it)", f.display());
+            }
+            let pw = get_password(password_flag, true)?;
+            uapp::cipher::encrypt_file_in_place(&f, &pw)?;
+            println!("{} is now encrypted (AES-256, SQLCipher)", f.display());
+            Ok(())
+        }
+        Some("decrypt") => {
+            let f = open_path(&positional, 1);
+            if store::looks_like_sqlite(&f) {
+                anyhow::bail!("{} is not encrypted", f.display());
+            }
+            let pw = get_password(password_flag, false)?;
+            // Verify the password up front (clear error), then transform.
+            uapp::cipher::open_file(&f, &pw)?;
+            uapp::cipher::decrypt_file_in_place(&f, &pw)?;
+            println!("{} is now plaintext", f.display());
+            Ok(())
+        }
+        Some("passwd") => {
+            let f = open_path(&positional, 1);
+            if store::looks_like_sqlite(&f) {
+                anyhow::bail!("{} is not encrypted (nothing to change)", f.display());
+            }
+            let old = get_password(password_flag, false)?;
+            // Verify before prompting for the new one.
+            uapp::cipher::open_file(&f, &old)?;
+            use std::io::IsTerminal;
+            let new = if std::io::stdin().is_terminal() {
+                let new = rpassword::prompt_password("new master password: ")?;
+                if new.is_empty() {
+                    anyhow::bail!("empty password");
+                }
+                let again = rpassword::prompt_password("new master password (again): ")?;
+                if new != again {
+                    anyhow::bail!("passwords do not match");
+                }
+                new
+            } else {
+                // Headless: the new password comes from the environment.
+                std::env::var("UAPP_PASSWORD")
+                    .ok()
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("no terminal available — set the new password via UAPP_PASSWORD and the old one via --password")
+                    })?
+            };
+            uapp::cipher::rekey_file(&f, &old, &new)?;
+            println!("master password changed");
+            Ok(())
+        }
+        Some("open") => {
+            let f = open_path(&positional, 1);
+            let pw = resolve_open_password(&f, password_flag, headless)?;
+            launch(f, headless, port, false, shell, pw)
+        }
+        Some(other) if !other.starts_with('-') => {
+            let f = PathBuf::from(other);
+            let pw = resolve_open_password(&f, password_flag, headless)?;
+            launch(f, headless, port, false, shell, pw)
+        }
+        // No file given: open a blank scratch app in a temp file, flagged
+        // "unsaved" so the shell prompts to download it before it's lost.
+        None => {
+            // A unique temp subdir so the file can be named "Untitled" (its
+            // stem becomes the app name and the download filename).
+            let dir = std::env::temp_dir().join(format!(
+                "uapp-scratch-{}",
+                (0..10).map(|_| fastrand::alphanumeric()).collect::<String>()
+            ));
+            std::fs::create_dir_all(&dir)?;
+            launch(dir.join("Untitled.uapp"), headless, port, true, shell, None)
+        }
+        _ => usage(),
+    }
+}
+
+/// For `open`: if the file is encrypted, resolve the master password.
+/// Interactive launches (browser / native window) return `None` and let the
+/// server show its web unlock prompt. Headless has no UI to prompt in, so it
+/// requires the password up front (`--password` / `UAPP_PASSWORD`) and verifies
+/// it, failing clearly on a wrong/missing one. A plaintext file just opens.
+fn resolve_open_password(
+    path: &Path,
+    flag: Option<String>,
+    headless: bool,
+) -> Result<Option<String>> {
+    if !store::is_encrypted_file(path) {
+        return Ok(None);
+    }
+    let provided = flag.or_else(|| std::env::var("UAPP_PASSWORD").ok().filter(|p| !p.is_empty()));
+    match provided {
+        Some(pw) => {
+            // Verify now so a wrong password fails clearly here rather than
+            // surfacing deep in the open path (headless especially).
+            if headless {
+                uapp::cipher::open_file(path, &pw)
+                    .with_context(|| format!("opening {}", path.display()))?;
+            }
+            Ok(Some(pw))
+        }
+        None if headless => anyhow::bail!(
+            "{} is encrypted — pass --password or set UAPP_PASSWORD \
+             (headless mode can't show the unlock prompt)",
+            path.display()
+        ),
+        None => Ok(None), // interactive: the server serves the web unlock page
+    }
+}
+
+/// Decide how to present the UI, then serve. The native UApp (Tauri) window
+/// is the primary path and the default delegation target; the browser is only
+/// the fallback (explicit `--browser`, or no UApp desktop app installed).
+fn launch(
+    path: PathBuf,
+    headless: bool,
+    port: u16,
+    unsaved: bool,
+    shell: Option<ShellMode>,
+    passphrase: Option<String>,
+) -> Result<()> {
+    // With no explicit --browser/--window, fall back to this machine's saved
+    // preference (Settings → "Open apps in", default: native window) for
+    // file-association and terminal opens alike. An explicit flag still always
+    // wins, and when no UApp desktop app can be found the browser is the
+    // fallback (with a note). A bare `uapp` scratch also opens natively; the
+    // `unsaved` flag rides along so the native window shows the "Save…" banner.
+    let shell = shell.or_else(|| {
+        if uapp::prefs::shell() == "native" {
+            Some(ShellMode::Native)
+        } else {
+            None
+        }
+    });
+    // Headless is a server-only mode (no UI launch), so the shell choice is moot.
+    if !headless && shell == Some(ShellMode::Native) {
+        match delegate_to_desktop(&path, unsaved) {
+            Ok(true) => return Ok(()),
+            Ok(false) => eprintln!(
+                "uapp: no UApp desktop app found (install it, or set UAPP_DESKTOP_BIN) — opening in your browser instead"
+            ),
+            Err(e) => eprintln!("uapp: couldn't launch the UApp desktop app ({e}) — opening in your browser instead"),
+        }
+    }
+    run_serve(path, headless, port, unsaved, passphrase)
+}
+
+/// Try to hand a .uapp to the native UApp (Tauri) desktop app. Looks at
+/// $UAPP_DESKTOP_BIN, then next to this executable, then the PATH. `unsaved`
+/// forwards the scratch flag so the native window shows the "Save…" banner.
+/// Returns Ok(true) if one was launched.
+fn delegate_to_desktop(path: &Path, unsaved: bool) -> Result<bool> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("UAPP_DESKTOP_BIN") {
+        if !p.is_empty() {
+            candidates.push(PathBuf::from(p));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for n in ["uapp", "uapp.exe", "UApp", "UApp.exe"] {
+                candidates.push(dir.join(n));
+            }
+        }
+    }
+    // Bare names fall through to a PATH lookup.
+    for n in ["uapp", "UApp"] {
+        candidates.push(PathBuf::from(n));
+    }
+    for c in candidates {
+        let mut cmd = std::process::Command::new(&c);
+        cmd.arg(path);
+        if unsaved {
+            cmd.arg("--unsaved");
+        }
+        if cmd.spawn().is_ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Build the right "ready" behaviour for the CLI and hand off to the library.
+fn run_serve(
+    path: PathBuf,
+    headless: bool,
+    port: u16,
+    unsaved: bool,
+    passphrase: Option<String>,
+) -> Result<()> {
+    let on_ready: OnReady = if headless {
+        let device = device_id().unwrap_or_default();
+        Box::new(move |url, port, reused| {
+            println!(
+                "{}",
+                json!({"url": url, "port": port, "device": device, "reused": reused})
+            );
+        })
+    } else {
+        Box::new(|url, _port, _reused| {
+            eprintln!("uapp: serving at {url}");
+            // Detached so xdg-open/Explorer don't block for the browser's life.
+            let _ = open::that_detached(url);
+        })
+    };
+    serve_opts(path, port, unsaved, passphrase, on_ready)
+}

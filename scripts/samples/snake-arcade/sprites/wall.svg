@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- Stone brick tile -->
+  <rect x="0" y="0" width="24" height="24" rx="4" fill="#3a4566"/>
+  <rect x="0" y="0" width="24" height="24" rx="4" fill="none" stroke="#2a3350" stroke-width="1.5"/>
+  <!-- mortar lines -->
+  <path d="M1 8 h22 M1 16 h22" stroke="#2a3350" stroke-width="1.5"/>
+  <path d="M12 1.5 v6.5 M6 8 v8 M18 8 v8 M12 16 v6.5" stroke="#2a3350" stroke-width="1.5"/>
+  <!-- highlights -->
+  <path d="M2.5 3 h8 M14 11 h7 M4 19 h6" stroke="#4d5a82" stroke-width="1" stroke-linecap="round"/>
+</svg>

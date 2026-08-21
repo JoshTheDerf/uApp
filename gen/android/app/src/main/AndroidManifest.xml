@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- OPTIONAL: never requested at install/run time — the app is fully
+         functional without it. If the user flips "All files access" in
+         system Settings (offered in-app under Settings → Original file),
+         write-back links tapped documents by raw path, covering read-only
+         "open with" grants and USB/SD volumes. Play-restricted permission:
+         strip this for a Play Store build. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
+    <!-- AndroidTV support -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.uapp"
+        android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:launchMode="singleTask"
+            android:label="@string/main_activity_title"
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <!-- AndroidTV support -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+            <!-- "Open with UApp" for .uapp documents (tauri-cli has no Android
+                 fileAssociations support, so these are maintained by hand;
+                 MainActivity.handleViewIntent imports whatever arrives).
+                 content:// providers report a generic MIME for .uapp, so the
+                 first filter matches octet-stream — slightly greedy (UApp is
+                 offered for unknown binaries), the standard tradeoff for a
+                 custom extension. -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/octet-stream" />
+                <!-- A .uapp is a SQLite database; providers that sniff file
+                     content (rather than mapping the unknown extension) report
+                     it as one of the sqlite MIMEs instead. -->
+                <data android:mimeType="application/x-sqlite3" />
+                <data android:mimeType="application/vnd.sqlite3" />
+            </intent-filter>
+            <!-- content:// with NO MIME type at all — several file managers
+                 (and the system Files app for removable USB/SD volumes) send
+                 the VIEW intent typeless. A filter that declares any mimeType
+                 (even */*) fails the MIME test against a typeless intent, so
+                 this one declares none and matches on the URI path instead:
+                 the externalstorage provider embeds "volume:relative/path" in
+                 the document id, so the decoded path ends in .uapp. The extra
+                 patterns work around PatternMatcher's non-backtracking ".*",
+                 which otherwise misses filenames containing dots. -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.uapp" />
+                <data android:pathPattern=".*\\..*\\.uapp" />
+                <data android:pathPattern=".*\\..*\\..*\\.uapp" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.uapp" />
+            </intent-filter>
+            <!-- content:// with some OTHER MIME type but a .uapp-suffixed
+                 path — covers providers that report a wrong-but-present type
+                 (text/plain, application/x-trash, ...) for the extension. -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.uapp" />
+                <data android:pathPattern=".*\\..*\\.uapp" />
+                <data android:pathPattern=".*\\..*\\..*\\.uapp" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.uapp" />
+            </intent-filter>
+            <!-- file:// paths ending in .uapp (older file managers). host="*"
+                 is required or Android ignores the pathPattern. -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.uapp" />
+                <data android:pathPattern=".*\\..*\\.uapp" />
+                <data android:pathPattern=".*\\..*\\..*\\.uapp" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.uapp" />
+            </intent-filter>
+            <!-- tauri-file-associations. AUTO-GENERATED. DO NOT REMOVE. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:pathPattern=".*\\.uapp" />
+            </intent-filter>
+            
+            <!-- tauri-file-associations. AUTO-GENERATED. DO NOT REMOVE. -->
+        </activity>
+
+        <provider
+          android:name="androidx.core.content.FileProvider"
+          android:authorities="${applicationId}.fileprovider"
+          android:exported="false"
+          android:grantUriPermissions="true">
+          <meta-data
+            android:name="android.support.FILE_PROVIDER_PATHS"
+            android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>
