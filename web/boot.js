@@ -10,7 +10,7 @@
  * At runtime this file is also: the router between app iframes (uapp.js over
  * postMessage) and the worker; the responder for service-worker archive
  * fetches; the main-thread end of the SAB bridge (run_js, app actions,
- * approvals, console); and the OPFS auto-saver.
+ * approvals, console); and the auto-saver.
  */
 
 const enc = new TextEncoder();
@@ -20,6 +20,21 @@ const LEGACY_FILE = "app.uapp";
 // load or register is relative to where boot.js itself lives.
 const BASE = new URL("./", import.meta.url);
 window.__uappBase = BASE.pathname;
+
+// sessionStorage throws (not returns null) when the browser blocks site data,
+// and it is load-bearing here: it carries which app to open across the reload
+// that switches documents, and guards the one-time cross-origin-isolation
+// reload. Probe it once; ssOk === false means "don't count on a reload
+// remembering anything".
+const memSS = new Map();
+let ssOk = true;
+try {
+  sessionStorage.setItem("uapp.probe", "1");
+  sessionStorage.removeItem("uapp.probe");
+} catch { ssOk = false; }
+function ssGet(k) { try { return ssOk ? sessionStorage.getItem(k) : (memSS.has(k) ? memSS.get(k) : null); } catch { return null; } }
+function ssSet(k, v) { try { ssOk ? sessionStorage.setItem(k, v) : memSS.set(k, v); } catch {} }
+function ssDel(k) { try { ssOk ? sessionStorage.removeItem(k) : memSS.delete(k); } catch {} }
 
 // ---- boot splash ------------------------------------------------------------
 // index.html paints it on every load; we keep it up until the app frame is
@@ -73,7 +88,7 @@ function splashHide() {
 // A document switch is a reload, so name the app we are heading for instead of
 // showing a generic "Starting" (the boot below consumes these keys).
 {
-  const pendingName = sessionStorage.getItem("uapp-open-name");
+  const pendingName = ssGet("uapp-open-name");
   if (pendingName) splashStatus.textContent = "Opening " + pendingName + "…";
 }
 
@@ -472,7 +487,9 @@ async function handleHostRpc(m) {
       const name = (p.name || "Imported app").replace(/\.uapp$/i, "").slice(0, 80);
       splashShow("Opening " + name + "…", "Saving…");
       const id = genId();
-      await opfsWrite(id, bytes);
+      // A failed write (storage blocked) must not leave the splash covering
+      // the launcher the error message is about.
+      try { await appWrite(id, bytes); } catch (e) { splashHide(); throw e; }
       indexTouch(id, name);
       setTimeout(() => switchTo(id, p.name), 50);
       return { ok: true, id };
@@ -492,16 +509,18 @@ async function handleHostRpc(m) {
       }
       splashShow("Opening " + name + "…", "Saving…");
       const id = genId();
-      await opfsWrite(id, bytes);
+      // A failed write (storage blocked) must not leave the splash covering
+      // the launcher the error message is about.
+      try { await appWrite(id, bytes); } catch (e) { splashHide(); throw e; }
       indexTouch(id, name);
       setTimeout(() => switchTo(id, p.name), 50);
       return { ok: true, id };
     }
     case "host.delete":
-      await opfsDelete(p.id);
+      await appDelete(p.id);
       return { ok: true };
     case "host.export": {
-      const bytes = await opfsRead(p.id);
+      const bytes = await appRead(p.id);
       if (!bytes) throw new Error("no stored app with that id");
       const e = appsIndex().find((a) => a.id === p.id);
       return { b64: b64FromBytes(bytes), name: (e && e.name) || "app" };
@@ -517,16 +536,16 @@ let lastInfoName = "";
 function appName() { return lastInfoName; }
 
 let saveTimer = null, saving = false, saveDirty = false;
-async function opfsSave() {
+async function appSave() {
   if (!currentAppId || zombie) return; // launcher is ephemeral; dormant tabs must not write
   if (saving) { saveDirty = true; return; }
   saving = true;
   try {
     const r = await sendRpc("app.export");
-    await opfsWrite(currentAppId, bytesFromB64(r.b64));
+    await appWrite(currentAppId, bytesFromB64(r.b64));
     indexTouch(currentAppId, lastInfoName);
   } catch (e) {
-    console.warn("uapp: OPFS auto-save failed:", e);
+    console.warn("uapp: auto-save failed:", e);
   } finally {
     saving = false;
     if (saveDirty) { saveDirty = false; scheduleSave(); }
@@ -534,7 +553,7 @@ async function opfsSave() {
 }
 function scheduleSave() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(opfsSave, 1500);
+  saveTimer = setTimeout(appSave, 1500);
 }
 
 function onWorkerEvent(envelope) {
@@ -544,7 +563,7 @@ function onWorkerEvent(envelope) {
   if (params.type === "sync" && params.state === "closed") {
     (async () => {
       clearTimeout(saveTimer);
-      try { await opfsSave(); } catch {}
+      try { await appSave(); } catch {}
       switchTo(null); // back to the launcher
     })();
     return; // don't let the shell paint its "closed" overlay first
@@ -563,17 +582,29 @@ function onWorkerEvent(envelope) {
   }
 }
 
-// ---- app library (OPFS, many .uapp files) -----------------------------------
-// Index in localStorage: [{id, name, updated}]. Bytes in OPFS apps/<id>.uapp.
+// ---- app library (many .uapp files) -----------------------------------------
+// Index in localStorage: [{id, name, updated}]. Bytes in OPFS apps/<id>.uapp,
+// or in IndexedDB where the browser won't give us OPFS (see pickBlobStore).
 // currentAppId === null means the launcher (ephemeral, never saved).
 
 let currentAppId = null;
 
+// localStorage *throws* (rather than returning null) when the browser blocks
+// site data for the origin, so everything goes through a shim that keeps the
+// index in memory for the life of the tab instead.
+const memKV = new Map();
+function kvGet(key) {
+  try { return localStorage.getItem(key); } catch { return memKV.has(key) ? memKV.get(key) : null; }
+}
+function kvSet(key, val) {
+  try { localStorage.setItem(key, val); } catch { memKV.set(key, val); }
+}
+
 function appsIndex() {
-  try { return JSON.parse(localStorage.getItem("uapp.demo.apps")) || []; } catch { return []; }
+  try { return JSON.parse(kvGet("uapp.demo.apps")) || []; } catch { return []; }
 }
 function saveIndex(list) {
-  localStorage.setItem("uapp.demo.apps", JSON.stringify(list));
+  kvSet("uapp.demo.apps", JSON.stringify(list));
 }
 function indexTouch(id, name) {
   const list = appsIndex();
@@ -582,28 +613,147 @@ function indexTouch(id, name) {
   else list.push({ id, name: name || "App", updated: Date.now() });
   saveIndex(list);
 }
-async function appsDir() {
+
+// ---- where the .uapp bytes live ----------------------------------------------
+// OPFS is the good backend, but it is not always on offer: Firefox rejects
+// navigator.storage.getDirectory() with "Security error when calling
+// GetDirectory" in private windows and whenever site data is blocked for the
+// origin, and older Safari has no writable OPFS. So probe once and degrade:
+// OPFS -> IndexedDB (which does work in a Firefox private window) -> nothing,
+// where opening an app fails with a message the visitor can act on.
+
+const errText = (e) => String((e && e.message) || e);
+
+async function opfsDir() {
   const root = await navigator.storage.getDirectory();
   return root.getDirectoryHandle(APPS_DIR, { create: true });
 }
-async function opfsRead(id) {
+
+const opfsStore = {
+  name: "OPFS",
+  persistent: true,
+  async read(id) {
+    const f = await (await (await opfsDir()).getFileHandle(id + ".uapp")).getFile();
+    return f.size > 0 ? new Uint8Array(await f.arrayBuffer()) : null;
+  },
+  async write(id, bytes) {
+    const fh = await (await opfsDir()).getFileHandle(id + ".uapp", { create: true });
+    const w = await fh.createWritable();
+    await w.write(bytes);
+    await w.close();
+  },
+  async remove(id) { await (await opfsDir()).removeEntry(id + ".uapp"); },
+};
+
+const IDB_NAME = "uapp.demo", IDB_STORE = "apps";
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    let req;
+    try { req = indexedDB.open(IDB_NAME, 1); } catch (e) { reject(e); return; }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("indexedDB.open failed"));
+    req.onblocked = () => reject(new Error("indexedDB.open blocked"));
+  });
+}
+async function idbRun(mode, fn) {
+  const db = await idbOpen();
   try {
-    const dir = await appsDir();
-    const fh = await dir.getFileHandle(id + ".uapp");
-    const f = await fh.getFile();
-    if (f.size > 0) return new Uint8Array(await f.arrayBuffer());
-  } catch {}
-  return null;
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, mode);
+      const req = fn(tx.objectStore(IDB_STORE));
+      tx.oncomplete = () => resolve(req ? req.result : undefined);
+      tx.onabort = () => reject(tx.error || new Error("transaction aborted"));
+      if (req) req.onerror = () => reject(req.error);
+    });
+  } finally { try { db.close(); } catch {} }
 }
-async function opfsWrite(id, bytes) {
-  const dir = await appsDir();
-  const fh = await dir.getFileHandle(id + ".uapp", { create: true });
-  const w = await fh.createWritable();
-  await w.write(bytes);
-  await w.close();
+
+const idbStore = {
+  name: "IndexedDB",
+  persistent: true,
+  async read(id) {
+    const v = await idbRun("readonly", (s) => s.get(id));
+    if (!v) return null;
+    const u8 = v instanceof Uint8Array ? v : new Uint8Array(v);
+    return u8.length > 0 ? u8 : null;
+  },
+  write(id, bytes) { return idbRun("readwrite", (s) => s.put(bytes.slice(), id)); },
+  remove(id) { return idbRun("readwrite", (s) => s.delete(id)); },
+};
+
+// Nothing left to write to. Reads come back empty and writes say why, which
+// beats "opening" an app whose bytes silently vanish on the next reload (every
+// document switch here is a reload).
+const BLOCKED_MSG =
+  "this browser is blocking storage for the site — a private window, or " +
+  "cookies/site data blocked for it. Allow site data (or use a normal window) " +
+  "to open apps in the demo.";
+const blockedStore = {
+  name: "none",
+  persistent: false,
+  async read() { return null; },
+  async write() { throw new Error(BLOCKED_MSG); },
+  async remove() {},
+};
+
+let blobStoreP = null;
+function blobStore() { return (blobStoreP = blobStoreP || pickBlobStore()); }
+
+async function pickBlobStore() {
+  try {
+    // Probe a real write: a handle can be granted and the write still refused.
+    const dir = await opfsDir();
+    const fh = await dir.getFileHandle(".probe", { create: true });
+    const w = await fh.createWritable();
+    await w.write(new Uint8Array([0]));
+    await w.close();
+    try { await dir.removeEntry(".probe"); } catch {}
+    return opfsStore;
+  } catch (e) {
+    console.warn("uapp: OPFS unavailable (" + errText(e) + ") — falling back to IndexedDB");
+  }
+  try {
+    (await idbOpen()).close();
+    return idbStore;
+  } catch (e) {
+    console.warn("uapp: IndexedDB unavailable (" + errText(e) + ") — apps will not be saved");
+  }
+  storageNotice();
+  return blockedStore;
 }
-async function opfsDelete(id) {
-  try { (await appsDir()).removeEntry(id + ".uapp"); } catch {}
+
+// Shown once when nothing can be persisted — the app-open failures below are
+// otherwise a bare error message with no way to act on it.
+let noticeShown = false;
+function storageNotice() {
+  if (noticeShown) return;
+  noticeShown = true;
+  const el = document.createElement("div");
+  el.style.cssText = "position:fixed;left:12px;right:12px;bottom:12px;margin:0 auto;max-width:520px;z-index:999998;background:#2b3145;border:1px solid #3a4260;border-radius:12px;padding:14px 16px;color:#f2f4f8;font:13px/1.55 system-ui,sans-serif;box-shadow:0 10px 30px #0007";
+  el.innerHTML = `<b>This browser is blocking storage for the site</b><br>
+    Usually a private window, or cookies and site data blocked for it. The demo
+    keeps a document per app in your browser's own storage, so opening one
+    can't work here — allow site data for this site, or try a normal window.`;
+  const btn = document.createElement("button");
+  btn.textContent = "Got it";
+  btn.style.cssText = "margin-top:10px;padding:7px 14px;border:none;border-radius:8px;background:#3f6de6;color:#fff;font:inherit;font-weight:600;cursor:pointer";
+  btn.onclick = () => el.remove();
+  el.appendChild(btn);
+  document.body.appendChild(el);
+}
+
+async function appRead(id) {
+  try { return await (await blobStore()).read(id); } catch { return null; }
+}
+async function appWrite(id, bytes) {
+  return (await blobStore()).write(id, bytes);
+}
+async function appDelete(id) {
+  try { await (await blobStore()).remove(id); } catch {}
   saveIndex(appsIndex().filter((a) => a.id !== id));
 }
 const genId = () => "a" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -616,8 +766,8 @@ async function migrateLegacy() {
     const f = await fh.getFile();
     if (f.size > 0) {
       const id = genId();
-      await opfsWrite(id, new Uint8Array(await f.arrayBuffer()));
-      indexTouch(id, localStorage.getItem("uapp.demo.name") || "App");
+      await appWrite(id, new Uint8Array(await f.arrayBuffer()));
+      indexTouch(id, kvGet("uapp.demo.name") || "App");
     }
     await root.removeEntry(LEGACY_FILE);
   } catch {}
@@ -627,11 +777,11 @@ async function migrateLegacy() {
 // iframes and shell state. sessionStorage carries what to open next.
 function switchTo(id, name) {
   if (id) {
-    sessionStorage.setItem("uapp-open-app", id);
-    if (name) sessionStorage.setItem("uapp-open-name", name);
+    ssSet("uapp-open-app", id);
+    if (name) ssSet("uapp-open-name", name);
   } else {
-    sessionStorage.removeItem("uapp-open-app");
-    sessionStorage.removeItem("uapp-open-name");
+    ssDel("uapp-open-app");
+    ssDel("uapp-open-name");
     splashShow("Returning to your apps…"); // covers the reload gap
   }
   location.reload();
@@ -665,7 +815,15 @@ function fatal(msg) {
 // single-tab: the newest boot broadcasts a takeover and older tabs go dormant.
 
 const BOOT_ID = Date.now() + "-" + Math.random().toString(36).slice(2);
-const tabChannel = "BroadcastChannel" in window ? new BroadcastChannel("uapp-demo-tab") : null;
+// Constructing it throws where the browser blocks site data for the origin,
+// and this is module top level: an unhandled throw here leaves the page on the
+// splash forever, so the takeover check simply goes away instead.
+let tabChannel = null;
+try {
+  if ("BroadcastChannel" in window) tabChannel = new BroadcastChannel("uapp-demo-tab");
+} catch (e) {
+  console.warn("uapp: BroadcastChannel unavailable (" + errText(e) + ")");
+}
 
 function goDormant() {
   if (zombie) return;
@@ -699,10 +857,19 @@ if (tabChannel) {
       return;
     }
     splashNote("Starting the service worker…");
-    await navigator.serviceWorker.register(new URL("sw.js", BASE));
-    await navigator.serviceWorker.ready;
-    if (!navigator.serviceWorker.controller || (!crossOriginIsolated && !sessionStorage.getItem("uapp-coi-reload"))) {
-      sessionStorage.setItem("uapp-coi-reload", "1");
+    try {
+      await navigator.serviceWorker.register(new URL("sw.js", BASE));
+      await navigator.serviceWorker.ready;
+    } catch (e) {
+      // Blocking cookies/site data for the origin blocks this too, and without
+      // the service worker there is no way to serve an app's files at all.
+      fatal(e && e.name === "SecurityError"
+        ? "This browser is blocking storage for the site, so the demo's service worker can't start. Allow cookies and site data for this site (or try a normal window) and reload."
+        : "The demo's service worker could not start: " + errText(e));
+      return;
+    }
+    if (!navigator.serviceWorker.controller || (!crossOriginIsolated && ssOk && !ssGet("uapp-coi-reload"))) {
+      ssSet("uapp-coi-reload", "1");
       location.reload();
       return;
     }
@@ -745,13 +912,13 @@ if (tabChannel) {
 
     // Open the requested stored app, or the launcher (itself a .uapp).
     let info = null;
-    const wantId = sessionStorage.getItem("uapp-open-app");
-    const wantName = sessionStorage.getItem("uapp-open-name") || "App";
-    sessionStorage.removeItem("uapp-open-app");
-    sessionStorage.removeItem("uapp-open-name");
+    const wantId = ssGet("uapp-open-app");
+    const wantName = ssGet("uapp-open-name") || "App";
+    ssDel("uapp-open-app");
+    ssDel("uapp-open-name");
     if (wantId) {
       splashShow("Opening " + wantName + "…", "Opening the document…");
-      const bytes = await opfsRead(wantId); // null = brand-new app (host.create)
+      const bytes = await appRead(wantId); // null = brand-new app (host.create)
       try {
         info = await openApp(bytes, wantName);
         currentAppId = wantId;

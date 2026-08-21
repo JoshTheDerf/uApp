@@ -103,6 +103,8 @@ pub fn run() {
                 let win = b.build()?;
                 install_navigation_handler(&win);
                 install_drop_forwarding(&win);
+                install_permission_handling(&win);
+                install_permission_prompt(app.handle().clone());
             } else {
                 let _ = open::that(&url);
             }
@@ -156,6 +158,336 @@ fn install_drop_forwarding<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
         deliver_drop(DropInfo { phase, paths, x, y });
     });
 }
+
+/// Install the NATIVE permission dialog.
+///
+/// This is the whole security boundary, so it is worth being explicit about why
+/// it is not shell UI. The shell and the app iframe share one origin: app code
+/// can reach `window.parent`, and a dynamic `import()` from the parent realm
+/// hands it the same live module instances (and therefore the same privileged
+/// socket) the shell uses. A prompt drawn by the page can be answered by the
+/// page. So the decision is made in an OS dialog instead — the same reason a
+/// browser paints permission prompts in its chrome and not in the document.
+///
+/// Runs on a worker thread (see `permissions::decide`), which is what the
+/// `blocking_*` dialog API requires; calling it on the UI thread would deadlock
+/// against the window it is modal to.
+fn install_permission_prompt(handle: tauri::AppHandle) {
+    crate::permissions::install_prompt(Box::new(move |ask| {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+        let t = ask.prompt_text();
+        let mut d = handle
+            .dialog()
+            .message(&t.body)
+            .title(&t.title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::YesNoCancelCustom(
+                t.always_allow.to_string(),
+                t.allow_once.to_string(),
+                t.deny.to_string(),
+            ));
+        // Modal to the app window, so it can't be lost behind it and answered
+        // later against a request the user has forgotten the context of.
+        if let Some(w) = handle.get_webview_window("main") {
+            d = d.parent(&w);
+        }
+        // Custom button labels come back as `Custom(label)` — on Linux for ALL
+        // THREE buttons, so matching Yes/No here would silently deny every
+        // request no matter what was clicked. Match the labels we just handed
+        // in, and keep Yes/No as a fallback for platforms that report those.
+        use tauri_plugin_dialog::MessageDialogResult as R;
+        let result = d.blocking_show_with_result();
+
+        // Hand focus back to the app window after the dialog. This is a
+        // courtesy, not a fix: waiting for focus to land before delivering the
+        // grant does NOT rescue pointer lock (see the inline path in the
+        // permission handler), it just delays every other permission.
+        if let Some(w) = handle.get_webview_window("main") {
+            let _ = w.set_focus();
+        }
+
+        match &result {
+            R::Custom(s) if s.as_str() == t.always_allow => (true, true),
+            R::Custom(s) if s.as_str() == t.allow_once => (true, false),
+            R::Custom(s) if s.as_str() == t.deny => (false, false),
+            R::Yes => (true, true),
+            R::No => (true, false),
+            // Dismissing the dialog is a denial, the safe direction. Anything
+            // genuinely unrecognised denies too, but says so — a silent
+            // fall-through here is what made every button mean "deny" once.
+            R::Cancel => (false, false),
+            other => {
+                eprintln!(
+                    "uapp: unrecognised permission dialog result {other:?} — denying. \
+                     This is a bug: the button labels and the result mapping disagree."
+                );
+                (false, false)
+            }
+        }
+    }));
+}
+
+/// Make the gated `navigator.*` APIs work in the native window, and put the
+/// user in charge of them.
+///
+/// Every platform webview answers a permission request differently, so this is
+/// where they're brought to the same behaviour — a per-app Allow/Deny prompt
+/// brokered by [`crate::permissions`]:
+///
+/// * **Linux (WebKitGTK)** — anything the embedder doesn't answer is *denied*,
+///   and the page is told "denied" as if the user had said so, which is why an
+///   unhandled feature looks like a settings problem rather than a missing
+///   handler. Capture is also compiled in but switched off: without
+///   `enable-media-stream` there is no `navigator.mediaDevices` at all.
+/// * **Windows (WebView2)** — wry answers only clipboard reads, leaving the
+///   rest to WebView2's own prompt. We take them over so decisions are
+///   remembered per .uapp rather than per WebView2 profile.
+/// * **macOS/iOS (WKWebView)** — wry's UI delegate grants capture
+///   unconditionally, so the only gate is the OS-level TCC prompt, whose usage
+///   descriptions live in `installer/macos/Info.plist`. A per-app gate would
+///   mean replacing wry's delegate wholesale, taking the file panel and JS
+///   dialogs with it, so it's left to the OS for now.
+/// * **Android** — wry's `RustWebChromeClient` already forwards capture and
+///   geolocation to the runtime permission dialog; it only needs the manifest
+///   entries (see `gen/android/app/src/main/AndroidManifest.xml`).
+#[cfg(target_os = "linux")]
+fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
+    use crate::permissions::{Ask, Feature};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use webkit2gtk::glib;
+    use webkit2gtk::glib::prelude::*;
+    use webkit2gtk::glib::translate::ToGlibPtr;
+    use webkit2gtk::{
+        DeviceInfoPermissionRequest, GeolocationPermissionRequest,
+        NotificationPermissionRequest, PermissionRequest, PermissionRequestExt,
+        PointerLockPermissionRequest, SettingsExt, UserMediaPermissionRequest,
+        UserMediaPermissionRequestExt, WebViewExt, WebsiteDataAccessPermissionRequest,
+        WebsiteDataAccessPermissionRequestExt,
+    };
+
+    // Requests waiting on the user. WebKit hands them to us on the GTK main
+    // thread and they are not `Send`, so they stay parked here and are only
+    // ever touched again from a main-thread idle callback.
+    thread_local! {
+        static OPEN: RefCell<HashMap<u64, PermissionRequest>> = RefCell::new(HashMap::new());
+    }
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    let res = win.with_webview(|wv| {
+        let webview = wv.inner();
+        if let Some(settings) = WebViewExt::settings(&webview) {
+            // Without this getUserMedia is absent, not merely denied.
+            settings.set_enable_media_stream(true);
+            // Lets apps feature-detect codecs before asking for a device.
+            settings.set_enable_media_capabilities(true);
+            // NOT enabling javascript-can-access-clipboard, deliberately.
+            // Clipboard reads are refused while it is off even after the
+            // permission request is allowed, so `clipboard.readText()` fails
+            // with NotAllowedError despite a grant — annoying, but correct.
+            // Turning it on was tested and is NOT safe: WebKitGTK 2.52 then
+            // reads the clipboard with no WebKitClipboardPermissionRequest at
+            // all, so the switch bypasses the prompt rather than deferring to
+            // it. A clipboard that silently reads beats no clipboard only if
+            // you don't care who is reading. Revisit if upstream starts
+            // raising the request in both configurations.
+        }
+        webview.connect_permission_request(move |_, req| {
+            // Device labels are not a question of their own: browsers expose
+            // them once a capture permission exists, so answer from the
+            // standing grant and never raise a dialog for enumerateDevices.
+            if req.clone().downcast::<DeviceInfoPermissionRequest>().is_ok() {
+                if crate::permissions::any_allowed(&[Feature::Camera, Feature::Microphone]) {
+                    req.allow();
+                } else {
+                    req.deny();
+                }
+                return true;
+            }
+
+            let ask = if let Ok(media) = req.clone().downcast::<UserMediaPermissionRequest>() {
+                // Screen capture arrives as the SAME request type as the
+                // webcam. Without splitting them, a remembered "camera: allow"
+                // would hand an app the whole screen — so ask the C API, which
+                // has the getter the Rust binding is still missing.
+                let display = unsafe {
+                    webkit2gtk_sys::webkit_user_media_permission_is_for_display_device(
+                        media.to_glib_none().0,
+                    ) != 0
+                };
+                if display {
+                    Ask::one(Feature::Screen)
+                } else {
+                    let mut f = Vec::new();
+                    if media.is_for_video_device() {
+                        f.push(Feature::Camera);
+                    }
+                    if media.is_for_audio_device() {
+                        f.push(Feature::Microphone);
+                    }
+                    Ask::new(f)
+                }
+            } else if req.clone().downcast::<GeolocationPermissionRequest>().is_ok() {
+                Ask::one(Feature::Location)
+            } else if req.clone().downcast::<NotificationPermissionRequest>().is_ok() {
+                Ask::one(Feature::Notifications)
+            } else if req.clone().downcast::<PointerLockPermissionRequest>().is_ok() {
+                Ask::one(Feature::PointerLock)
+            } else if let Ok(sa) = req
+                .clone()
+                .downcast::<WebsiteDataAccessPermissionRequest>()
+            {
+                // An embedded third-party frame asking for its own cookies.
+                // "This app wants storage access" would be meaningless, so the
+                // prompt names both sides, and the decision is remembered
+                // against the requesting domain rather than the app as a whole.
+                let requesting = sa.requesting_domain().map(|d| d.to_string()).unwrap_or_default();
+                let current = sa.current_domain().map(|d| d.to_string()).unwrap_or_default();
+                if requesting.is_empty() {
+                    return false; // nothing to name, nothing to scope: deny
+                }
+                Ask::one(Feature::StorageAccess).scoped(
+                    requesting.clone(),
+                    if current.is_empty() {
+                        requesting
+                    } else {
+                        format!("{requesting} (embedded in {current})")
+                    },
+                )
+            } else if req.type_().name() == "WebKitClipboardPermissionRequest" {
+                // Added in WebKitGTK 2.52 and not in the Rust bindings yet, so
+                // it's matched by type name; the base interface is all that's
+                // needed to answer it.
+                Ask::one(Feature::ClipboardRead)
+            } else {
+                // DRM key systems, missing-codec installs, XR sessions: keep
+                // WebKit's default, which is to deny.
+                return false;
+            };
+            if ask.is_empty() {
+                return false;
+            }
+
+            // Pointer lock is checked against the focused window at the
+            // instant it is granted, and any dialog we show takes that focus —
+            // so a deferred answer can never succeed, however carefully focus
+            // is handed back afterwards. Answer it inline from what we already
+            // know; when we don't know yet, refuse THIS attempt and ask out of
+            // band, so the next click goes through with no dialog at all.
+            // (Refusing and re-asking on every attempt is what made it look
+            // like the prompt was stuck in a loop.)
+            if ask.features == [Feature::PointerLock] {
+                match crate::permissions::known(&ask) {
+                    Some(true) => req.allow(),
+                    Some(false) => req.deny(),
+                    None => {
+                        req.deny();
+                        crate::permissions::ask_in_background(ask);
+                    }
+                }
+                return true;
+            }
+
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            OPEN.with(|m| m.borrow_mut().insert(id, req.clone()));
+            // Deciding may need to paint a prompt in this very webview, so it
+            // cannot happen on this thread: answer later, from an idle
+            // callback, and tell WebKit we've taken the request.
+            std::thread::spawn(move || {
+                let allow = crate::permissions::decide(ask);
+                glib::idle_add_once(move || {
+                    OPEN.with(|m| {
+                        if let Some(r) = m.borrow_mut().remove(&id) {
+                            if allow {
+                                r.allow();
+                            } else {
+                                r.deny();
+                            }
+                        }
+                    });
+                });
+            });
+            true
+        });
+    });
+    if let Err(e) = res {
+        eprintln!("uapp: could not install permission handling: {e}");
+    }
+}
+
+/// Windows: take the gated permissions over from WebView2's built-in prompt so
+/// decisions are remembered per .uapp. See the Linux arm for the rationale.
+///
+/// WebView2 exposes no permission kind for `getDisplayMedia`, pointer lock or
+/// storage access, so those three are not brokered here — they keep whatever
+/// WebView2 (i.e. Chromium) does by default, which for pointer lock is to allow
+/// after a user gesture and show its own "press Esc to exit" notice.
+#[cfg(target_os = "windows")]
+fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
+    use crate::permissions::{Ask, Feature};
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_PERMISSION_KIND_CAMERA, COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ,
+        COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
+        COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        COREWEBVIEW2_PERMISSION_STATE_DENY,
+    };
+    use webview2_com::PermissionRequestedEventHandler;
+
+    let res = win.with_webview(|wv| unsafe {
+        let Ok(core) = wv.controller().CoreWebView2() else {
+            return;
+        };
+        let mut token = Default::default();
+        let _ = core.add_PermissionRequested(
+            &PermissionRequestedEventHandler::create(Box::new(|_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut kind = Default::default();
+                args.PermissionKind(&mut kind)?;
+                let feature = if kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA {
+                    Feature::Camera
+                } else if kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE {
+                    Feature::Microphone
+                } else if kind == COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION {
+                    Feature::Location
+                } else if kind == COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS {
+                    Feature::Notifications
+                } else if kind == COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ {
+                    Feature::ClipboardRead
+                } else {
+                    return Ok(()); // not ours; leave WebView2's default
+                };
+                // WebView2 lets us answer after the handler returns, which is
+                // what keeps the prompt (painted in this same webview) from
+                // deadlocking against the request.
+                let deferral = args.GetDeferral()?;
+                let args = args.clone();
+                std::thread::spawn(move || {
+                    let allow = crate::permissions::decide(Ask::one(feature));
+                    let state = if allow {
+                        COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                    } else {
+                        COREWEBVIEW2_PERMISSION_STATE_DENY
+                    };
+                    unsafe {
+                        let _ = args.SetState(state);
+                        let _ = deferral.Complete();
+                    }
+                });
+                Ok(())
+            })),
+            &mut token,
+        );
+    });
+    if let Err(e) = res {
+        eprintln!("uapp: could not install permission handling: {e}");
+    }
+}
+
+/// macOS/iOS/Android: the platform already routes these requests (see the Linux
+/// arm's doc comment) — nothing to install here.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn install_permission_handling<R: tauri::Runtime>(_win: &tauri::WebviewWindow<R>) {}
 
 /// Install a handler that intercepts navigation requests (window.open,
 /// <a target="_blank">, etc.) and opens external URLs in the system browser
@@ -213,6 +545,18 @@ fn install_native_bridge(handle: tauri::AppHandle) {
                 None
             }
             NativeReq::SaveDialog { default_name } => save_dialog(&handle, &default_name),
+            // Native, for the same reason the permission dialog is: the page
+            // asking to forget these grants is the page they are about.
+            NativeReq::ConfirmResetPermissions => {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+                let ok = handle
+                    .dialog()
+                    .message("Forget this app's camera, microphone, location and other permission decisions?")
+                    .title("Reset permissions")
+                    .buttons(MessageDialogButtons::OkCancel)
+                    .blocking_show();
+                Some(if ok { "yes".into() } else { "no".into() })
+            }
         }
     }));
 }

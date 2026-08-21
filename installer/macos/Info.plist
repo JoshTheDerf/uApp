@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- macOS/iOS refuse a capture device without a usage string and kill the
+       process on the spot, so these are required for getUserMedia to work at
+       all — not merely for the wording of the system prompt. Shown once per
+       install, by the OS, before any .uapp can reach a device. -->
+  <key>NSCameraUsageDescription</key>
+  <string>An app you opened in UApp is asking to use the camera.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>An app you opened in UApp is asking to use the microphone.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>An app you opened in UApp is asking for your location.</string>
+</dict>
+</plist>

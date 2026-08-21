@@ -17,7 +17,7 @@ enum ShellMode {
 
 fn usage() -> ! {
     eprintln!(
-        "uapp {}\n\nUsage:\n  uapp <file.uapp>            open an app (creates it if empty/missing)\n  uapp open <file.uapp>       same, explicit\n  uapp new <file.uapp>        create a blank app without opening it\n  uapp encrypt <file.uapp>    encrypt a (plaintext) app with a master password\n  uapp decrypt <file.uapp>    remove encryption (needs the master password)\n  uapp passwd <file.uapp>     change the master password\n  uapp install                register .uapp with your desktop + file manager\n\nOptions:\n  --headless                  don't open a browser; print the URL as JSON\n  --port <n>                  bind a fixed port (default: random)\n  --window                    force the native UApp window (the primary path\n                              and the default when the UApp app is installed)\n  --browser                   force the system browser (the fallback shell)\n  --password <pw>             master password for an encrypted app (else\n                              UAPP_PASSWORD, else a hidden prompt). Opening a\n                              plaintext app with a password encrypts it.\n  --encrypt                   with `new`: create the app encrypted\n",
+        "uapp {}\n\nUsage:\n  uapp <file.uapp>            open an app (creates it if empty/missing)\n  uapp open <file.uapp>       same, explicit\n  uapp new <file.uapp>        create a blank app without opening it\n  uapp encrypt <file.uapp>    encrypt a (plaintext) app with a master password\n  uapp decrypt <file.uapp>    remove encryption (needs the master password)\n  uapp passwd <file.uapp>     change the master password\n  uapp install                register .uapp with your desktop + file manager\n  uapp update <app> <tpl>     update <app>'s code from a template .uapp,\n                              keeping its data\n\nOptions:\n  --headless                  don't open a browser; print the URL as JSON\n  --port <n>                  bind a fixed port (default: random)\n  --window                    force the native UApp window (the primary path\n                              and the default when the UApp app is installed)\n  --browser                   force the system browser (the fallback shell)\n  --password <pw>             master password for an encrypted app (else\n                              UAPP_PASSWORD, else a hidden prompt). Opening a\n                              plaintext app with a password encrypts it.\n  --encrypt                   with `new`: create the app encrypted\n  --dry-run                   with `update`: print what would change, as JSON\n  --keep-stale                with `update`: keep app files the template\n                              no longer has (they are removed by default)\n  --template-password <pw>    master password of an ENCRYPTED source .uapp\n",
         env!("CARGO_PKG_VERSION")
     );
     std::process::exit(2);
@@ -52,6 +52,12 @@ fn get_password(flag: Option<String>, confirm: bool) -> Result<String> {
     Ok(p)
 }
 
+/// Standard base64 (the op payload carries the template's bytes).
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("uapp: {e:#}");
@@ -67,6 +73,9 @@ fn run() -> Result<()> {
     let mut shell: Option<ShellMode> = None;
     let mut password_flag: Option<String> = None;
     let mut encrypt_new = false;
+    let mut dry_run = false;
+    let mut keep_stale = false;
+    let mut template_password: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -80,6 +89,11 @@ fn run() -> Result<()> {
                 password_flag = Some(it.next().cloned().unwrap_or_else(|| usage()));
             }
             "--encrypt" => encrypt_new = true,
+            "--dry-run" => dry_run = true,
+            "--keep-stale" => keep_stale = true,
+            "--template-password" => {
+                template_password = Some(it.next().cloned().unwrap_or_else(|| usage()));
+            }
             "-h" | "--help" => usage(),
             "-V" | "--version" => {
                 println!("uapp {}", env!("CARGO_PKG_VERSION"));
@@ -168,6 +182,64 @@ fn run() -> Result<()> {
             };
             uapp::cipher::rekey_file(&f, &old, &new)?;
             println!("master password changed");
+            Ok(())
+        }
+        // Drop a newer version of an app onto an existing one: the app's code
+        // (files under app/) and its schema are taken from the template; the
+        // rows, uploads, chat and app identity in <app> stay exactly as they
+        // are. This is the same operation the shell performs when a .uapp is
+        // dragged onto the window.
+        Some("update") => {
+            let target = open_path(&positional, 1);
+            let template = open_path(&positional, 2);
+            let bytes = std::fs::read(&template)
+                .with_context(|| format!("reading {}", template.display()))?;
+            let pw = resolve_open_password(&target, password_flag, true)?;
+            let device = device_id().unwrap_or_else(|_| "cli".into());
+            let user = {
+                let real = whoami::realname();
+                if real.trim().is_empty() { whoami::username() } else { real }
+            };
+            // A normal open: it takes the registry lock (so this refuses to run
+            // while the app is open elsewhere) and snapshots first, which is
+            // the undo path if an update turns out wrong.
+            let mut eng = uapp::engine::Engine::open_with_passphrase(
+                target.clone(), device, user, pw,
+            )
+            .with_context(|| {
+                format!(
+                    "opening {} (if it's open in a window, close it first — or just \
+                     drag the template onto that window)",
+                    target.display()
+                )
+            })?;
+            if dry_run {
+                let src = uapp::template::Source::from_bytes(
+                    &bytes, template_password.as_deref())?;
+                let plan = uapp::template::plan(&eng.db, src.conn())?;
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+                return Ok(());
+            }
+            let mut payload = json!({
+                "b64": base64_encode(&bytes),
+                "remove_stale": !keep_stale,
+            });
+            if let Some(p) = &template_password {
+                payload["password"] = json!(p);
+            }
+            let (result, _) = eng.local_op("template_update", payload)?;
+            eng.snapshot_if_dirty();
+            let a = &result["applied"];
+            println!(
+                "{}: {} file(s) written, {} removed, {} table(s) created, {} column(s) added, \
+                 {} view/index/trigger(s) updated",
+                target.display(),
+                a["filesWritten"], a["filesRemoved"], a["tablesCreated"],
+                a["columnsAdded"], a["objectsUpdated"],
+            );
+            for w in result["warnings"].as_array().cloned().unwrap_or_default() {
+                eprintln!("uapp: note: {}", w.as_str().unwrap_or_default());
+            }
             Ok(())
         }
         Some("open") => {

@@ -14,7 +14,14 @@
 <shell-topbar id="topbar"></shell-topbar>
 
 <main id="main">
-  <iframe id="appframe" src="/app/"></iframe>
+  <!-- allow= is the Permissions-Policy delegation, not a grant: it only lets
+       the app's navigator.* call reach the webview, which then goes through the
+       native Allow/Deny prompt (see permissions.rs). Same-origin frames inherit
+       these by default; naming them keeps that true if /app/ ever moves to its
+       own origin. Notifications have no Permissions-Policy token, so they are
+       gated solely by the native prompt. -->
+  <iframe id="appframe" src="/app/"
+          allow="camera; microphone; display-capture; geolocation; clipboard-read; storage-access"></iframe>
   <!-- Hidden eval context for the AI's run_js tool: uapp.js only, no app code.
        Never reloaded, so scratch state survives across tool calls. -->
   <iframe id="scratchframe" src="/scratch/" style="display:none" title="scratchpad"></iframe>

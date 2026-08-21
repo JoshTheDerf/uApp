@@ -24,11 +24,16 @@
     ],
     "fileAssociations": [
       {
-        "ext": ["uapp"],
+        "ext": [
+          "uapp"
+        ],
         "name": "UApp application",
         "description": "UApp shareable application",
         "role": "Editor"
       }
-    ]
+    ],
+    "macOS": {
+      "infoPlist": "installer/macos/Info.plist"
+    }
   }
 }

@@ -53,6 +53,13 @@ impl ChangeSet {
                 self.chat = true
             }
             "config_set" => self.config = true,
+            // A template update rewrites app files, reconciles the schema and
+            // can fill in config keys — everything but the chat.
+            "template_update" => {
+                self.files = true;
+                self.data = true;
+                self.config = true;
+            }
             _ => self.data = true,
         }
     }
@@ -483,40 +490,10 @@ impl Engine {
         device: String,
         user: String,
     ) -> Result<Engine> {
-        let db = Connection::open_in_memory()?;
-        if let Some(b) = bytes {
-            if b.len() < 16 || &b[..15] != b"SQLite format 3" {
-                anyhow::bail!(
-                    "this is not a plain .uapp/SQLite file — encrypted apps can't be \
-                     opened in the browser demo (decrypt it in the desktop app first)"
-                );
-            }
-            unsafe {
-                let len = b.len();
-                let buf = rusqlite::ffi::sqlite3_malloc64(len as u64) as *mut u8;
-                if buf.is_null() {
-                    anyhow::bail!("out of memory loading the app ({len} bytes)");
-                }
-                std::ptr::copy_nonoverlapping(b.as_ptr(), buf, len);
-                const FREEONCLOSE: std::os::raw::c_uint = 1;
-                const RESIZEABLE: std::os::raw::c_uint = 2;
-                let rc = rusqlite::ffi::sqlite3_deserialize(
-                    db.handle(),
-                    c"main".as_ptr(),
-                    buf,
-                    len as i64,
-                    len as i64,
-                    FREEONCLOSE | RESIZEABLE,
-                );
-                if rc != rusqlite::ffi::SQLITE_OK {
-                    anyhow::bail!("could not load the .uapp bytes (sqlite error {rc})");
-                }
-            }
-            let verdict: String = db.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
-            if verdict != "ok" {
-                anyhow::bail!("the file failed its integrity check: {verdict}");
-            }
-        }
+        let db = match bytes {
+            Some(b) => store::deserialize_bytes(&b)?,
+            None => Connection::open_in_memory()?,
+        };
         store::bootstrap_conn(&db, name)?; // idempotent: fills in missing schema
         let app_id = store::meta_get(&db, "app_id")?.unwrap_or_else(|| "unknown".into());
         Ok(Engine {

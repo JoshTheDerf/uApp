@@ -11,6 +11,7 @@ import {
   registerPanel, closePanel, panelOpen, fileKind, KIND_ICON,
 } from "./ui.js";
 import { openViewer } from "./viewer.js";
+import { pickTemplate } from "./template-update.js";
 import { S } from "./strings.js";
 
 const TPL = /* html */ `
@@ -527,6 +528,10 @@ function wire() {
       { icon: "refresh-cw", label: S.common.refresh, run: () => loadFiles() },
       { icon: "package", label: S.files.menuShareTemplate, run: () => downloadUrl("/template.uapp") },
       { icon: "download", label: S.files.menuDownloadApp, run: () => downloadUrl("/download.uapp") },
+      { sep: true },
+      // The other half of "share as template": take one in. Dropping the file
+      // on the window does the same thing.
+      { icon: "folder-input", label: S.files.menuUpdateFromTemplate, run: () => pickTemplate() },
     ], r.right, r.bottom);
   };
   $("fb-upload").addEventListener("change", (e) => {

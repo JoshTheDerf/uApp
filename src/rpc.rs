@@ -154,6 +154,15 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // Native-window file drops (see native.rs): the page passes back the id
         // it was notified with, never a path.
         "drop.ingest" => drop_ingest(app, p),
+        // Dropping a template .uapp on the window updates THIS app's code from
+        // it and leaves the data alone. Two steps on purpose: inspect stages
+        // the file and reports what would change, apply commits it.
+        "template.inspect" => template_inspect(app, p),
+        "template.apply" => template_apply(app, p),
+        "template.discard" => {
+            app.templates.lock().unwrap().remove(need_str(&p, "token")?);
+            Ok(json!({"ok": true}))
+        }
         // Fabricate one, so the drop path can be tested without a desktop
         // session (the real producer is the native window's event handler).
         // Off unless UAPP_TEST_DROPS is set: it takes paths from the caller.
@@ -464,6 +473,28 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             crate::prefs::set(need_str(&p, "key")?, p["value"].clone())?;
             Ok(json!({"ok": true}))
         }
+        // Web permissions. READ-ONLY from here on purpose: the shell and the
+        // app iframe share an origin, so any RPC that could grant a permission
+        // is an RPC untrusted app code can call on itself. Granting happens
+        // only through the native dialog in `gui.rs`; there is deliberately no
+        // `perm.setGrant` and no `perm.answer`.
+        #[cfg(not(target_arch = "wasm32"))]
+        "perm.grants" => {
+            let app_id = app.engine.lock().unwrap().app_id.clone();
+            Ok(json!({"appId": app_id, "grants": crate::permissions::summary(&app_id)}))
+        }
+        // Forgetting grants only ever removes privilege, but it can still be
+        // abused — clearing a denial buys another prompt — so it is confirmed
+        // in a native dialog the page cannot draw or click.
+        #[cfg(not(target_arch = "wasm32"))]
+        "perm.clearGrants" => {
+            let app_id = app.engine.lock().unwrap().app_id.clone();
+            if !crate::native::confirm_reset_permissions() {
+                return Ok(json!({"ok": false, "cancelled": true}));
+            }
+            crate::permissions::clear_app(&app_id)?;
+            Ok(json!({"ok": true}))
+        }
         "web.search" => web_search(p),
         "web.fetch" => web_fetch(p),
         // Open a URL in the system browser (from apps or AI tools).
@@ -620,6 +651,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
 fn file_size(eng: &crate::engine::Engine) -> u64 {
     std::fs::metadata(&eng.path).map(|m| m.len()).unwrap_or(0)
 }
+
 #[cfg(target_arch = "wasm32")]
 fn file_size(eng: &crate::engine::Engine) -> u64 {
     eng.serialize_bytes().map(|b| b.len() as u64).unwrap_or(0)
@@ -1424,6 +1456,108 @@ fn drop_ingest(app: &Arc<App>, p: Value) -> Result<Value> {
         }
     }
     Ok(json!({"ok": true, "files": stored, "skipped": skipped}))
+}
+
+// ---- update from a template -----------------------------------------------
+// A .uapp dropped on the window is almost never meant to become a file inside
+// the app: it's a newer version of the app itself. So the shell routes it here
+// instead of to `drop.ingest`, the user is shown what would change, and only
+// then is it applied. See `crate::template` for what "update" means precisely.
+
+/// A staged template expires as soon as it stops being plausible that the
+/// dialog is still on screen.
+const TEMPLATE_TTL_MS: u64 = 15 * 60 * 1000;
+
+/// The dropped/uploaded bytes plus the file name they arrived as. Either the
+/// page sends them (browser upload / the wasm demo) or it names a native drop
+/// id, in which case the bytes are read server-side and the page never learns
+/// the path — the same rule as `drop.ingest`.
+fn template_bytes(app: &Arc<App>, p: &Value) -> Result<(Vec<u8>, String)> {
+    if let Some(b64) = p["b64"].as_str() {
+        if b64.len() > MAX_UPLOAD_B64 {
+            bail!("that file is over the {}MB limit", MAX_UPLOAD_BYTES / 1024 / 1024);
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
+        let label = p["name"].as_str().unwrap_or("template.uapp").to_string();
+        return Ok((bytes, label));
+    }
+    if p["id"].is_string() {
+        let (files, _) = take_drop(app, p)?;
+        let [path] = &files[..] else {
+            bail!("drop a single .uapp file to update this app from it");
+        };
+        let label = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        return Ok((read_dropped(path)?, label));
+    }
+    bail!("template.inspect needs the file (b64) or a native drop id");
+}
+
+/// Stage a template and report what updating from it would change. Read-only:
+/// nothing is written until `template.apply` runs with the token.
+fn template_inspect(app: &Arc<App>, p: Value) -> Result<Value> {
+    let password = p["password"].as_str().filter(|s| !s.is_empty()).map(String::from);
+    let (bytes, label) = template_bytes(app, &p)?;
+    let plan = {
+        let src = crate::template::Source::from_bytes(&bytes, password.as_deref())?;
+        let eng = app.engine.lock().unwrap();
+        let mut plan = crate::template::plan(&eng.db, src.conn())?;
+        // What only this layer knows: the name it was dropped as, and whether
+        // it came out of this very app (so the dialog can say so).
+        plan["source"]["file"] = json!(label);
+        plan["source"]["bytes"] = json!(bytes.len());
+        plan["source"]["sameApp"] =
+            json!(plan["source"]["appId"].as_str() == Some(eng.app_id.as_str()));
+        plan
+    };
+    let token: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
+    {
+        let mut staged = app.templates.lock().unwrap();
+        let now = store::now_ms();
+        staged.retain(|_, s| now.saturating_sub(s.ts) < TEMPLATE_TTL_MS);
+        // A template can be tens of megabytes; never hold more than the one
+        // the user is looking at plus the one they just abandoned.
+        if staged.len() > 1 {
+            staged.clear();
+        }
+        staged.insert(
+            token.clone(),
+            crate::app::StagedTemplate { ts: now, label, bytes, password },
+        );
+    }
+    Ok(json!({"token": token, "plan": plan}))
+}
+
+/// Commit a staged update. One op, so the whole thing is one transaction: app
+/// files, schema and config all land together or not at all.
+fn template_apply(app: &Arc<App>, p: Value) -> Result<Value> {
+    let token = need_str(&p, "token")?;
+    let remove_stale = p["remove_stale"].as_bool().unwrap_or(true);
+    let staged = app
+        .templates
+        .lock()
+        .unwrap()
+        .remove(token)
+        .ok_or_else(|| anyhow!("that template is no longer staged — drop it in again"))?;
+    // Rescue point before a whole-app change, like an encryption switch.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut eng = app.engine.lock().unwrap();
+        if let Err(e) = eng.snapshot() {
+            eprintln!("uapp: snapshot before the template update failed: {e:#}");
+        }
+    }
+    let mut payload = json!({
+        "b64": base64::engine::general_purpose::STANDARD.encode(&staged.bytes),
+        "remove_stale": remove_stale,
+    });
+    if let Some(pw) = &staged.password {
+        payload["password"] = json!(pw);
+    }
+    let mut out = local_op(app, "template_update", payload)?;
+    if let Some(o) = out.as_object_mut() {
+        o.insert("file".into(), json!(staged.label));
+    }
+    Ok(out)
 }
 
 // ---- rename / move --------------------------------------------------------

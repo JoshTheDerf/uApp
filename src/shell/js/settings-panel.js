@@ -9,6 +9,7 @@ import {
   dlgAlert, dlgConfirm, wirePwToggle, downloadUrl, fmtSize,
 } from "./ui.js";
 import { S, LOCALES, getLocale, setLocale } from "./strings.js";
+import { pickTemplate } from "./template-update.js";
 
 const TPL = /* html */ `
   <div class="panel-head">
@@ -23,7 +24,9 @@ const TPL = /* html */ `
       <div class="row">
         <button id="btn-dl-app" class="btn primary sm"></button>
         <button id="btn-dl-template" class="btn sm"></button>
+        <button id="btn-update-template" class="btn sm"></button>
       </div>
+      <p class="hint">${S.settings.updateHint}</p>
     </div>
     <hr>
     <p class="hint">${S.settings.aiHint}</p>
@@ -112,6 +115,7 @@ const CSS = /* css */ `
 #crypt-fields, #launch-fields { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
 #crypt-fields .btn { align-self: flex-start; }
 #launch-fields .row { flex-wrap: wrap; margin-top: 0; }
+#export-box .row { flex-wrap: wrap; }
 #launch-icon-preview { width: 22px; height: 22px; border-radius: 5px; object-fit: contain; }
 #settings-form details summary { cursor: pointer; font-size: 13px; color: var(--text-2); }
 `;
@@ -417,6 +421,8 @@ function wire() {
   $("btn-dl-template").innerHTML = I("package", 13) + " " + S.settings.downloadTemplate;
   $("btn-dl-app").onclick = () => downloadUrl("/download.uapp");
   $("btn-dl-template").onclick = () => downloadUrl("/template.uapp");
+  $("btn-update-template").innerHTML = I("folder-input", 13) + " " + S.settings.loadUpdate;
+  $("btn-update-template").onclick = () => pickTemplate();
   wirePwToggle(document.querySelector("#settings-form .pwfield"));
 
   $("launch-icon-file").addEventListener("change", (e) => {

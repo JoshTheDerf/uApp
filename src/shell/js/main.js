@@ -68,6 +68,7 @@ import "./tools-panel.js";
 import "./mirror.js";
 import { addRefs } from "./chat-panel.js";
 import { fbCwd, loadFiles, pickDest } from "./files-panel.js";
+import { isUappFile, updateFromDrop, updateFromFile } from "./template-update.js";
 
 // ---------- app iframe ----------
 let reloadTimer = null;
@@ -123,14 +124,28 @@ function dropZoneAt(x, y) {
   if (panelOpen("sidebar")) return { kind: "chat", el: $("sidebar") };
   return null;
 }
-function nativeDropHover(x, y) {
-  const zone = dropZoneAt(x, y);
+// A .uapp being dragged in updates the app; it is not filed anywhere, so no
+// drop zone should light up for it. Only the drag's first event carries names,
+// so remember the verdict until the drag ends.
+let dragIsApp = false;
+function nativeDropHover(x, y, names) {
+  if (x == null) dragIsApp = false;
+  else if (names && names.length) dragIsApp = names.length === 1 && isUappFile(names[0]);
+  const zone = dragIsApp ? null : dropZoneAt(x, y);
   for (const el of [$("fb-pane"), $("sidebar")]) {
     el.classList.toggle("dropping", !!zone && zone.el === el);
   }
 }
 async function nativeDropFiles(p) {
   nativeDropHover(null);
+  // A .uapp is not content for this app — it's another version OF an app. Drop
+  // one on the window and the offer is to update this app's code from it,
+  // wherever in the window it landed (see template-update.js).
+  const names = p.names || [];
+  if (names.length === 1 && isUappFile(names[0])) {
+    updateFromDrop(p);
+    return;
+  }
   const zone = dropZoneAt(p.x, p.y);
   if (!zone) {
     dlgAlert(S.main.dropHint);
@@ -154,9 +169,27 @@ async function nativeDropFiles(p) {
   } catch (e) { dlgAlert(e.message); }
 }
 on("native-drop", (p) => {
-  if (p.type === "drop_hover") nativeDropHover(p.x, p.y);
+  if (p.type === "drop_hover") nativeDropHover(p.x, p.y, p.names);
   else if (p.type === "drop_leave") nativeDropHover(null);
   else nativeDropFiles(p);
+});
+
+// ---------- browser-shell file drops ----------
+// The browser shell (unlike the native window) gets real HTML5 drop events.
+// Panels handle their own uploads; a single .uapp dropped ANYWHERE in the shell
+// is claimed here first, because it means "update this app", not "store this".
+document.addEventListener("drop", (e) => {
+  const files = [...((e.dataTransfer && e.dataTransfer.files) || [])];
+  if (files.length !== 1 || !isUappFile(files[0].name)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  for (const el of [$("fb-pane"), $("sidebar")]) el?.classList.remove("dropping");
+  updateFromFile(files[0]);
+}, true);
+// Without this the browser navigates away to the dropped file when it lands
+// outside a panel, and the drop never reaches the handler above.
+document.addEventListener("dragover", (e) => {
+  if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) e.preventDefault();
 });
 
 // ---------- boot ----------

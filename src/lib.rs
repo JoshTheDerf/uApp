@@ -13,6 +13,8 @@ pub mod gui;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod install;
 pub mod mcp;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod permissions;
 pub mod native;
 pub mod net;
 pub mod prefs;
@@ -24,6 +26,7 @@ pub mod server;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shortcut;
 pub mod store;
+pub mod template;
 pub mod tools;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
@@ -189,6 +192,7 @@ pub fn serve_opts(
         actions: Mutex::new(std::collections::HashMap::new()),
         invokes: Mutex::new(std::collections::HashMap::new()),
         drops: Mutex::new(std::collections::HashMap::new()),
+        templates: Mutex::new(std::collections::HashMap::new()),
         contexts: Mutex::new(Vec::new()),
         console: Mutex::new(std::collections::VecDeque::new()),
         console_seq: std::sync::atomic::AtomicU64::new(0),
@@ -202,6 +206,17 @@ pub fn serve_opts(
     {
         let app = app.clone();
         native::install_drop_sink(Box::new(move |info| app.native_drop(info)));
+    }
+
+    // Permission grants are filed per app, so the broker needs to know which
+    // .uapp is open. It deliberately gets NOTHING else from the server: the
+    // prompt itself is a native dialog installed by `gui.rs`, because anything
+    // reachable from the page is reachable from untrusted app code.
+    {
+        let id_app = app.clone();
+        permissions::install_app_id(Box::new(move || {
+            id_app.engine.lock().unwrap().app_id.clone()
+        }));
     }
 
     rt.block_on(async move {

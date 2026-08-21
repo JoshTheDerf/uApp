@@ -84,6 +84,17 @@ pub struct ConsoleEntry {
 /// debugging aid, not a full log, so an older-than-N line just falls off.
 const CONSOLE_CAP: usize = 500;
 
+/// A dropped template .uapp held between "here's what this would change" and
+/// the user pressing Update.
+pub struct StagedTemplate {
+    pub ts: u64,
+    /// The file name it was dropped as — shown in the confirmation dialog.
+    pub label: String,
+    pub bytes: Vec<u8>,
+    /// Master password, when the source is an encrypted full app copy.
+    pub password: Option<String>,
+}
+
 pub struct App {
     pub engine: Mutex<Engine>,
     pub events: broadcast::Sender<Value>,
@@ -123,6 +134,11 @@ pub struct App {
     /// server to ingest them by id. Paths therefore always come from the real
     /// OS drop and never from something the page made up.
     pub drops: Mutex<HashMap<String, (u64, Vec<std::path::PathBuf>)>>,
+    /// A template .uapp that was dropped on the window and inspected, waiting
+    /// for the user to confirm the update (see `crate::template`). The bytes
+    /// stay server-side under a one-shot token — the page only ever sees the
+    /// token and the plan — and expire, like `drops`.
+    pub templates: Mutex<HashMap<String, StagedTemplate>>,
     /// JS execution contexts announced by connected pages via ctx.register:
     /// "app" (the live app iframe) and "scratchpad" (the shell's hidden
     /// scratch iframe). Push-ordered; the newest still-connected registrant
@@ -543,20 +559,26 @@ impl App {
     /// `drop.ingest`.
     pub fn native_drop(&self, info: crate::native::DropInfo) {
         use crate::native::DropPhase;
+        let names: Vec<String> = info
+            .paths
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| p.to_string_lossy().to_string())
+            })
+            .collect();
         match info.phase {
-            DropPhase::Hover => self.notify("drop_hover", json!({"x": info.x, "y": info.y})),
+            // Names ride along on hover too (the drag's Enter event carries
+            // them, later moves don't), so the shell can tell a .uapp — an
+            // app update — from files to file away, and not light up a drop
+            // zone that won't be used. Still no paths: the page never sees one.
+            DropPhase::Hover => {
+                self.notify("drop_hover", json!({"x": info.x, "y": info.y, "names": names}))
+            }
             DropPhase::Leave => self.notify("drop_leave", json!({})),
             DropPhase::Drop => {
                 let id: String = (0..12).map(|_| fastrand::alphanumeric()).collect();
-                let names: Vec<String> = info
-                    .paths
-                    .iter()
-                    .map(|p| {
-                        p.file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| p.to_string_lossy().to_string())
-                    })
-                    .collect();
                 {
                     let mut drops = self.drops.lock().unwrap();
                     if drops.len() > 8 {

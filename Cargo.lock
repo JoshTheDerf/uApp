@@ -4221,6 +4221,8 @@ dependencies = [
  "tokio",
  "ureq",
  "wasm-bindgen",
+ "webkit2gtk",
+ "webkit2gtk-sys",
  "whoami",
 ]
 

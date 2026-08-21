@@ -80,6 +80,21 @@
 
 <script>
 const esc = (s) => String(s).replace(/[<>&"]/g, (c) => ({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+
+// Every host.* call can fail for a reason the visitor can act on (storage
+// blocked in a private window, a sample that won't download), so nothing here
+// is left as an unhandled rejection.
+const host = (method, params) => uapp.rpc(method, params).catch((err) => {
+  alert("Could not " + ({
+    "host.create": "create the app",
+    "host.open": "open the app",
+    "host.delete": "delete the app",
+    "host.export": "download the app",
+    "host.import": "open that file",
+    "host.sample": "open the sample",
+  }[method] || "do that") + ": " + ((err && err.message) || err));
+  return null; // handled — callers check for null, nothing stays unhandled
+});
 const ago = (t) => {
   const m = Math.round((Date.now() - t) / 60000);
   if (m < 1) return "just now";
@@ -111,7 +126,7 @@ async function refreshYourApps() {
 
 document.getElementById("new-app").onclick = async () => {
   const name = prompt("App name:");
-  if (name) await uapp.rpc("host.create", { name });
+  if (name) await host("host.create", { name });
 };
 
 document.getElementById("import-file").onclick = () => document.getElementById("file").click();
@@ -121,10 +136,12 @@ document.getElementById("your-list").addEventListener("click", async (e) => {
   if (!btn) return;
   if (btn.dataset.del) {
     if (confirm("Delete this app?")) {
-      await uapp.rpc("host.delete", { id: btn.dataset.del });
+      if (await host("host.delete", { id: btn.dataset.del })) refreshYourApps();
     }
   } else if (btn.dataset.dl) {
-    const { b64, name } = await uapp.rpc("host.export", { id: btn.dataset.dl });
+    const dl = await host("host.export", { id: btn.dataset.dl });
+    if (!dl) return;
+    const { b64, name } = dl;
     const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
@@ -132,7 +149,7 @@ document.getElementById("your-list").addEventListener("click", async (e) => {
     a.click();
     URL.revokeObjectURL(a.href);
   } else if (btn.dataset.open) {
-    await uapp.rpc("host.open", { id: btn.dataset.open });
+    await host("host.open", { id: btn.dataset.open });
   }
 });
 
@@ -144,9 +161,7 @@ document.getElementById("file").onchange = async (e) => {
   for (let i = 0; i < buf.length; i += 32768) {
     bin += String.fromCharCode.apply(null, buf.subarray(i, i + 32768));
   }
-  try {
-    await uapp.rpc("host.import", { name: f.name, b64: btoa(bin) });
-  } catch (err) { alert(err.message); }
+  await host("host.import", { name: f.name, b64: btoa(bin) });
 };
 
 uapp.query("SELECT name, url, emoji, description, website FROM samples ORDER BY rowid").then(({ rows }) => {
@@ -164,7 +179,7 @@ uapp.query("SELECT name, url, emoji, description, website FROM samples ORDER BY 
     const a = e.target.closest("a");
     if (!a || a.target === "_blank") return;
     e.preventDefault();
-    uapp.rpc("host.sample", { url: a.dataset.url, name: a.dataset.name });
+    host("host.sample", { url: a.dataset.url, name: a.dataset.name });
   });
 });
 

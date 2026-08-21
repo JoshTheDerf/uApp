@@ -110,6 +110,7 @@ pub fn open_app(bytes: Option<Vec<u8>>, name: String, user: String) -> Result<St
             actions: Mutex::new(std::collections::HashMap::new()),
             invokes: Mutex::new(std::collections::HashMap::new()),
             drops: Mutex::new(std::collections::HashMap::new()),
+        templates: Mutex::new(std::collections::HashMap::new()),
             contexts: Mutex::new(Vec::new()),
             console: Mutex::new(std::collections::VecDeque::new()),
             console_seq: std::sync::atomic::AtomicU64::new(0),

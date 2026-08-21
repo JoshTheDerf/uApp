@@ -35,6 +35,7 @@ const SHELL_MODULES: &[(&str, &str)] = &[
     ("settings-panel.js", include_str!("shell/js/settings-panel.js")),
     ("tools-panel.js", include_str!("shell/js/tools-panel.js")),
     ("mirror.js", include_str!("shell/js/mirror.js")),
+    ("template-update.js", include_str!("shell/js/template-update.js")),
     ("strings.js", include_str!("shell/js/strings.js")),
     ("lang/en.js", include_str!("shell/js/lang/en.js")),
     ("lang/fr.js", include_str!("shell/js/lang/fr.js")),

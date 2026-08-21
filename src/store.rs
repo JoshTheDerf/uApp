@@ -596,7 +596,10 @@ pub fn query_allow_attach(conn: &Connection, sql: &str, params: &[Value]) -> Res
     Ok(json!({"columns": cols, "rows": rows_out}))
 }
 
-fn record_file_history(conn: &Connection, op: &Op, name: &str, action: &str) -> Result<()> {
+/// Snapshot a file's outgoing content into the history table before a write or
+/// a delete. Public so a template update can record its file writes the same
+/// way an ordinary edit does — and stay revertible from the file browser.
+pub fn record_file_history(conn: &Connection, op: &Op, name: &str, action: &str) -> Result<()> {
     // Snapshot the PREVIOUS content (if any) so any change is revertible.
     // The sqlar row already holds the sqlar-compressed form — copy data + sz
     // verbatim (sz == length(data) still means "stored raw", like sqlar).
@@ -723,6 +726,16 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             record_file_history(conn, op, &name, "del")?;
             conn.execute("DELETE FROM sqlar WHERE name=?1", rusqlite::params![name])?;
             Ok(json!({"ok": true}))
+        }
+        // One op = one whole "update this app from a template" (see
+        // `crate::template`): app files replaced, schema reconciled additively,
+        // user data untouched. It rides the op path so the engine's single
+        // transaction makes the whole update atomic.
+        "template_update" => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(p["b64"].as_str().unwrap_or_default())?;
+            let src = crate::template::Source::from_bytes(&bytes, p["password"].as_str())?;
+            crate::template::apply(conn, src.conn(), op, p["remove_stale"].as_bool().unwrap_or(true))
         }
         "config_set" => {
             let key = p["key"].as_str().ok_or_else(|| anyhow!("config_set missing key"))?;
@@ -962,6 +975,46 @@ fn serialize_conn(conn: &Connection) -> Result<Vec<u8>> {
         rusqlite::ffi::sqlite3_free(p as *mut std::ffi::c_void);
         Ok(out)
     }
+}
+
+/// Load complete .uapp bytes into a fresh in-memory database. The browser
+/// build's stand-in for opening a file: used for the app the demo opens and
+/// for a template dropped on top of it.
+#[cfg(target_arch = "wasm32")]
+pub fn deserialize_bytes(bytes: &[u8]) -> Result<Connection> {
+    if bytes.len() < 16 || &bytes[..15] != b"SQLite format 3" {
+        bail!(
+            "this is not a plain .uapp/SQLite file — encrypted apps can't be \
+             opened in the browser demo (decrypt it in the desktop app first)"
+        );
+    }
+    let db = Connection::open_in_memory()?;
+    unsafe {
+        let len = bytes.len();
+        let buf = rusqlite::ffi::sqlite3_malloc64(len as u64) as *mut u8;
+        if buf.is_null() {
+            bail!("out of memory loading the app ({len} bytes)");
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+        const FREEONCLOSE: std::os::raw::c_uint = 1;
+        const RESIZEABLE: std::os::raw::c_uint = 2;
+        let rc = rusqlite::ffi::sqlite3_deserialize(
+            db.handle(),
+            c"main".as_ptr(),
+            buf,
+            len as i64,
+            len as i64,
+            FREEONCLOSE | RESIZEABLE,
+        );
+        if rc != rusqlite::ffi::SQLITE_OK {
+            bail!("could not load the .uapp bytes (sqlite error {rc})");
+        }
+    }
+    let verdict: String = db.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+    if verdict != "ok" {
+        bail!("the file failed its integrity check: {verdict}");
+    }
+    Ok(db)
 }
 
 #[cfg(target_arch = "wasm32")]

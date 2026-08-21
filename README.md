@@ -24,6 +24,7 @@ How to use:
 1. Open a demo app (or set up a new one.)
 2. Use the file browser and SQLite browser tools to modify it, or hook up an AI API key to modify the application for you.
 3. Download the .uapp file directly (containing user data) or as a template (without user data) to re-use it later.
+4. Drag a template .uapp onto a running app to update its code while keeping the data already in it.
 
 [https://thederf.com/uapp/demo](https://thederf.com/uapp/demo)
 
