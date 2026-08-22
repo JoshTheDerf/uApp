@@ -431,6 +431,9 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
 #[cfg(target_os = "windows")]
 fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
     use crate::permissions::{Ask, Feature};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_PERMISSION_KIND_CAMERA, COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ,
         COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
@@ -439,13 +442,25 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
     };
     use webview2_com::PermissionRequestedEventHandler;
 
-    let res = win.with_webview(|wv| unsafe {
+    // Answers for the requests waiting on the user, each one holding the COM
+    // args + deferral it will complete. WebView2 is apartment-threaded and its
+    // interfaces are not `Send`, so — exactly as on Linux — they stay parked
+    // here on the UI thread and are only ever touched again from a main-thread
+    // callback. Boxing the answer as a closure keeps the COM types out of the
+    // map's signature.
+    thread_local! {
+        static OPEN: RefCell<HashMap<u64, Box<dyn FnOnce(bool)>>> = RefCell::new(HashMap::new());
+    }
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    let handle = win.app_handle().clone();
+    let res = win.with_webview(move |wv| unsafe {
         let Ok(core) = wv.controller().CoreWebView2() else {
             return;
         };
         let mut token = Default::default();
         let _ = core.add_PermissionRequested(
-            &PermissionRequestedEventHandler::create(Box::new(|_, args| {
+            &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
                 let mut kind = Default::default();
                 args.PermissionKind(&mut kind)?;
@@ -467,17 +482,31 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
                 // deadlocking against the request.
                 let deferral = args.GetDeferral()?;
                 let args = args.clone();
+                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                OPEN.with(|m| {
+                    m.borrow_mut().insert(
+                        id,
+                        Box::new(move |allow| {
+                            let _ = args.SetState(if allow {
+                                COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                            } else {
+                                COREWEBVIEW2_PERMISSION_STATE_DENY
+                            });
+                            let _ = deferral.Complete();
+                        }),
+                    );
+                });
+                // Deciding paints a modal dialog, so it cannot happen on this
+                // thread; the answer then has to hop back, because the objects
+                // it completes belong to this one.
+                let handle = handle.clone();
                 std::thread::spawn(move || {
                     let allow = crate::permissions::decide(Ask::one(feature));
-                    let state = if allow {
-                        COREWEBVIEW2_PERMISSION_STATE_ALLOW
-                    } else {
-                        COREWEBVIEW2_PERMISSION_STATE_DENY
-                    };
-                    unsafe {
-                        let _ = args.SetState(state);
-                        let _ = deferral.Complete();
-                    }
+                    let _ = handle.run_on_main_thread(move || {
+                        if let Some(answer) = OPEN.with(|m| m.borrow_mut().remove(&id)) {
+                            answer(allow);
+                        }
+                    });
                 });
                 Ok(())
             })),
