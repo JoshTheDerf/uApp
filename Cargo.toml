@@ -36,7 +36,7 @@ path = "src/bin/make-demo-apps.rs"
 [features]
 default = ["gui"]
 # Native desktop/mobile shell (Tauri v2 + a system webview). Enabled by default.
-gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:webkit2gtk", "dep:webkit2gtk-sys"]
+gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:webkit2gtk", "dep:webkit2gtk-sys", "dep:webview2-com"]
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true , features = [] }
@@ -75,6 +75,15 @@ futures-util = "0.3"
 dirs = "5"
 # Hidden master-password prompts in the CLI (no-tty falls back to flags/env).
 rpassword = "7"
+
+# Windows web-permission plumbing (gui feature only). WebView2 prompts for
+# camera/mic/location/notifications/clipboard itself and forgets the answer, so
+# the CoreWebView2 controller has to be reached directly to route those requests
+# through our own allow/deny prompt and remember them per .uapp (see
+# permissions.rs and the windows arm of gui.rs). Same crate + version wry
+# already builds against, so this unifies rather than adding a second binding.
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = { version = "0.38", optional = true }
 
 # Linux web-permission plumbing (gui feature only). WebKitGTK ships
 # getUserMedia switched OFF and denies every permission request the embedder

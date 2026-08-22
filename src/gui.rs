@@ -176,6 +176,8 @@ fn install_permission_prompt(handle: tauri::AppHandle) {
     crate::permissions::install_prompt(Box::new(move |ask| {
         use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
         let t = ask.prompt_text();
+        // `mut` is only taken up by the desktop-only `parent` call below.
+        #[allow(unused_mut)]
         let mut d = handle
             .dialog()
             .message(&t.body)
@@ -188,6 +190,9 @@ fn install_permission_prompt(handle: tauri::AppHandle) {
             ));
         // Modal to the app window, so it can't be lost behind it and answered
         // later against a request the user has forgotten the context of.
+        // Desktop only: the mobile dialog API has no `parent` — Android and iOS
+        // show the dialog over the activity/scene regardless.
+        #[cfg(desktop)]
         if let Some(w) = handle.get_webview_window("main") {
             d = d.parent(&w);
         }

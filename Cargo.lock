@@ -4223,6 +4223,7 @@ dependencies = [
  "wasm-bindgen",
  "webkit2gtk",
  "webkit2gtk-sys",
+ "webview2-com",
  "whoami",
 ]
 

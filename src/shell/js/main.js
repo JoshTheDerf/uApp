@@ -71,10 +71,28 @@ import { fbCwd, loadFiles, pickDest } from "./files-panel.js";
 import { isUappFile, updateFromDrop, updateFromFile } from "./template-update.js";
 
 // ---------- app iframe ----------
+// Reloads must not grow the session history. Assigning a cache-busted src is a
+// navigation to a NEW url, so every save pushed another history entry, and
+// Android WebViews keep per-entry document state alive (worst when the app
+// embeds an iframe of its own: each entry pins a whole extra frame tree). Since
+// everything under /app/ is served no-store, the url can stay stable and the
+// reload can replace the current entry instead of stacking one on top of it.
 let reloadTimer = null;
+function reloadAppFrame() {
+  const f = $("appframe");
+  if (!f) return;
+  const url = (window.__uappBase || "/") + "app/";
+  // Same-origin, so we can drive the frame's own location; src= is the fallback
+  // for the window not being reachable yet (frame still empty on first boot).
+  try {
+    f.contentWindow.location.replace(url);
+    return;
+  } catch {}
+  f.src = url;
+}
 function scheduleReload() {
   clearTimeout(reloadTimer);
-  reloadTimer = setTimeout(() => { $("appframe").src = (window.__uappBase || "/") + "app/?r=" + Date.now(); }, 400);
+  reloadTimer = setTimeout(reloadAppFrame, 400);
 }
 on("files-changed", scheduleReload);
 on("reload-app", scheduleReload);

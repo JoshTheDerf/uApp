@@ -979,7 +979,10 @@ if (tabChannel) {
     });
     for (const [id, path] of [["appframe", "app/"], ["scratchframe", "scratch/"]]) {
       const f = document.getElementById(id);
-      if (f) f.src = BASE.pathname + path + "?r=" + Date.now();
+      // No cache-buster: these are served no-store, and a stable url lets
+      // later reloads replace this history entry instead of pushing a new one
+      // (see reloadAppFrame in shell/main.js).
+      if (f) f.src = BASE.pathname + path;
     }
 
     await import(new URL("shell/main.js", BASE));

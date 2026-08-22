@@ -41,7 +41,7 @@ pub fn install(app_id: &str, name: &str, path: &Path, icon_png: Option<&[u8]>) -
     let (msg, detail, files) = macos(name, path, icon_png)?;
     #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
     {
-        let _ = icon_png;
+        let _ = (icon_png, name);
         bail!("launcher shortcuts aren't supported on this platform");
     }
     #[cfg(any(target_os = "linux", windows, target_os = "macos"))]
