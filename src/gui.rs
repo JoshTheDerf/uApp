@@ -14,7 +14,8 @@ use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        // Native "Save…" dialog for scratch apps (opened with no file).
+        // Native "Save…" dialog for scratch apps (opened with no file), and
+        // the "Open…" dialog for picking another .uapp to run.
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let args: Vec<String> = std::env::args().collect();
@@ -579,6 +580,7 @@ fn install_native_bridge(handle: tauri::AppHandle) {
                 None
             }
             NativeReq::SaveDialog { default_name } => save_dialog(&handle, &default_name),
+            NativeReq::OpenDialog => open_dialog(&handle),
             // Native, for the same reason the permission dialog is: the page
             // asking to forget these grants is the page they are about.
             NativeReq::ConfirmResetPermissions => {
@@ -605,6 +607,20 @@ fn save_dialog(handle: &tauri::AppHandle, default_name: &str) -> Option<String> 
         .set_file_name(default_name)
         .add_filter("UApp app", &["uapp"])
         .blocking_save_file()
+        .and_then(|fp| fp.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Native "open" dialog for picking an existing .uapp; returns the chosen
+/// absolute path (or None if the user cancelled). Blocks the calling (RPC
+/// worker) thread until they decide, like `save_dialog`.
+fn open_dialog(handle: &tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    handle
+        .dialog()
+        .file()
+        .add_filter("UApp app", &["uapp"])
+        .blocking_pick_file()
         .and_then(|fp| fp.into_path().ok())
         .map(|p| p.to_string_lossy().to_string())
 }

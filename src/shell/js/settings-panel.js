@@ -29,6 +29,17 @@ const TPL = /* html */ `
       <p class="hint">${S.settings.updateHint}</p>
     </div>
     <hr>
+    <!-- Desktop only: open a DIFFERENT .uapp (the topbar offers the same
+         thing on a blank app). The way in when .uapp files aren't associated
+         with UApp on this machine, so there's nothing to double-click. -->
+    <div id="open-box" class="hidden">
+      <div class="sect-head"><b>${S.settings.openSection}</b></div>
+      <p class="hint">${S.settings.openHint}</p>
+      <div class="row">
+        <button id="btn-open-uapp" class="btn sm"></button>
+      </div>
+    </div>
+    <hr id="open-hr" class="hidden">
     <p class="hint">${S.settings.aiHint}</p>
     <label>${S.settings.aiProvider}
       <select id="cfg-provider">
@@ -333,6 +344,17 @@ async function loadSettings() {
   renderLauncher();
   renderMirror();
   renderCrypt();
+  renderOpenAnother();
+}
+
+// "Open another app" is a native-desktop trick: it shows an OS file dialog and
+// starts a second instance. Mobile and the browser shell can't do either, so
+// the whole section stays hidden there.
+function renderOpenAnother() {
+  const info = state.info || {};
+  const usable = !!info.native && info.desktop !== false && !info.wasm;
+  $("open-box").classList.toggle("hidden", !usable);
+  $("open-hr").classList.toggle("hidden", !usable);
 }
 
 // ---------- original-file write-back (Android intent-opened docs) ----------
@@ -423,6 +445,19 @@ function wire() {
   $("btn-dl-template").onclick = () => downloadUrl("/template.uapp");
   $("btn-update-template").innerHTML = I("folder-input", 13) + " " + S.settings.loadUpdate;
   $("btn-update-template").onclick = () => pickTemplate();
+  // Open another .uapp in its own window (see the app.openFile RPC): a native
+  // file dialog, then that app starts on its own — this one keeps running.
+  $("btn-open-uapp").innerHTML = I("folder-open", 13) + " " + S.settings.openApp;
+  $("btn-open-uapp").onclick = async () => {
+    const b = $("btn-open-uapp");
+    b.disabled = true;
+    try {
+      const r = await rpc("app.openFile");
+      if (r && r.opened) closePanel("settingspanel"); // the new window has it
+    } catch (e) {
+      dlgAlert(S.settings.openFailed(e.message));
+    } finally { b.disabled = false; }
+  };
   wirePwToggle(document.querySelector("#settings-form .pwfield"));
 
   $("launch-icon-file").addEventListener("change", (e) => {

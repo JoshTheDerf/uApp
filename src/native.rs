@@ -21,6 +21,10 @@ pub enum NativeReq {
     /// Show a native "save as" dialog seeded with `default_name`; returns the
     /// chosen absolute path, or None if the user cancelled.
     SaveDialog { default_name: String },
+    /// Show a native "open" dialog filtered to `.uapp` files; returns the
+    /// chosen absolute path, or None if the user cancelled. The way in when
+    /// the machine has no .uapp file association to double-click.
+    OpenDialog,
     /// Confirm forgetting this app's permission grants. Native, because the
     /// page asking is the page the grants are about.
     ConfirmResetPermissions,

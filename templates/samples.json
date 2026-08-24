@@ -4,41 +4,63 @@
     "file": "team-expenses.uapp",
     "emoji": "💵",
     "description": "Expense tracker with actions",
-    "website": null
+    "website": null,
+    "kind": "app"
   },
   {
     "name": "Kanban Board",
     "file": "kanban-board.uapp",
     "emoji": "🗂️",
     "description": "Task board",
-    "website": null
+    "website": null,
+    "kind": "app"
   },
   {
     "name": "Habit Tracker",
     "file": "habit-tracker.uapp",
     "emoji": "🔥",
     "description": "Check-in grid with streaks",
-    "website": null
+    "website": null,
+    "kind": "app"
   },
   {
     "name": "Contact Book",
     "file": "contact-book.uapp",
     "emoji": "📇",
     "description": "Contacts with tags and notes",
-    "website": null
+    "website": null,
+    "kind": "app"
+  },
+  {
+    "name": "SandVox",
+    "file": "sandvox.uapp",
+    "emoji": "⛏️",
+    "description": "Voxel sandbox with worlds saved in SQLite",
+    "website": null,
+    "kind": "game"
+  },
+  {
+    "name": "Tanks",
+    "file": "tanks.uapp",
+    "emoji": "💥",
+    "description": "Tank arena with frag scores saved in SQLite",
+    "website": null,
+    "kind": "game"
   },
   {
     "name": "Snake Arcade",
     "file": "snake-arcade.uapp",
     "emoji": "🐍",
     "description": "Canvas snake game with SQL leaderboard",
-    "website": null
+    "website": null,
+    "kind": "game"
   },
   {
     "name": "CubbyCAD",
     "file": "CubbyCAD.uapp",
     "emoji": "🧊",
     "description": "A friendly web CAD package, with CSG, SDF primitives, and sculpting.",
-    "website": "https://cubbycad.com"
+    "website": "https://cubbycad.com",
+    "kind": "app"
   }
 ]

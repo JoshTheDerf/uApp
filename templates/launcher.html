@@ -14,13 +14,11 @@
   h1 { font-size:20px; margin:0 0 10px }
   p { margin:0 0 15px; line-height:1.6; color:#444 }
 
-  h2 { font-size:14px; margin:30px 0 10px; text-transform:uppercase; letter-spacing:0.5px; color:#888 }
+  h2 { font-size:14px; margin:30px 0 10px; color:#888 }
   ul { list-style:none; margin:0; padding:0 }
   li { margin:0 0 8px }
   li a { color:#0066cc; text-decoration:none }
   li a:hover { text-decoration:underline }
-  .meta { font-size:12px; color:#888; margin-left:8px }
-  .web-link { font-size:12px; margin-left:8px }
 
   .your-apps { margin-bottom:30px }
   .your-apps button { margin:10px 0; padding:8px 14px; border:1px solid #ccc; background:#fff; border-radius:4px; cursor:pointer; font-size:13px }
@@ -36,6 +34,78 @@
   .app-item button:hover { color:#000 }
 
   input[type=file] { display:none }
+
+  /* ---- where to get the real thing ---- */
+  .gets { display:flex; flex-wrap:wrap; gap:10px; margin:0 0 10px }
+  .get {
+    display:flex; align-items:center; gap:11px; padding:10px 15px;
+    background:#fff; border:1px solid #dcdcdc; border-radius:9px;
+    text-decoration:none; color:inherit; box-shadow:0 1px 2px rgba(0,0,0,.05);
+    transition:box-shadow .15s, border-color .15s, transform .15s;
+  }
+  .get:hover { border-color:#bbb; box-shadow:0 3px 8px rgba(0,0,0,.09); transform:translateY(-1px) }
+  .get svg { display:block; color:#888 }
+  .get .t { display:block; font-size:14px; font-weight:500 }
+  .get .s { display:block; font-size:11px; color:#999 }
+  .fine { font-size:11px; color:#999; margin:0 0 30px }
+  .built { font-size:11px; color:#999; margin:-4px 0 15px }
+
+  /* ---- the file tray: each sample is an object you pick up, not a link ---- */
+  .lede { font-size:13px; color:#666; margin:0 0 12px }
+  .tray { display:flex; flex-direction:column; gap:15px; margin:0 0 18px }
+  .group-label { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:#aaa; margin:0 0 7px }
+  .row { display:flex; flex-wrap:wrap; gap:10px }
+  .slot { display:flex; flex-direction:column; align-items:flex-start; gap:3px }
+
+  .chip {
+    display:flex; align-items:center; gap:10px; text-align:left;
+    padding:9px 14px 9px 11px; margin:0; font:inherit; color:inherit;
+    background:#fff; border:1px solid #dcdcdc; border-radius:9px;
+    box-shadow:0 1px 2px rgba(0,0,0,.05);
+    cursor:grab; touch-action:none; user-select:none; -webkit-user-select:none; -webkit-user-drag:none;
+    transition:box-shadow .15s, border-color .15s, transform .15s, opacity .15s;
+  }
+  .chip:hover { border-color:#bbb; box-shadow:0 3px 8px rgba(0,0,0,.09); transform:translateY(-1px) }
+  .chip:focus-visible { outline:2px solid #0066cc; outline-offset:2px }
+  .chip:active { cursor:grabbing }
+  .chip .ico { font-size:20px; line-height:1 }
+  .chip .col { display:flex; flex-direction:column; min-width:0 }
+  .chip .fname { font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace }
+  .chip .sub { font-size:11px; color:#999; line-height:1.35 }
+  .chip.lifted { opacity:.3; box-shadow:none; transform:none }
+
+  .chip.ghost {
+    position:fixed; z-index:50; margin:0; pointer-events:none;
+    transform:rotate(-2.5deg); box-shadow:0 12px 26px rgba(0,0,0,.20); border-color:#c3c3c3;
+    cursor:grabbing;
+  }
+
+  .slot .web { font-size:11px; color:#0066cc; text-decoration:none; padding-left:3px }
+  .slot .web:hover { text-decoration:underline }
+
+  /* ---- the opener: the thing that turns a file into a running app ---- */
+  .opener {
+    display:flex; flex-direction:column; align-items:center; gap:4px;
+    width:100%; padding:22px 16px; margin:0 0 30px; font:inherit; color:#555;
+    background:#fff; border:2px dashed #d2d2d2; border-radius:12px; cursor:pointer;
+    transition:border-color .15s, background .15s, color .15s, transform .15s;
+  }
+  .opener:hover { border-color:#b4b4b4; background:#fff }
+  .opener svg { display:block; color:#9a9a9a; transition:color .15s, transform .15s }
+  .opener .title { font-size:15px; font-weight:500; color:#333 }
+  .opener .sub { font-size:12px; color:#888 }
+  .opener .sub.say { color:#0066cc; font-weight:500 }
+  body.dragging .opener { border-color:#7fb2e5; background:#f4f9ff; color:#2b6cb0 }
+  body.dragging .opener svg { color:#4a90d9 }
+  .opener.over { border-color:#0066cc; border-style:solid; background:#eaf4ff; transform:scale(1.015) }
+  .opener.over svg { color:#0066cc; transform:translateY(2px) }
+  .opener.over .title { color:#0066cc }
+  .opener.swallow { transform:scale(.985) }
+  .opener.pulse { animation:pulse .6s ease }
+  @keyframes pulse {
+    0%,100% { border-color:#d2d2d2 }
+    30%     { border-color:#0066cc; background:#eaf4ff }
+  }
 </style>
 </head>
 <body>
@@ -45,31 +115,72 @@
     A <code>.uapp</code> file is a single-file application. It contains the UI, database, and files all together, like
     a spreadsheet, but it runs like an app. Open it, edit it, share it via email or network share. No server needed.
   </p>
+  <h2>Try one</h2>
   <p>
-    These sample apps run entirely in your browser. Changes are saved locally. Download your modified copy to share with others.
+    These sample apps run entirely in your browser using a WebAssembly backend. Changes are saved
+    locally. Download your modified copy to share with others.
   </p>
+  <p class="lede">Drag a sample .uapp file into the file opener</p>
+  <div class="tray" id="tray"></div>
+  <p class="built">Every example app here was built with GLM 5.3.</p>
+
+  <button class="opener" id="opener">
+    <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 3v9"/><path d="m8.5 8.5 3.5 3.5 3.5-3.5"/>
+      <path d="M4 14.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3.5"/>
+    </svg>
+    <span class="title">Open a .uapp file</span>
+    <span class="sub" id="opener-sub">Or click to pick a file from your computer</span>
+  </button>
 
   <h2>Your apps</h2>
   <div class="your-apps">
     <button id="new-app">New blank app</button>
-    <button id="import-file">Open a .uapp file…</button>
     <ul id="your-list"></ul>
   </div>
-
-  <h2>Sample apps</h2>
-  <ul id="sample-list"></ul>
 
   <h2>How it works</h2>
   <p>
     A <code>.uapp</code> file is a SQLite database containing:
   </p>
   <ul style="list-style:disc; padding-left:20px; line-height:1.6">
-    <li>Compressed web app files in sqlar archive format (the app UI)</li>
+    <li>Compressed web app files in <a href="https://sqlite.org/sqlar/doc/trunk/README.md" target="_blank" rel="noopener">sqlar</a> archive format (the app UI)</li>
     <li>Whatever tables and data the app stores (user data)</li>
   </ul>
   <p style="margin-bottom:30px">
     When opened, a built-in web server serves the files in the <code>/app</code> folder and injects plumbing to let the app read and write to the database. Apps can also be modified with an integrated AI chat, SQL browser, and file editor.
   </p>
+
+  <h2>Run Offline</h2>
+  <p>
+    This page runs the whole runtime in your browser. The desktop and Android builds open
+    <code>.uapp</code> files straight off your own disk, and both are on GitHub releases.
+  </p>
+  <div class="gets">
+    <a class="get" href="https://github.com/JoshTheDerf/uApp/releases/latest" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="2.5" y="4" width="19" height="12.5" rx="1.8"/><path d="M8.5 20.5h7M12 16.5v4"/>
+      </svg>
+      <span>
+        <span class="t">Desktop</span>
+        <span class="s">Windows, macOS, Linux</span>
+      </span>
+    </a>
+    <a class="get" href="https://github.com/JoshTheDerf/uApp/releases/latest" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M5.5 11.5a6.5 6.5 0 0 1 13 0z"/>
+        <path d="m7.8 5 1.4 2.1M16.2 5l-1.4 2.1"/>
+        <circle cx="9.7" cy="9" r=".7" fill="currentColor" stroke="none"/>
+        <circle cx="14.3" cy="9" r=".7" fill="currentColor" stroke="none"/>
+        <rect x="6.5" y="13.5" width="11" height="6" rx="1.6"/>
+      </svg>
+      <span>
+        <span class="t">Android</span>
+        <span class="s">Universal APK</span>
+      </span>
+    </a>
+  </div>
+  <p class="fine">Nothing is code-signed yet, so Windows, macOS, and Android will warn about the download.</p>
 
   <p style="font-size:13px; color:#666">
     <a href="https://github.com/JoshTheDerf/uApp/#uapp--single-file-shareable-apps" target="_blank" rel="noopener">View project on GitHub</a>
@@ -93,7 +204,7 @@ const host = (method, params) => uapp.rpc(method, params).catch((err) => {
     "host.import": "open that file",
     "host.sample": "open the sample",
   }[method] || "do that") + ": " + ((err && err.message) || err));
-  return null; // handled — callers check for null, nothing stays unhandled
+  return null; // handled: callers check for null, nothing stays unhandled
 });
 const ago = (t) => {
   const m = Math.round((Date.now() - t) / 60000);
@@ -102,12 +213,15 @@ const ago = (t) => {
   if (m < 48 * 60) return Math.round(m / 60) + " h ago";
   return new Date(t).toLocaleDateString();
 };
+const fmtSize = (n) => !n ? "" :
+  n >= 1048576 ? (n / 1048576).toFixed(n >= 10485760 ? 0 : 1) + " MB"
+               : Math.max(1, Math.round(n / 1024)) + " KB";
 
 async function refreshYourApps() {
   const { apps } = await uapp.rpc("host.apps");
   const list = document.getElementById("your-list");
   if (apps.length === 0) {
-    list.innerHTML = '<li style="color:#999; font-size:13px">No apps yet. Create one or open a sample.</li>';
+    list.innerHTML = '<li style="color:#999; font-size:13px">No apps yet.</li>';
   } else {
     list.innerHTML = apps.map((a) => `
       <li class="app-item">
@@ -128,8 +242,6 @@ document.getElementById("new-app").onclick = async () => {
   const name = prompt("App name:");
   if (name) await host("host.create", { name });
 };
-
-document.getElementById("import-file").onclick = () => document.getElementById("file").click();
 
 document.getElementById("your-list").addEventListener("click", async (e) => {
   const btn = e.target.closest("button");
@@ -153,34 +265,225 @@ document.getElementById("your-list").addEventListener("click", async (e) => {
   }
 });
 
-document.getElementById("file").onchange = async (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
+// ---- the opener ----------------------------------------------------------------
+// One target for both kinds of file: a sample chip dragged out of the tray, and a
+// real .uapp dragged in off the desktop. Clicking it still opens the file picker.
+const opener = document.getElementById("opener");
+const tray = document.getElementById("tray");
+
+async function importFile(f) {
   const buf = new Uint8Array(await f.arrayBuffer());
   let bin = "";
   for (let i = 0; i < buf.length; i += 32768) {
     bin += String.fromCharCode.apply(null, buf.subarray(i, i + 32768));
   }
   await host("host.import", { name: f.name, b64: btoa(bin) });
+}
+
+opener.addEventListener("click", () => document.getElementById("file").click());
+document.getElementById("file").onchange = (e) => {
+  const f = e.target.files[0];
+  if (f) importFile(f);
+  e.target.value = ""; // same file twice in a row still fires change
 };
 
-uapp.query("SELECT name, url, emoji, description, website FROM samples ORDER BY rowid").then(({ rows }) => {
-  const list = document.getElementById("sample-list");
-  list.innerHTML = rows.map((s) => `
-    <li class="app-item">
-      <span class="emoji">${s.emoji || "&#127916;"}</span>
-      <a href="#" data-url="${s.url}" data-name="${esc(s.name)}">${esc(s.name)}</a>
-      ${s.description ? `<span class="meta">${esc(s.description)}</span>` : ""}
-      ${s.website ? `<a href="${esc(s.website)}" target="_blank" rel="noopener" class="web-link">website &#8599;</a>` : ""}
-    </li>
-  `).join("");
+// A file dragged in from the OS: light the opener up the moment it enters the
+// page, and never let a stray drop navigate the frame away from the demo.
+let osDragDepth = 0;
+document.addEventListener("dragenter", (e) => {
+  if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes("Files")) return;
+  e.preventDefault();
+  if (osDragDepth++ === 0) document.body.classList.add("dragging");
+});
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("dragleave", () => {
+  if (osDragDepth > 0 && --osDragDepth === 0) endOsDrag();
+});
+document.addEventListener("drop", (e) => {
+  e.preventDefault(); // a drop anywhere but the opener is just declined
+  osDragDepth = 0;
+  const onOpener = e.target.closest && e.target.closest("#opener");
+  endOsDrag();
+  const f = e.dataTransfer && e.dataTransfer.files[0];
+  if (!f) return;
+  if (onOpener) importFile(f); else nudge(null);
+});
+opener.addEventListener("dragover", (e) => {
+  if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes("Files")) return;
+  e.dataTransfer.dropEffect = "copy";
+  opener.classList.add("over");
+});
+opener.addEventListener("dragleave", (e) => {
+  // Crossing between the opener's own children fires dragleave too; only a
+  // pointer that has really left the button should unhighlight it.
+  if (!opener.contains(e.relatedTarget)) opener.classList.remove("over");
+});
+function endOsDrag() {
+  document.body.classList.remove("dragging");
+  opener.classList.remove("over");
+}
 
-  list.addEventListener("click", (e) => {
-    const a = e.target.closest("a");
-    if (!a || a.target === "_blank") return;
-    e.preventDefault();
-    host("host.sample", { url: a.dataset.url, name: a.dataset.name });
+// ---- dragging a sample onto the opener -----------------------------------------
+// Pointer events rather than HTML5 drag-and-drop: the same code then works with a
+// finger, and the chip can be drawn moving instead of handed to the OS.
+let drag = null, dragEndedAt = -1e9;
+
+const overOpener = (x, y) => {
+  const r = opener.getBoundingClientRect();
+  return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+};
+
+function makeGhost(chip) {
+  const r = chip.getBoundingClientRect();
+  const g = chip.cloneNode(true);
+  g.className = "chip ghost";
+  g.removeAttribute("id");
+  g.style.width = r.width + "px";
+  g.style.height = r.height + "px";
+  g.style.left = r.left + "px";
+  g.style.top = r.top + "px";
+  document.body.appendChild(g);
+  chip.classList.add("lifted");
+  return g;
+}
+
+function settle(g, chip, to, swallowed, done) {
+  const r = g.getBoundingClientRect();
+  g.style.transition = "left .22s cubic-bezier(.4,0,.2,1), top .22s cubic-bezier(.4,0,.2,1), transform .22s, opacity .22s";
+  requestAnimationFrame(() => {
+    g.style.left = to.left + "px";
+    g.style.top = (swallowed ? to.top + to.height / 2 - r.height / 2 : to.top) + "px";
+    g.style.transform = swallowed ? "scale(.5)" : "rotate(0deg)";
+    if (swallowed) g.style.opacity = "0";
   });
+  if (swallowed) opener.classList.add("swallow");
+  setTimeout(() => {
+    g.remove();
+    chip.classList.remove("lifted");
+    opener.classList.remove("swallow", "over");
+    if (done) done();
+  }, 240);
+}
+
+// Land the chip in the middle of the opener, then hand the file to the runtime.
+function dropInto(g, chip) {
+  const r = opener.getBoundingClientRect();
+  const gr = g.getBoundingClientRect();
+  settle(g, chip, { left: r.left + r.width / 2 - gr.width / 2, top: r.top, height: r.height }, true,
+    () => host("host.sample", { url: chip.dataset.url, name: chip.dataset.name }));
+}
+
+function returnHome(g, chip) {
+  const r = chip.getBoundingClientRect();
+  settle(g, chip, { left: r.left, top: r.top, height: r.height }, false);
+}
+
+// A plain click doesn't open anything: the point of the demo is that a .uapp is a
+// file you hand to the runtime, so the chip tells you where to take it instead.
+let nudgeTimer = null;
+const openerSub = document.getElementById("opener-sub");
+const openerSubText = openerSub.innerHTML;
+function nudge(chip) {
+  if (chip && chip.animate) {
+    chip.animate([{ transform: "translateX(0)" }, { transform: "translateX(-5px)" },
+                  { transform: "translateX(5px)" }, { transform: "translateX(0)" }],
+                 { duration: 280, easing: "ease-in-out" });
+  }
+  opener.classList.remove("pulse");
+  void opener.offsetWidth; // restart the animation on a repeat click
+  opener.classList.add("pulse");
+  openerSub.innerHTML = "Drag it in here";
+  openerSub.classList.add("say");
+  clearTimeout(nudgeTimer);
+  nudgeTimer = setTimeout(() => {
+    opener.classList.remove("pulse");
+    openerSub.classList.remove("say");
+    openerSub.innerHTML = openerSubText;
+  }, 2400);
+}
+
+tray.addEventListener("pointerdown", (e) => {
+  if (e.button > 0 || e.target.closest("a")) return;
+  const chip = e.target.closest(".chip");
+  if (!chip || drag) return;
+  drag = { chip, id: e.pointerId, x0: e.clientX, y0: e.clientY, started: false };
+  chip.setPointerCapture(e.pointerId);
+});
+
+tray.addEventListener("pointermove", (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  if (!drag.started) {
+    if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 6) return;
+    drag.started = true;
+    const r = drag.chip.getBoundingClientRect();
+    drag.dx = r.left - e.clientX;
+    drag.dy = r.top - e.clientY;
+    drag.ghost = makeGhost(drag.chip);
+    document.body.classList.add("dragging");
+  }
+  e.preventDefault();
+  drag.ghost.style.left = (e.clientX + drag.dx) + "px";
+  drag.ghost.style.top = (e.clientY + drag.dy) + "px";
+  opener.classList.toggle("over", overOpener(e.clientX, e.clientY));
+});
+
+function endDrag(e, cancelled) {
+  if (!drag || e.pointerId !== drag.id) return;
+  const d = drag;
+  drag = null;
+  if (!d.started) return; // never moved, so the click handler explains the gesture
+  dragEndedAt = e.timeStamp; // and the click trailing a real drag is not one
+  document.body.classList.remove("dragging");
+  if (!cancelled && overOpener(e.clientX, e.clientY)) dropInto(d.ghost, d.chip);
+  else returnHome(d.ghost, d.chip);
+}
+tray.addEventListener("pointerup", (e) => endDrag(e, false));
+tray.addEventListener("pointercancel", (e) => endDrag(e, true));
+
+tray.addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (!chip || e.target.closest("a")) return;
+  if (e.timeStamp - dragEndedAt < 400) return; // trailing click from a drag
+  // Keyboard activation (detail 0) can't drag, so it gets the same trip to the
+  // opener played out for it; a mouse or finger is asked to make the trip.
+  if (e.detail === 0) dropInto(makeGhost(chip), chip);
+  else nudge(chip);
+});
+
+// Apps and games share the tray but not the same shelf: a spreadsheet-ish tool
+// and a voxel world both being one file is the point, and the split says so.
+const GROUPS = [["app", "Apps"], ["game", "Games"]];
+
+function chipHtml(s) {
+  const file = String(s.url).split("/").pop();
+  const size = fmtSize(s.size);
+  return `
+    <span class="slot">
+      <button class="chip" draggable="false" data-url="${esc(s.url)}" data-name="${esc(s.name)}"
+              aria-label="${esc(file)}${s.description ? ", " + esc(s.description) : ""}">
+        <span class="ico">${s.emoji || "&#128196;"}</span>
+        <span class="col">
+          <span class="fname">${esc(file)}</span>
+          <span class="sub">${esc(s.description || "")}${size ? " &middot; " + size : ""}</span>
+        </span>
+      </button>
+      ${s.website ? `<a class="web" href="${esc(s.website)}" target="_blank" rel="noopener">website &#8599;</a>` : ""}
+    </span>
+  `;
+}
+
+uapp.query("SELECT name, url, emoji, description, website, size, kind FROM samples ORDER BY rowid").then(({ rows }) => {
+  const known = GROUPS.map(([kind]) => kind);
+  tray.innerHTML = GROUPS.map(([kind, label]) => {
+    // Anything the catalog labels with a kind nobody renders is still an app,
+    // so a new sample can never quietly drop out of the tray.
+    const mine = rows.filter((s) => (known.includes(s.kind) ? s.kind : "app") === kind);
+    if (!mine.length) return "";
+    return `<div class="group">
+      <div class="group-label">${label}</div>
+      <div class="row">${mine.map(chipHtml).join("")}</div>
+    </div>`;
+  }).join("");
 });
 
 refreshYourApps();

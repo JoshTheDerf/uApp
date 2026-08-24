@@ -42,6 +42,9 @@ struct Sample {
     emoji: String,
     description: String,
     website: Option<String>,
+    /// Which shelf of the launcher tray it sits on: "app" (the default) or "game".
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 fn build_launcher(outdir: &str, samples: &[Sample], html: &str) -> std::io::Result<()> {
@@ -72,7 +75,8 @@ fn build_launcher(outdir: &str, samples: &[Sample], html: &str) -> std::io::Resu
            name TEXT, ts INTEGER, device TEXT, user TEXT, action TEXT, data BLOB, sz INT);
          CREATE TABLE samples(
            id INTEGER PRIMARY KEY AUTOINCREMENT,
-           name TEXT NOT NULL, url TEXT NOT NULL, emoji TEXT, description TEXT, website TEXT);"
+           name TEXT NOT NULL, url TEXT NOT NULL, emoji TEXT, description TEXT, website TEXT,
+           size INTEGER, kind TEXT NOT NULL DEFAULT 'app');"
     ).unwrap();
 
     let app_id = random_id();
@@ -85,14 +89,24 @@ fn build_launcher(outdir: &str, samples: &[Sample], html: &str) -> std::io::Resu
         "app/index.html", 420i32, STABLE_MS / 1000, html.len() as i64, html.as_bytes()
     ]).unwrap();
 
-    let mut stmt = conn.prepare("INSERT INTO samples(name,url,emoji,description,website) VALUES(?,?,?,?,?)").unwrap();
+    let mut stmt = conn
+        .prepare("INSERT INTO samples(name,url,emoji,description,website,size,kind) VALUES(?,?,?,?,?,?,?)")
+        .unwrap();
     for sample in samples {
+        // The launcher shows the byte size on each chip: a .uapp reads as a file
+        // you can pick up, so it should carry a file's weight. 0 if it isn't built
+        // yet (the catalog can list a sample before examples/ has it).
+        let size = fs::metadata(Path::new("examples").join(&sample.file))
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
         stmt.execute(params![
             &sample.name,
             &format!("examples/{}", sample.file),
             &sample.emoji,
             &sample.description,
             &sample.website,
+            size,
+            sample.kind.as_deref().unwrap_or("app"),
         ]).unwrap();
     }
 

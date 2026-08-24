@@ -529,6 +529,13 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "app.save" => app_save(app),
         #[cfg(target_arch = "wasm32")]
         "app.save" => bail!("Save is only available in the desktop app — use Download here"),
+        // Pick another .uapp in a native dialog and open it. The way in for a
+        // machine with no .uapp file association: nothing to double-click, so
+        // without this a bare launch is a dead end.
+        #[cfg(not(target_arch = "wasm32"))]
+        "app.openFile" => app_open_file(app),
+        #[cfg(target_arch = "wasm32")]
+        "app.openFile" => bail!("Opening a .uapp file is only available in the desktop app"),
         // Install this app as a launcher/start-menu entry on the machine the
         // server runs on: `uapp <file>` launched directly, no browser needed.
         #[cfg(target_arch = "wasm32")]
@@ -769,6 +776,64 @@ fn app_save(app: &Arc<App>) -> Result<Value> {
         app.notify("renamed", json!({"name": stem}));
     }
     Ok(json!({"saved": true, "path": path.to_string_lossy(), "name": stem}))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Desktop "Load uApp file": show a native open dialog and start the chosen
+/// app. One app per process (the engine, registry advertisement and permission
+/// grants all hang off this one file), so this launches ANOTHER instance rather
+/// than re-homing the live window — this app keeps running untouched, and the
+/// new one gets its own window, reusing an already-running server for that file
+/// if there is one.
+///
+/// An untouched scratch window (the blank "My App" a bare launch opens) is just
+/// the way in, not work: once the picked app has its own window, this one closes
+/// rather than being left behind empty. Its file stays where it was, so the next
+/// bare launch opens the same blank document again.
+fn app_open_file(app: &Arc<App>) -> Result<Value> {
+    if !crate::native::is_native() || !cfg!(desktop) {
+        bail!("Opening a .uapp file is only available in the desktop app");
+    }
+    let path = match crate::native::dispatch(crate::native::NativeReq::OpenDialog) {
+        Some(p) => std::path::PathBuf::from(p),
+        None => return Ok(json!({"opened": false})), // user cancelled
+    };
+    if !path.is_file() {
+        bail!("{} is not a file", path.display());
+    }
+    let (cur_path, blank) = {
+        let eng = app.engine.lock().unwrap();
+        (eng.path.clone(), store::is_blank_app(&eng.db))
+    };
+    // Picking the file this window already has would hand the new instance our
+    // own server (registry reuse) and then — on the blank-scratch path below —
+    // shut it down under them. It's already open; say so instead.
+    if crate::registry::key(&path) == crate::registry::key(&cur_path) {
+        bail!("{} is already open in this window", path.display());
+    }
+    // The running binary IS the desktop app, so it's also the thing that knows
+    // how to open a file handed to it (see gui.rs's resolve_app_path); the
+    // machine's "Open apps in" preference still decides window vs browser.
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow!("couldn't locate the UApp app on disk: {e}"))?;
+    let mut child = std::process::Command::new(&exe)
+        .arg(&path)
+        .spawn()
+        .map_err(|e| anyhow!("couldn't open {}: {e}", path.display()))?;
+    // This window can outlive many opened apps; reap each child so closing one
+    // doesn't leave a zombie behind in our process table.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    // Nothing in this window but the default app? It has served its purpose —
+    // close it so opening a file doesn't leave an empty "My App" around. The
+    // window close runs the server's usual graceful shutdown (see gui.rs); the
+    // app we just launched is its own process and keeps going.
+    let closed = blank && app.unsaved.load(Ordering::Relaxed);
+    if closed {
+        crate::native::dispatch(crate::native::NativeReq::Close);
+    }
+    Ok(json!({"opened": true, "path": path.to_string_lossy(), "closed": closed}))
 }
 
 /// Run + persist a local op, then push change notifications to all clients.

@@ -14,6 +14,7 @@ const TPL = /* html */ `
   <div id="unsaved-bar" class="hidden" title="${S.topbar.unsavedBanner}">
     <span id="unsaved-msg"></span>
     <button id="btn-download-app"></button>
+    <button id="btn-open-app" class="hidden" title="${S.topbar.loadUappTitle}"></button>
   </div>
   <div id="unlinked-bar" class="hidden" title="${S.topbar.notLinkedTitle}">
     <span id="unlinked-msg"></span>
@@ -103,6 +104,16 @@ body.native shell-topbar #unlinked-bar { cursor: default; }
   padding: 2px 9px; font-size: 12px; font-weight: 600;
 }
 #btn-download-app:hover, #btn-link-app:hover { background: #ffd062; color: #3a2c05; }
+/* Secondary action in the same banner: a new app is also the moment someone
+   wants to open one they already have (see #btn-open-app in wire()). Kept
+   quieter than Save As so the primary action still reads first. */
+#btn-open-app {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid #f0c04a; color: #ffd77a; border-radius: 6px;
+  padding: 1px 8px; font-size: 12px; font-weight: 600;
+}
+#btn-open-app:hover { background: rgba(240,192,74,.22); color: #fff; }
+#btn-open-app.hidden { display: none; }
 /* The banners never shrink; the title ellipsizes instead. */
 #unsaved-bar, #unlinked-bar { flex-shrink: 0; }
 
@@ -118,6 +129,10 @@ body.native shell-topbar #unlinked-bar { cursor: default; }
   shell-topbar button { padding: 9px 10px; }
   #btn-rename { display: none; } /* rename stays reachable via double-tap */
   #btn-download-app, #btn-link-app { padding: 6px 12px; }
+  /* Three chips + the title don't fit a phone-width bar: the open button
+     keeps its icon (and its tooltip) and drops the words. */
+  #btn-open-app { padding: 5px 8px; }
+  #btn-open-app .bar-label { display: none; }
   #unsaved-bar, #unlinked-bar { padding: 3px 7px 3px 11px; }
 }
 #topbar-menu {
@@ -140,6 +155,7 @@ body.native shell-topbar #unlinked-bar { cursor: default; }
 @media (pointer: coarse) {
   shell-topbar button { padding: 9px 10px; }
   #btn-download-app, #btn-link-app { padding: 6px 12px; }
+  #btn-open-app { padding: 5px 11px; }
 }
 `;
 
@@ -182,6 +198,14 @@ function renderInfo(info) {
     }
     $("unsaved-bar").title = S.settings.unsavedTitle;
   }
+  // "Load uApp file" rides along with the not-saved banner: a blank new app is
+  // exactly where someone who launched the app from its icon (rather than by
+  // double-clicking a file) needs a way in. Desktop-only — it starts another
+  // instance from a native file dialog, which mobile and the browser shell
+  // can't do (there, opening a .uapp is the OS's / the tab's job).
+  $("btn-open-app").classList.toggle(
+    "hidden", !(info.native && info.desktop !== false && !info.wasm),
+  );
 }
 
 // ---- rename ----
@@ -320,6 +344,19 @@ function wire() {
     } catch (e) {
       btn.innerHTML = orig;
       dlgAlert(S.settings.saveFailed(e.message));
+    } finally { btn.disabled = false; }
+  };
+
+  // Open another .uapp: a native file dialog, then the chosen app starts in
+  // its own window (this one keeps running — one app per process).
+  $("btn-open-app").innerHTML = barLabel("folder-open", S.topbar.loadUapp);
+  $("btn-open-app").onclick = async () => {
+    const btn = $("btn-open-app");
+    btn.disabled = true;
+    try {
+      await rpc("app.openFile"); // {opened:false} when the dialog was cancelled
+    } catch (e) {
+      dlgAlert(S.settings.openFailed(e.message));
     } finally { btn.disabled = false; }
   };
 
