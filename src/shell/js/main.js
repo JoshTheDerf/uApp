@@ -84,8 +84,12 @@ function reloadAppFrame() {
   const url = (window.__uappBase || "/") + "app/";
   // Same-origin, so we can drive the frame's own location; src= is the fallback
   // for the window not being reachable yet (frame still empty on first boot).
+  // Reload the page the frame is ON (a multi-page site stays on /admin), not
+  // the app root.
   try {
-    f.contentWindow.location.replace(url);
+    const cur = f.contentWindow.location;
+    if (cur.href && cur.href !== "about:blank") { cur.reload(); return; }
+    cur.replace(url);
     return;
   } catch {}
   f.src = url;
@@ -94,8 +98,58 @@ function scheduleReload() {
   clearTimeout(reloadTimer);
   reloadTimer = setTimeout(reloadAppFrame, 400);
 }
-on("files-changed", scheduleReload);
+// Writes do NOT reload the frame on their own any more: a half-finished
+// multi-file edit would flash a broken page, and in hosted-site mode the frame
+// is the page the reader is on. Reloads are explicit — the topbar button, the
+// AI's `reload_app` tool (an `app.reload` RPC → "reload" event) — and go
+// through scheduleReload so a burst collapses into one.
 on("reload-app", scheduleReload);
+on("reload", scheduleReload);
+
+// ---------- url mirroring ----------
+// The frame is the real page; the address bar should say so. Every navigation
+// inside it (link click, the reload above, a scripted location change) is
+// mirrored to the top-level URL with the history API, so /admin reached from
+// / is /admin in the bar, deep-linkable and shareable. The browser back/forward
+// buttons then drive the frame the same way.
+const APP_ROUTE = (window.__uappBase || "/") + "app/";
+// The frame's path, as the page's own path: "/app/admin" and "/admin" (a
+// root-absolute link followed inside the frame — the service worker serves it
+// from the archive either way) are both "/admin".
+function frameToTopPath(u) {
+  const path = u.pathname.startsWith(APP_ROUTE) ? "/" + u.pathname.slice(APP_ROUTE.length) : u.pathname;
+  if (path.startsWith("/shell/") || path === "/scratch/") return null;
+  return path + u.search + u.hash;
+}
+function mirrorFrameUrl() {
+  const f = $("appframe");
+  let u;
+  try { u = new URL(f.contentWindow.location.href); } catch { return; }
+  if (u.origin !== location.origin) return;
+  const top = frameToTopPath(u);
+  if (top === null || top === location.pathname + location.search + location.hash) return;
+  try { history.pushState({ uappFrame: top }, "", top); } catch {}
+}
+// Hosted-site mode only: there the top URL IS a page of the site and reload
+// serves it from the server. In the native window or the browser demo the
+// top URL is the shell's, and rewriting it would break reload.
+const MIRROR_URL = !!window.__uappSiteArchive;
+$("appframe")?.addEventListener("load", () => {
+  if (!MIRROR_URL) return;
+  mirrorFrameUrl();
+  // In-page hash routing inside the app.
+  try { $("appframe").contentWindow.addEventListener("hashchange", mirrorFrameUrl); } catch {}
+});
+window.addEventListener("popstate", () => {
+  if (!MIRROR_URL) return;
+  const f = $("appframe");
+  const wantTop = location.pathname + location.search + location.hash;
+  try {
+    const cur = new URL(f.contentWindow.location.href);
+    if (frameToTopPath(cur) === wantTop) return;
+    f.contentWindow.location.replace(APP_ROUTE + location.pathname.replace(/^\/+/, "") + location.search + location.hash);
+  } catch { f.src = APP_ROUTE + location.pathname.replace(/^\/+/, "") + location.search + location.hash; }
+});
 
 // ---------- shutdown ----------
 function shutdownShell(title, detail) {

@@ -150,6 +150,13 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             app.notify("present", json!({"name": name, "mode": mode, "by": by}));
             Ok(json!({"ok": true}))
         }
+        // Ask every shell to reload its app frame. Writes no longer do this
+        // implicitly (see shell/main.js), so this is how a finished edit is
+        // shown — the AI's `reload_app` tool, or any client.
+        "app.reload" => {
+            app.notify("reload", json!({}));
+            Ok(json!({"ok": true}))
+        }
         "files.fetch" => files_fetch(app, p),
         // Native-window file drops (see native.rs): the page passes back the id
         // it was notified with, never a path.

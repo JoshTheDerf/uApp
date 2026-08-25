@@ -1,0 +1,61 @@
+# uapp public site server — `uapp serve`, the read-only hosted-site mode.
+#
+# Serves ONE .uapp as a plain website: rendered pages under `app/` at real
+# URLs, no token, no WebSocket, no shell (see src/public.rs — the router shares
+# nothing with the privileged one). The .uapp itself is NOT baked into the
+# image; it is bind-mounted at /site/site.uapp so content updates are an rsync,
+# not a rebuild.
+#
+#   docker build -f Dockerfile.serve -t uapp-serve .
+#   docker run -v /path/to/site.uapp:/site/site.uapp:ro -p 8080:8080 uapp-serve
+
+FROM rust:1-trixie AS build
+WORKDIR /src
+
+# rusqlite's `bundled-sqlcipher-vendored-openssl` compiles SQLCipher AND
+# OpenSSL from source, so the build needs perl + make on top of the toolchain.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends perl make pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
+# Only what the crate compiles from. dist-web/ is deliberately NOT here: it is
+# copied straight into the runtime stage below, so a browser-build-only change
+# (site-chrome.js, boot.js, sw.js) never invalidates this ~13-minute layer.
+# --no-default-features drops the `gui` feature (Tauri + a system webview),
+# which a headless server image has no use for and cannot link anyway.
+COPY Cargo.toml Cargo.lock build.rs tauri.conf.json ./
+COPY src ./src
+COPY assets ./assets
+COPY capabilities ./capabilities
+COPY templates ./templates
+RUN cargo build --release --bin uapp-server --no-default-features
+
+# --- runtime image ---
+# The binary links only libc/libm/libgcc (SQLite, SQLCipher and OpenSSL are all
+# statically linked in), so a bare slim image is enough.
+FROM debian:trixie-slim
+WORKDIR /site
+
+RUN useradd --system --uid 10001 --no-create-home uapp
+COPY --from=build /src/target/release/uapp-server /usr/local/bin/uapp-server
+# The browser build (wasm engine + shell) behind `--chrome`: what the injected
+# "Edit this site" pill boots. Prebuilt by scripts/build-web.sh and committed,
+# because building it needs the wasm toolchain (clang + wasm-bindgen).
+COPY dist-web /opt/uapp-web
+
+# Read-only anyway (the DB is opened SQLITE_OPEN_READ_ONLY), but an unprivileged
+# user means a bug can't reach anything else either.
+USER uapp
+
+ENV UAPP_SITE=/site/site.uapp
+ENV UAPP_PORT=8080
+EXPOSE 8080
+
+# Defaults suit a hosted site that wants the in-browser editor:
+#   --publish-data  ship data/ (content sources) inside /site.uapp so a visitor
+#                   can re-run the site's build pipeline. That archive is public.
+#   --chrome        serve the browser build, enabling the "Edit this site" pill.
+#   --coi           COOP/COEP on documents, so the editor is cross-origin
+#                   isolated with no reload and the AI's run_js bridge works.
+#                   Drop it if the site embeds cross-origin iframes.
+CMD ["sh", "-c", "exec uapp-server serve \"$UAPP_SITE\" --bind 0.0.0.0 --port \"$UAPP_PORT\" ${UAPP_SERVE_FLAGS:---publish-data --coi --chrome /opt/uapp-web}"]

@@ -392,6 +392,142 @@ pub fn export_template(mem: &Connection, app_name: &str) -> Result<Vec<u8>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Export the copy a hosted site hands to a visitor's browser.
+///
+/// Sits between `export_template` (app files, tables emptied) and a raw copy of
+/// the file. A hosted site's own SQL machinery — post index, tags, whatever the
+/// build pipeline reads — is useless without its rows, so user tables are copied
+/// WITH their data. Chat, sessions, file history and config secrets never leave.
+///
+/// `include_data` also ships `data/` — the markdown/asset SOURCES a site's build
+/// pipeline reads, so a visitor can re-run that pipeline in their browser.
+/// Everything in the result is world-readable by definition: this archive is
+/// downloaded by anyone who visits. Off unless the caller opts in.
+pub fn export_public(mem: &Connection, app_name: &str, include_data: bool) -> Result<Vec<u8>> {
+    let tmp = std::env::temp_dir().join(format!(
+        "uapp-public-{}.uapp",
+        (0..10).map(|_| fastrand::alphanumeric()).collect::<String>()
+    ));
+    let build = (|| -> Result<()> {
+        let out = Connection::open(&tmp)?;
+        out.pragma_update(None, "journal_mode", "DELETE")?;
+        out.execute_batch(SCHEMA)?;
+        let app_id: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
+        out.execute(
+            "INSERT INTO uapp_meta(key,value) VALUES
+             ('app_id',?1),('name',?2),('format_version',?3),('created',?4)",
+            rusqlite::params![
+                app_id,
+                app_name,
+                FORMAT_VERSION.to_string(),
+                now_ms().to_string()
+            ],
+        )?;
+        // Stored form copied verbatim (compression preserved). `data/` rides
+        // along only when the caller asked for it — see the doc comment.
+        {
+            let mut sel = mem.prepare("SELECT name, mode, mtime, sz, data FROM sqlar")?;
+            let mut ins = out.prepare(
+                "INSERT INTO sqlar(name,mode,mtime,sz,data) VALUES(?1,?2,?3,?4,?5)",
+            )?;
+            let mut rows = sel.query([])?;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(0)?;
+                let role = file_role(&name);
+                if role != "app" && !(include_data && role == "data") {
+                    continue;
+                }
+                ins.execute(rusqlite::params![
+                    name,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?
+                ])?;
+            }
+        }
+        // User tables: create them, fill them, and only then add indexes and
+        // triggers — a trigger created first would fire on the copied rows.
+        let mut tables: Vec<String> = Vec::new();
+        {
+            let mut sel = mem.prepare(
+                "SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL AND type = 'table'
+                 AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
+                 ORDER BY rowid",
+            )?;
+            let mut rows = sel.query([])?;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(0)?;
+                let sql: String = row.get(1)?;
+                out.execute_batch(&sql)?;
+                tables.push(name);
+            }
+        }
+        for t in &tables {
+            let quoted = format!("\"{}\"", t.replace('"', "\"\""));
+            let mut sel = mem.prepare(&format!("SELECT * FROM {quoted}"))?;
+            let ncols = sel.column_count();
+            if ncols == 0 {
+                continue;
+            }
+            let holders = (1..=ncols).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+            let mut ins = out.prepare(&format!("INSERT INTO {quoted} VALUES({holders})"))?;
+            let mut rows = sel.query([])?;
+            while let Some(row) = rows.next()? {
+                let vals: Vec<SqlValue> = (0..ncols)
+                    .map(|i| row.get::<_, SqlValue>(i))
+                    .collect::<rusqlite::Result<_>>()?;
+                ins.execute(rusqlite::params_from_iter(vals.iter()))?;
+            }
+        }
+        {
+            let mut sel = mem.prepare(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type != 'table'
+                 AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
+                 ORDER BY rowid",
+            )?;
+            let mut rows = sel.query([])?;
+            while let Some(row) = rows.next()? {
+                let sql: String = row.get(0)?;
+                out.execute_batch(&sql)?;
+            }
+        }
+        // Config: everything except secrets — the ai entry keeps the
+        // provider/model choice, minus the key.
+        {
+            let mut sel = mem.prepare("SELECT key, value FROM uapp_config")?;
+            let mut rows = sel.query([])?;
+            while let Some(row) = rows.next()? {
+                let key: String = row.get(0)?;
+                let raw: String = row.get(1)?;
+                let value = if key == "ai" {
+                    let mut v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+                    if let Some(o) = v.as_object_mut() {
+                        o.remove("api_key");
+                    }
+                    if v.is_null() {
+                        continue;
+                    }
+                    v.to_string()
+                } else {
+                    raw
+                };
+                out.execute(
+                    "INSERT INTO uapp_config(key,value) VALUES(?1,?2)",
+                    rusqlite::params![key, value],
+                )?;
+            }
+        }
+        out.pragma_update(None, "synchronous", "FULL")?;
+        drop(out);
+        Ok(())
+    })();
+    let bytes = build.and_then(|_| Ok(std::fs::read(&tmp)?));
+    let _ = std::fs::remove_file(&tmp);
+    bytes
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 /// Windows temporarily locks a freshly-touched file out from under us:
 /// OneDrive "Files On-Demand" placeholders lock the range while hydrating,
 /// and AV / Search Indexer scan new downloads. Both surface as

@@ -19,6 +19,8 @@ pub mod native;
 pub mod net;
 pub mod prefs;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod public;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod registry;
 pub mod rpc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -337,6 +339,48 @@ pub fn serve_background(path: PathBuf, fixed_port: u16, unsaved: bool) -> Result
         Ok(Err(e)) => anyhow::bail!("{e}"),
         Err(_) => anyhow::bail!("server thread exited before binding"),
     }
+}
+
+/// Serve one .uapp as a PUBLIC, read-only website. Blocks until interrupted.
+///
+/// Shares nothing with `serve_opts` beyond the archive format: no token, no
+/// WebSocket, no shell, no engine — see `public.rs` for why the router is
+/// separate rather than a flag. The file is opened read-only and without the
+/// registry lock, so it can stay open in the desktop app at the same time.
+pub fn serve_public(
+    path: PathBuf,
+    bind: &str,
+    port: u16,
+    passphrase: Option<String>,
+    opts: public::PublicOpts,
+    chrome_dir: Option<PathBuf>,
+) -> Result<()> {
+    let path = if path.is_absolute() { path } else { std::env::current_dir()?.join(path) };
+    let db = public::open_readonly(&path, passphrase.as_deref())
+        .with_context(|| format!("opening {}", path.display()))?;
+    let site = match &chrome_dir {
+        Some(dir) => public::site_with_chrome(db, opts, dir)?,
+        None => public::site(db, opts),
+    };
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let listener = tokio::net::TcpListener::bind((bind, port)).await?;
+        let addr = listener.local_addr()?;
+        eprintln!("uapp: serving {} at http://{}/", path.display(), addr);
+        if opts.archive {
+            eprintln!("uapp: archive endpoint: http://{addr}/site.uapp");
+        }
+        match &chrome_dir {
+            Some(dir) => eprintln!("uapp: editing chrome enabled (web build: {})", dir.display()),
+            None => eprintln!("uapp: no editing chrome (pass --chrome <dist-web> to enable)"),
+        }
+        axum::serve(listener, public::router(site))
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    })
 }
 
 }

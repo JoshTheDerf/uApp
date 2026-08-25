@@ -103,6 +103,12 @@ async fn shell(
     if !authed(&app, &headers, &q) {
         return deny();
     }
+    // A root-absolute `href="/"` followed INSIDE the app frame means the app's
+    // front page, not a second shell nested in the first. WebViews and
+    // browsers label frame navigations with Sec-Fetch-Dest: iframe.
+    if headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("iframe") {
+        return serve_sqlar(&app, "index.html", &headers);
+    }
     // The name comes from the shared .uapp file — escape it, or a hostile
     // file gets stored XSS in the (privileged) shell origin.
     let mut resp = Html(SHELL_HTML.replace("{{APP_NAME}}", &html_escape(&app.name))).into_response();
@@ -131,7 +137,7 @@ fn static_asset(body: &'static str, ctype: &'static str) -> Response {
         .into_response()
 }
 
-fn content_type_for(name: &str) -> &'static str {
+pub fn content_type_for(name: &str) -> &'static str {
     match name.rsplit('.').next().unwrap_or("") {
         "html" | "htm" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
@@ -215,10 +221,32 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
     // Read + inflate under the lock, then release it: building the response
     // (and slicing a range out of a large video) must not block every other
     // request on the engine mutex.
-    let data = {
+    // Pretty URLs, as a static host would resolve them: "posts/x/" and
+    // "posts/x" -> posts/x/index.html, "admin" -> admin.html. Generated sites
+    // (and the public `uapp serve` router) link this way.
+    let (data, name) = {
         let eng = app.engine.lock().unwrap();
-        crate::store::sqlar_read(&eng.db, name)
+        let mut found = (crate::store::sqlar_read(&eng.db, name), name.to_string());
+        if matches!(found.0, Ok(None)) {
+            let bare = name.trim_end_matches('/');
+            let last = bare.rsplit('/').next().unwrap_or(bare);
+            if !last.contains('.') || name.ends_with('/') {
+                let mut tries = vec![format!("{bare}/index.html")];
+                if !name.ends_with('/') && !bare.is_empty() {
+                    tries.insert(0, format!("{bare}.html"));
+                }
+                for t in tries {
+                    match crate::store::sqlar_read(&eng.db, &t) {
+                        Ok(Some(b)) => { found = (Ok(Some(b)), t); break; }
+                        Ok(None) => {}
+                        Err(e) => { found = (Err(e), t); break; }
+                    }
+                }
+            }
+        }
+        found
     };
+    let name = name.as_str();
     match data {
         Ok(Some(bytes)) => {
             let ctype = content_type_for(name);

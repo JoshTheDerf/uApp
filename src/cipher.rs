@@ -63,6 +63,18 @@ pub fn open_file(path: &Path, passphrase: &str) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Open an existing SQLCipher database READ-ONLY. Used by the public serving
+/// mode, where a write must be impossible even by way of a bug.
+pub fn open_file_readonly(path: &Path, passphrase: &str) -> Result<Connection> {
+    use rusqlite::OpenFlags;
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    apply_and_verify(&conn, passphrase, &path.display().to_string())?;
+    Ok(conn)
+}
+
 // ---- whole-file conversions -------------------------------------------
 
 fn fsync_file(p: &Path) -> Result<()> {

@@ -107,6 +107,8 @@ function handleEvent(p) {
     emit("ai", p);
   } else if (p.type === "present") {
     emit("present", p);
+  } else if (p.type === "reload") {
+    emit("reload", p); // app.reload RPC / the AI's reload_app tool
   } else if (p.type === "drop_hover" || p.type === "drop_leave" || p.type === "drop_files") {
     emit("native-drop", p);
   } else if (p.type === "renamed") {

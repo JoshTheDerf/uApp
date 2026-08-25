@@ -159,8 +159,15 @@ pub fn registry() -> Vec<ToolDef> {
             run: |app, input| rpc::dispatch(app, "eval.run", input.clone()),
         },
         ToolDef {
+            name: "reload_app",
+            description: "Reload the live app page in the user's view. Files you write are NOT shown automatically any more: finish the whole change (all files), then call this once so the user sees a consistent result — and follow with read_console to check the reload didn't throw.",
+            gated: false,
+            schema: || obj(json!({}), &[]),
+            run: |app, _input| rpc::dispatch(app, "app.reload", json!({})),
+        },
+        ToolDef {
             name: "read_console",
-            description: "Read recent console output and uncaught errors (with stack traces) from the LIVE app page — the app's real runtime logs, not just code you ran via run_js. Use this to debug: after write_file/edit_file (the iframe reloads and may throw on load) or after a run_js that drives the UI, and whenever a turn ends with a '[console] …' alert. Defaults to the latest page load only (so stale pre-edit errors don't show); set only_latest=false for older lines, only_errors=true for just errors/warnings.",
+            description: "Read recent console output and uncaught errors (with stack traces) from the LIVE app page — the app's real runtime logs, not just code you ran via run_js. Use this to debug: after reload_app (the page may throw on load) or after a run_js that drives the UI, and whenever a turn ends with a '[console] …' alert. Defaults to the latest page load only (so stale pre-edit errors don't show); set only_latest=false for older lines, only_errors=true for just errors/warnings.",
             gated: false,
             schema: || obj(json!({
                 "only_errors": {"type": "boolean", "description": "only error/warn lines (default false)"},

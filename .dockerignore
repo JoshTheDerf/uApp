@@ -1,0 +1,11 @@
+# The build needs source only. target/ alone is multiple GB.
+target/
+dist-web/examples/
+dist-web/launcher.uapp
+node_modules/
+.git/
+examples/
+gen/
+icons/
+installer/
+docs/screenshots/

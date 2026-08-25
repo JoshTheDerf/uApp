@@ -34,6 +34,14 @@
   // parent window) over postMessage; the shell forwards to the wasm worker.
   // The flag is injected into served pages by the shell's service-worker path.
   const wasmMode = !!window.__uappWasm && window.parent !== window;
+  // A hosted site's top-level page (served by `uapp serve`, which injects
+  // /chrome.js ahead of everything else): there is no WebSocket server behind
+  // it, and the editing shell is about to take this document over anyway. Do
+  // not open a socket — the retry loop would otherwise hammer /ws every second
+  // for as long as the tab lives. The API stays defined so the page's own
+  // `uapp.onChange(...)`-style calls do not throw; RPCs simply never settle.
+  const hostedTop = !wasmMode && window.top === window
+    && !!document.querySelector('script[src^="/chrome.js"]');
   let ws, nextId = 1, openp;
   // One raw-send for both transports; JSON objects in, transport framing here.
   const rawSend = (obj) => {
@@ -312,6 +320,7 @@
     m.error ? pr.reject(new Error(m.error.message)) : pr.resolve(m.result);
   }
   function connect() {
+    if (hostedTop) { openp = new Promise(() => {}); return; }
     if (wasmMode) {
       window.addEventListener("message", (ev) => {
         const d = ev.data;
@@ -346,7 +355,7 @@
   // down; if the socket merely looks open, probe it — suspended pages often
   // leave half-open connections that never fire onclose.
   document.addEventListener("visibilitychange", () => {
-    if (wasmMode) return; // parent-window transport never drops
+    if (wasmMode || hostedTop) return; // parent-window transport never drops; no socket at all
     if (document.visibilityState !== "visible") return;
     if (!ws || ws.readyState !== 1) { connect(); return; }
     const id = nextId++;
