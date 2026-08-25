@@ -3,10 +3,14 @@
 //!
 //! Runs inside a dedicated Web Worker. The page keeps the exact same shell UI;
 //! its JSON-RPC calls arrive here through `rpc_dispatch` (postMessage instead
-//! of a WebSocket), notifications go back out through `js_notify`, HTTP is a
-//! synchronous XHR in the worker, and page invocations that must complete
-//! while the worker is blocked inside an AI run (run_js, app actions, approval
-//! prompts) travel over a SharedArrayBuffer bridge (`js_bridge_call`).
+//! of a WebSocket), notifications go back out through `js_notify`, and the
+//! two things an AI run blocks on — HTTP to the provider and page invocations
+//! (run_js, app actions, approval prompts) — go through SharedArrayBuffer
+//! waits that the main thread satisfies (`js_http_*`, `js_bridge_call`).
+//! While the worker waits it keeps servicing the page's RPCs (the glue
+//! re-enters `rpc_dispatch` from an inbox), so the app, the shell and the
+//! service worker all keep working mid-run; the run itself stays a plain
+//! synchronous loop.
 
 use crate::app::App;
 use anyhow::{anyhow, Result};
@@ -22,9 +26,20 @@ extern "C" {
     pub fn js_now_ms() -> f64;
     /// Forward one server->client event (JSON envelope) to the page.
     pub fn js_notify(json: &str);
-    /// Synchronous HTTP (sync XHR in the worker). Returns JSON:
-    /// {status, contentType, headers: [[k,v]...], bodyB64} or {error}.
-    pub fn js_http_request(method: &str, url: &str, headers_json: &str, body: Option<String>) -> String;
+    /// Start an HTTP request. The fetch itself runs on the main thread; this
+    /// blocks (servicing page RPCs meanwhile) until the response headers are
+    /// in. Returns JSON {id, status, contentType, headers: [[k,v]...]} — or,
+    /// when the page isn't cross-origin isolated (no SharedArrayBuffer) and
+    /// a sync XHR had to be used, the whole body too as `bodyB64` — or
+    /// {error}.
+    pub fn js_http_open(method: &str, url: &str, headers_json: &str, body: Option<String>, connect_timeout_ms: f64) -> String;
+    /// Next body chunk of an open request (empty = end of body). Blocks —
+    /// servicing page RPCs meanwhile — until data arrives or the read timeout
+    /// passes. Throws on a transport failure.
+    #[wasm_bindgen(catch)]
+    pub fn js_http_read(id: u32, read_timeout_ms: f64) -> Result<Vec<u8>, JsValue>;
+    /// Release a request (cancels the fetch if the body wasn't consumed).
+    pub fn js_http_close(id: u32);
     /// Blocking call to the main thread over SharedArrayBuffer + Atomics.wait.
     /// Returns the reply JSON, or {"error": "..."} (including when SAB is
     /// unavailable because the site isn't cross-origin isolated).
@@ -57,8 +72,19 @@ pub fn forward_event(v: &Value) {
     js_notify(&v.to_string());
 }
 
-pub fn http_request(method: &str, url: &str, headers_json: &str, body: Option<&str>) -> String {
-    js_http_request(method, url, headers_json, body.map(|s| s.to_string()))
+pub fn http_open(method: &str, url: &str, headers_json: &str, body: Option<&str>, connect_timeout_ms: u64) -> String {
+    js_http_open(method, url, headers_json, body.map(|s| s.to_string()), connect_timeout_ms as f64)
+}
+
+pub fn http_read(id: u32, read_timeout_ms: u64) -> std::io::Result<Vec<u8>> {
+    js_http_read(id, read_timeout_ms as f64).map_err(|e| {
+        let msg = e.as_string().unwrap_or_else(|| format!("{e:?}"));
+        std::io::Error::other(msg)
+    })
+}
+
+pub fn http_close(id: u32) {
+    js_http_close(id);
 }
 
 pub fn bridge_call(kind: &str, payload: &Value) -> Result<Value> {
@@ -146,8 +172,10 @@ pub fn rpc_dispatch(method: String, params_json: String) -> String {
 }
 
 /// Run one queued AI session to completion (scheduled by `js_schedule_ai`).
-/// Blocks the worker for the whole run — notifications still flow out via
-/// postMessage, and the SAB bridge serves the run's page invocations.
+/// Occupies the worker for the whole run, but every wait inside it (provider
+/// HTTP, bridge calls) services page RPCs re-entrantly — see the glue — so
+/// the run must never hold an `App` lock across such a call (none do: every
+/// guard here is scoped to a single query).
 #[wasm_bindgen]
 pub fn ai_tick(session: String) {
     let Ok(app) = app() else { return };

@@ -1,9 +1,10 @@
 /* uapp browser build — the dedicated worker that hosts the wasm core.
  * Owns the in-memory SQLite database; the page talks JSON-RPC to it over
- * postMessage (same protocol the native WebSocket carries). */
+ * postMessage (same protocol the native WebSocket carries) — or, while an AI
+ * run has this worker blocked, over the shared-memory inbox the glue drains. */
 
 import init, { open_app, rpc_dispatch, ai_tick } from "./uapp_wasm.js";
-import { glueConfigure } from "./uapp_glue.js";
+import { glueConfigure, glueDrainInbox } from "./uapp_glue.js";
 
 const ready = init();
 
@@ -18,7 +19,12 @@ self.onmessage = async (ev) => {
   if (m.type === "init") {
     glueConfigure({
       sab: m.sab || null,
+      inbox: m.inbox || null,
+      net: m.net || null,
       notify: (json) => postMessage({ type: "event", json }),
+      // RPCs that arrive through the shared-memory inbox while an AI run has
+      // this worker blocked (see blockUntil in the glue).
+      dispatch: (req) => postMessage({ type: "reply", id: req.id, ...dispatch(req) }),
       aiTick: (session) => {
         try {
           ai_tick(session);
@@ -42,13 +48,21 @@ self.onmessage = async (ev) => {
     }
     return;
   }
+  if (m.type === "kick") {
+    // The page wrote to the inbox; if we were blocked the wait loop already
+    // took it, otherwise take it now.
+    glueDrainInbox();
+    return;
+  }
   if (m.type === "rpc") {
-    let out;
-    try {
-      out = JSON.parse(rpc_dispatch(m.method || "", JSON.stringify(m.params || {})));
-    } catch (e) {
-      out = { error: { message: "dispatch crashed: " + e } };
-    }
-    postMessage({ type: "reply", id: m.id, ...out });
+    postMessage({ type: "reply", id: m.id, ...dispatch(m) });
   }
 };
+
+function dispatch(m) {
+  try {
+    return JSON.parse(rpc_dispatch(m.method || "", JSON.stringify(m.params || {})));
+  } catch (e) {
+    return { error: { message: "dispatch crashed: " + e } };
+  }
+}

@@ -1,9 +1,10 @@
 //! Portable HTTP for the AI providers, web tools and MCP client.
 //!
 //! Native: ureq (blocking, with a live streaming body so SSE deltas render as
-//! they arrive). wasm32: a synchronous XMLHttpRequest performed by the worker
-//! glue — the whole body arrives at once, so "streaming" responses are parsed
-//! from the buffered text (still correct, just not incremental).
+//! they arrive). wasm32: a `fetch` on the main thread whose body chunks reach
+//! the worker through a SharedArrayBuffer — also live, so SSE deltas render as
+//! they arrive there too. (Without cross-origin isolation the glue falls back
+//! to a sync XHR and the whole body arrives at once.)
 //!
 //! Transport failures are `Err`; an HTTP error status is `Ok` with `status`
 //! set, so each caller can keep its own error wording.
@@ -87,39 +88,78 @@ pub fn request(
     })
 }
 
-/// wasm: performed as a sync XHR by the worker glue (`js_http_request`), which
-/// returns `{status, contentType, headers, bodyB64}` or `{error}` as JSON.
+/// wasm: body of an in-flight request, pulled chunk by chunk from the glue.
+#[cfg(target_arch = "wasm32")]
+struct WasmBody {
+    id: u32,
+    read_timeout_ms: u64,
+    buf: Vec<u8>,
+    pos: usize,
+    eof: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::io::Read for WasmBody {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.buf.len() {
+            if self.eof {
+                return Ok(0);
+            }
+            let chunk = crate::wasm::http_read(self.id, self.read_timeout_ms)?;
+            if chunk.is_empty() {
+                self.eof = true;
+                return Ok(0);
+            }
+            self.buf = chunk;
+            self.pos = 0;
+        }
+        let n = out.len().min(self.buf.len() - self.pos);
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for WasmBody {
+    fn drop(&mut self) {
+        crate::wasm::http_close(self.id);
+    }
+}
+
+/// wasm: the glue opens the request (`js_http_open`) and answers with the
+/// headers `{id, status, contentType, headers}` (plus `bodyB64` when it had to
+/// fall back to a sync XHR) or `{error}`; the body then streams via
+/// `js_http_read`.
 #[cfg(target_arch = "wasm32")]
 pub fn request(
     method: &str,
     url: &str,
     headers: &[(&str, &str)],
     body: Option<&str>,
-    _connect_timeout_secs: u64,
-    _read_timeout_secs: u64,
+    connect_timeout_secs: u64,
+    read_timeout_secs: u64,
 ) -> Result<Resp> {
     use base64::Engine as _;
     let hdrs: Vec<serde_json::Value> = headers
         .iter()
         .map(|(k, v)| serde_json::json!([k, v]))
         .collect();
-    let reply = crate::wasm::http_request(
+    let reply = crate::wasm::http_open(
         method,
         url,
         &serde_json::Value::Array(hdrs).to_string(),
         body,
+        connect_timeout_secs * 1000,
     );
     let v: serde_json::Value = serde_json::from_str(&reply)
         .map_err(|_| anyhow::anyhow!("bad reply from the HTTP glue"))?;
     if let Some(e) = v["error"].as_str() {
         anyhow::bail!(
-            "request failed: {e} (browser demo note: the target must allow cross-origin \
+            "request failed: {e} (browser note: the target must allow cross-origin \
              requests — Anthropic, z.ai and OpenRouter do; most other hosts don't)"
         );
     }
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(v["bodyB64"].as_str().unwrap_or(""))
-        .unwrap_or_default();
     let headers = v["headers"]
         .as_array()
         .cloned()
@@ -132,10 +172,24 @@ pub fn request(
             ))
         })
         .collect();
+    let reader: Box<dyn BufRead> = if let Some(b64) = v["bodyB64"].as_str() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap_or_default();
+        Box::new(std::io::Cursor::new(bytes))
+    } else {
+        Box::new(std::io::BufReader::new(WasmBody {
+            id: v["id"].as_u64().unwrap_or(0) as u32,
+            read_timeout_ms: read_timeout_secs * 1000,
+            buf: Vec::new(),
+            pos: 0,
+            eof: false,
+        }))
+    };
     Ok(Resp {
         status: v["status"].as_u64().unwrap_or(0) as u16,
         content_type: v["contentType"].as_str().unwrap_or("").to_string(),
         headers,
-        reader: Box::new(std::io::Cursor::new(bytes)),
+        reader,
     })
 }

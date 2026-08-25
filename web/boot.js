@@ -116,7 +116,15 @@ async function fetchWithProgress(url, what) {
 }
 
 let worker = null;
-let sab = null;
+let sab = null;    // bridge control + reply (see uapp_glue.js for the layout)
+let inbox = null;  // page → worker RPCs while the worker is blocked in an AI run
+let net = null;    // provider HTTP records, main-thread fetch → worker
+const WAKE = 3, BLOCKED = 4, HDR = 32; // same layout as uapp_glue.js
+function wake() {
+  const c = new Int32Array(sab);
+  Atomics.add(c, WAKE, 1);
+  Atomics.notify(c, WAKE);
+}
 // Resolved once the worker has an app open — every archive fetch and iframe
 // RPC waits on it, so nothing races the open (or a document switch).
 let appReadyResolve;
@@ -187,8 +195,102 @@ function sendRpc(method, params = {}) {
   return new Promise((resolve, reject) => {
     const id = "b" + workerSeq++;
     workerPending.set(id, { resolve, reject });
-    worker.postMessage({ type: "rpc", id, method, params });
+    const msg = { type: "rpc", id, method, params };
+    // A worker blocked inside an AI run (provider call, run_js, a prompt)
+    // can't read its message queue — but its wait loop drains the shared
+    // inbox, so deliver through that and the RPC is served mid-run. The
+    // {kick} covers the race where it unblocked between our check and write.
+    if (inbox && Atomics.load(new Int32Array(sab), BLOCKED) === 1) {
+      inboxQueue.push(msg);
+      flushInbox();
+      return;
+    }
+    worker.postMessage(msg);
   });
+}
+
+const inboxQueue = [];
+function flushInbox() {
+  const ib = new Int32Array(inbox);
+  while (inboxQueue.length && Atomics.load(ib, 0) === 0) {
+    const msg = inboxQueue.shift();
+    const bytes = enc.encode(JSON.stringify(msg));
+    if (bytes.length > inbox.byteLength - HDR) { worker.postMessage(msg); continue; } // too big: queue behind the run
+    new Uint8Array(inbox, HDR, bytes.length).set(bytes);
+    Atomics.store(ib, 1, bytes.length);
+    Atomics.store(ib, 0, 1);
+    wake();
+    worker.postMessage({ type: "kick" });
+  }
+}
+
+// ---- provider HTTP on behalf of the worker ---------------------------------
+// The worker can't fetch asynchronously while its AI loop is blocked, so it
+// posts {http.open}/{http.read} and waits on the `net` slot; we fetch here and
+// hand over the headers, then the body one chunk at a time (a live stream, so
+// SSE deltas render as they arrive).
+
+const netStreams = new Map(); // id -> {chunks: [], done, error, reader, wanted}
+function netWrite(bytes, flags) {
+  const n = new Int32Array(net);
+  new Uint8Array(net, HDR, bytes.length).set(bytes);
+  Atomics.store(n, 1, bytes.length);
+  Atomics.store(n, 2, flags);
+  Atomics.store(n, 0, 1);
+  wake();
+}
+function netServe(id) {
+  const s = netStreams.get(id);
+  if (!s || !s.wanted) return;
+  const cap = net.byteLength - HDR;
+  if (s.chunks.length) {
+    let c = s.chunks[0];
+    if (c.length > cap) { s.chunks[0] = c.subarray(cap); c = c.subarray(0, cap); } else s.chunks.shift();
+    s.wanted = false;
+    netWrite(c, s.chunks.length === 0 && s.done && !s.error ? 1 : 0);
+    if (s.done && !s.chunks.length) netStreams.delete(id);
+    return;
+  }
+  if (s.error) { s.wanted = false; netWrite(enc.encode(String(s.error)), 2); netStreams.delete(id); return; }
+  if (s.done) { s.wanted = false; netWrite(new Uint8Array(0), 1); netStreams.delete(id); }
+}
+async function netOpen(m) {
+  const s = { chunks: [], done: false, error: null, reader: null, wanted: false, ctrl: new AbortController() };
+  netStreams.set(m.id, s);
+  let resp;
+  try {
+    const headers = {};
+    for (const [k, v] of m.headers || []) headers[k] = v;
+    resp = await fetch(m.url, { method: m.method, headers, body: m.body == null ? undefined : m.body, signal: s.ctrl.signal, cache: "no-store" });
+  } catch (e) {
+    netStreams.delete(m.id);
+    netWrite(enc.encode(JSON.stringify({ error: "network/CORS failure: " + (e && e.message || e) })), 0);
+    return;
+  }
+  const hdrs = [];
+  resp.headers.forEach((v, k) => hdrs.push([k, v]));
+  netWrite(enc.encode(JSON.stringify({ status: resp.status, contentType: resp.headers.get("content-type") || "", headers: hdrs })), 0);
+  if (!resp.body) { s.done = true; netServe(m.id); return; }
+  s.reader = resp.body.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await s.reader.read();
+      if (done) break;
+      if (value && value.length) s.chunks.push(value);
+      netServe(m.id);
+    }
+    s.done = true;
+  } catch (e) {
+    if (!s.ctrl.signal.aborted) s.error = "read failed: " + (e && e.message || e);
+    s.done = true;
+  }
+  netServe(m.id);
+}
+function netHandle(m) {
+  if (m.type === "http.open") { netOpen(m); return true; }
+  if (m.type === "http.read") { const s = netStreams.get(m.id); if (s) { s.wanted = true; netServe(m.id); } else netWrite(new Uint8Array(0), 1); return true; }
+  if (m.type === "http.close") { const s = netStreams.get(m.id); if (s) { try { s.ctrl.abort(); } catch {} netStreams.delete(m.id); } return true; }
+  return false;
 }
 
 // ---- console buffer (main-thread copy of App's ring buffer) ------------------
@@ -237,14 +339,14 @@ function bridgeReply(obj) {
   if (!sab) return;
   const i32 = new Int32Array(sab);
   let bytes = enc.encode(JSON.stringify(obj));
-  const cap = sab.byteLength - 16;
+  const cap = sab.byteLength - HDR;
   if (bytes.length > cap) {
     bytes = enc.encode(JSON.stringify({ error: "bridge reply too large (" + bytes.length + " bytes)" }));
   }
-  new Uint8Array(sab, 16, bytes.length).set(bytes);
+  new Uint8Array(sab, HDR, bytes.length).set(bytes);
   Atomics.store(i32, 1, bytes.length);
   Atomics.store(i32, 0, 1);
-  Atomics.notify(i32, 0);
+  wake(); // the worker waits on the shared WAKE cell (see blockUntil)
 }
 
 function invokeInContext(context, msg, timeoutMs = 60000) {
@@ -339,10 +441,31 @@ async function handleBridge(kind, payloadJson) {
 
 // ---- service-worker archive requests -----------------------------------------
 
+let appIsReady = false;
 async function handleSwRequest(m) {
   if (zombie) return; // another tab owns the demo — let it answer
-  const reply = (data) => navigator.serviceWorker.controller &&
-    navigator.serviceWorker.controller.postMessage({ swReply: true, id: m.id, ...data });
+  // controller is null until the SW claims us; registration.active is set as
+  // soon as it activates, so this works on the very first load too (there is
+  // no longer a reload to guarantee a controller — see the boot sequence).
+  const swPost = (msg) => {
+    const sw = navigator.serviceWorker.controller
+      || (navigator.serviceWorker.__uappReg && navigator.serviceWorker.__uappReg.active);
+    if (sw) sw.postMessage(msg);
+  };
+  const reply = (data) => data.swAck
+    ? swPost({ swAck: true, id: m.id })
+    : swPost({ swReply: true, id: m.id, ...data });
+  // Until an app is open, anything the TOP document asks for is the server's
+  // own resource — in hosted-site mode that is the page the reader is looking
+  // at, still loading its scripts. Waiting on appReady here would stall them
+  // (and deadlock on /site.uapp itself, which is what appReady is waiting on).
+  // Nested frames only exist once the shell is up, so they keep waiting.
+  if (!appIsReady && m.frameType === "top-level") {
+    reply({ passthrough: true });
+    return;
+  }
+  // Ours: say so now, so the SW waits for the body instead of giving up.
+  reply({ swAck: true });
   try {
     await appReady;
     const url = new URL(m.path, location.origin);
@@ -385,7 +508,21 @@ async function handleSwRequest(m) {
     if (p === "/app" || p === "/app/") name = "app/index.html";
     else if (p.startsWith("/app/")) name = decodeURIComponent(p.slice(5));
     else name = decodeURIComponent(p.slice(1));
-    const r = await sendRpc("files.read", { name });
+    // Directory and extensionless forms, so a hosted site browses in here the
+    // same way it does on the server (see resolve() in src/public.rs): a page
+    // linking to "../" or "how-do-bikes-work/" must land on that page's
+    // index.html, not 404.
+    const tries = [name];
+    if (name === "" || name.endsWith("/")) tries.push(name + "index.html");
+    else if (!name.split("/").pop().includes(".")) {
+      tries.push(name + ".html", name + "/index.html");
+    }
+    let r = null, lastErr = null;
+    for (const cand of tries) {
+      try { r = await sendRpc("files.read", { name: cand }); name = cand; break; }
+      catch (e) { lastErr = e; }
+    }
+    if (!r) throw lastErr || new Error("not found: " + name);
     const ctype = contentTypeFor(r.name || name);
     let bodyB64 = r.b64;
     if (ctype.startsWith("text/html")) {
@@ -543,7 +680,13 @@ async function appSave() {
   try {
     const r = await sendRpc("app.export");
     await appWrite(currentAppId, bytesFromB64(r.b64));
-    indexTouch(currentAppId, lastInfoName);
+    if (siteState) {
+      siteState.hasLocal = true;
+      siteState.localSavedAt = Date.now();
+      kvSet(siteKey("saved"), String(siteState.localSavedAt));
+    } else {
+      indexTouch(currentAppId, lastInfoName);
+    }
   } catch (e) {
     console.warn("uapp: auto-save failed:", e);
   } finally {
@@ -568,10 +711,14 @@ function onWorkerEvent(envelope) {
     })();
     return; // don't let the shell paint its "closed" overlay first
   }
-  if (params.type === "changes") scheduleSave();
+  if (params.type === "changes") {
+    scheduleSave();
+    // For the hosted-site chrome (outside the module graph): "your copy changed".
+    try { window.dispatchEvent(new CustomEvent("uapp-changes", { detail: params })); } catch {}
+  }
   if (params.type === "renamed" && params.name) {
     lastInfoName = params.name;
-    if (currentAppId) indexTouch(currentAppId, params.name);
+    if (currentAppId && !siteState) indexTouch(currentAppId, params.name);
   }
   if (params.type === "open_url" && params.url) {
     try { window.open(params.url, "_blank", "noopener"); } catch {}
@@ -588,6 +735,25 @@ function onWorkerEvent(envelope) {
 // currentAppId === null means the launcher (ephemeral, never saved).
 
 let currentAppId = null;
+
+// Hosted-site mode (site-chrome.js): the visitor's edits to the site are kept
+// in this browser across reloads, under ONE stable id per origin — not in the
+// launcher index (that is the demo's app library, a different thing on the
+// same origin). `baseline` is the server's x-uapp-modified stamp of the copy
+// the edits were made on; the chrome compares it with the server's current
+// stamp. Reset = drop the saved copy and reload from the server.
+let siteState = null; // {id, baseline, hasLocal, localSavedAt}
+const siteKey = (k) => "uapp.site." + k + ":" + siteState.id;
+function kvDel(key) { try { localStorage.removeItem(key); } catch {} memKV.delete(key); }
+window.__uappSiteReset = async () => {
+  if (!siteState) { location.reload(); return; }
+  clearTimeout(saveTimer);
+  zombie = true; // no save may land after this
+  try { await (await blobStore()).remove(siteState.id); } catch {}
+  kvDel(siteKey("saved"));
+  kvDel(siteKey("baseline"));
+  location.reload();
+};
 
 // localStorage *throws* (rather than returning null) when the browser blocks
 // site data for the origin, so everything goes through a shim that keeps the
@@ -804,6 +970,12 @@ function openApp(bytes, name) {
 }
 
 function fatal(msg) {
+  // Hosted-site mode (site-chrome.js): the body is the reader's page, and the
+  // right failure mode is to leave it alone. Report, don't repaint.
+  if (window.__uappSiteArchive) {
+    window.dispatchEvent(new CustomEvent("uapp-boot-fatal", { detail: String(msg) }));
+    return;
+  }
   document.body.innerHTML = `<div style="max-width:520px;margin:80px auto;font:15px/1.6 system-ui;color:#eee;background:#2b3145;padding:24px;border-radius:12px"><b>uapp browser demo could not start</b><br>${msg}</div>`;
   document.body.style.background = "#23293a";
 }
@@ -858,7 +1030,8 @@ if (tabChannel) {
     }
     splashNote("Starting the service worker…");
     try {
-      await navigator.serviceWorker.register(new URL("sw.js", BASE));
+      navigator.serviceWorker.__uappReg =
+        await navigator.serviceWorker.register(new URL("sw.js", BASE));
       await navigator.serviceWorker.ready;
     } catch (e) {
       // Blocking cookies/site data for the origin blocks this too, and without
@@ -868,10 +1041,33 @@ if (tabChannel) {
         : "The demo's service worker could not start: " + errText(e));
       return;
     }
-    if (!navigator.serviceWorker.controller || (!crossOriginIsolated && ssOk && !ssGet("uapp-coi-reload"))) {
-      ssSet("uapp-coi-reload", "1");
-      location.reload();
-      return;
+    // A newer sw.js must take over NOW, not when the old one happens to go
+    // idle: tell the old worker to drop its pending asks and the new one to
+    // skip waiting. Covers a worker already waiting at registration and any
+    // update found while the page is open.
+    const handoff = (reg) => {
+      const w = reg.waiting;
+      if (!w) return;
+      try { reg.active && reg.active.postMessage({ release: true }); } catch {}
+      try { w.postMessage({ skipWaiting: true }); } catch {}
+    };
+    {
+      const reg = navigator.serviceWorker.__uappReg;
+      handoff(reg);
+      reg.addEventListener("updatefound", () => {
+        const w = reg.installing;
+        if (w) w.addEventListener("statechange", () => { if (w.state === "installed") handoff(reg); });
+      });
+    }
+    // No reload here. sw.js claims clients on activate, so we just wait for it
+    // (and carry on uncontrolled if it never lands — askShell asks
+    // uncontrolled clients too, and replies go via registration.active).
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        const done = () => resolve();
+        navigator.serviceWorker.addEventListener("controllerchange", done, { once: true });
+        setTimeout(done, 3000);
+      });
     }
     navigator.serviceWorker.addEventListener("message", (ev) => {
       if (ev.data && ev.data.swRequest) handleSwRequest(ev.data);
@@ -879,6 +1075,8 @@ if (tabChannel) {
 
     sab = crossOriginIsolated ? new SharedArrayBuffer(4 * 1024 * 1024) : null;
     if (!sab) console.warn("uapp: not cross-origin isolated — run_js/app-action tools are disabled");
+    inbox = sab ? new SharedArrayBuffer(4 * 1024 * 1024) : null;
+    net = sab ? new SharedArrayBuffer(1024 * 1024 + HDR) : null;
 
     splashNote("Loading the runtime…"); // ~1.5 MB of wasm on a cold cache
     worker = new Worker(new URL("worker.js", BASE), { type: "module" });
@@ -890,8 +1088,10 @@ if (tabChannel) {
           workerPending.delete(m.id);
           m.error ? p.reject(new Error(m.error.message || "error")) : p.resolve(m.result);
         }
+        if (inbox && inboxQueue.length) flushInbox(); // the worker freed the slot
         return;
       }
+      if (netHandle(m)) return;
       if (m.type === "event") {
         try { onWorkerEvent(JSON.parse(m.json)); } catch {}
         return;
@@ -905,7 +1105,7 @@ if (tabChannel) {
         if (ev.data && ev.data.type === "fatal") reject(new Error(ev.data.error));
       };
       worker.addEventListener("message", h);
-      worker.postMessage({ type: "init", sab });
+      worker.postMessage({ type: "init", sab, inbox, net });
     });
 
     await migrateLegacy();
@@ -928,13 +1128,38 @@ if (tabChannel) {
       }
     }
     if (!info) {
+      // currentAppId stays null: nothing is persisted, so a reload starts over
+      // from whatever the source below serves.
       currentAppId = null;
-      splashShow("Starting uapp…", "Loading the app library…");
-      const bytes = await fetchWithProgress(new URL("launcher.uapp", BASE), "the launcher app");
-      info = await openApp(bytes, "Apps");
+      const site = window.__uappSiteArchive;
+      if (site) {
+        siteState = { id: "site-" + location.host.replace(/[^a-z0-9.-]/gi, "_"), baseline: 0, hasLocal: false, localSavedAt: 0 };
+        const saved = await appRead(siteState.id);
+        if (saved) {
+          siteState.hasLocal = true;
+          siteState.localSavedAt = Number(kvGet(siteKey("saved"))) || 0;
+          siteState.baseline = Number(kvGet(siteKey("baseline"))) || 0;
+          info = await openApp(saved, window.__uappSiteName || "Site");
+        } else {
+          splashShow("Opening the editor…", "Downloading this site…");
+          const r = await fetch(new URL(site, location.origin), { cache: "no-store" });
+          if (!r.ok) throw new Error(`could not fetch this site (HTTP ${r.status})`);
+          siteState.baseline = Number(r.headers.get("x-uapp-modified")) || Math.floor(Date.now() / 1000);
+          kvSet(siteKey("baseline"), String(siteState.baseline));
+          info = await openApp(new Uint8Array(await r.arrayBuffer()), window.__uappSiteName || "Site");
+        }
+        // Saved from the first change on (scheduleSave fires on "changes").
+        currentAppId = siteState.id;
+        window.__uappSiteState = siteState;
+      } else {
+        splashShow("Starting uapp…", "Loading the app library…");
+        const bytes = await fetchWithProgress(new URL("launcher.uapp", BASE), "the launcher app");
+        info = await openApp(bytes, "Apps");
+      }
     }
     lastInfoName = info.name || "uapp";
     document.title = `${lastInfoName} — uapp`;
+    appIsReady = true;
     appReadyResolve();
 
     // The shell's transport (core.js checks window.__uappTransport).
@@ -977,7 +1202,8 @@ if (tabChannel) {
       appFrame.addEventListener("load", resolve, { once: true });
       setTimeout(resolve, 8000);
     });
-    for (const [id, path] of [["appframe", "app/"], ["scratchframe", "scratch/"]]) {
+    const entry = window.__uappSiteEntry || "app/";
+    for (const [id, path] of [["appframe", entry], ["scratchframe", "scratch/"]]) {
       const f = document.getElementById(id);
       // No cache-buster: these are served no-store, and a stable url lets
       // later reloads replace this history entry instead of pushing a new one
