@@ -1,6 +1,6 @@
 [package]
 name = "uapp"
-version = "0.2.9"
+version = "0.2.10"
 edition = "2021"
 description = "Single-file shareable apps: app + data + AI in one .uapp file"
 license = "MIT"
