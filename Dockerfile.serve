@@ -1,13 +1,17 @@
-# uapp public site server — `uapp serve`, the read-only hosted-site mode.
+# uapp public site server — `uapp serve`, the hosted-site mode.
 #
-# Serves ONE .uapp as a plain website: rendered pages under `app/` at real
-# URLs, no token, no WebSocket, no shell (see src/public.rs — the router shares
-# nothing with the privileged one). The .uapp itself is NOT baked into the
-# image; it is bind-mounted at /site/site.uapp so content updates are an rsync,
-# not a rebuild.
+# Serves ONE .uapp as a website: rendered pages under `app/` at real URLs for
+# everyone; the shell, the WebSocket and publishing (PUT /site.uapp) only with
+# the token (see src/server.rs). The .uapp itself is NOT baked into the image;
+# it is bind-mounted under /site so content updates are a publish from the
+# browser (or an rsync + restart), not a rebuild.
 #
 #   docker build -f Dockerfile.serve -t uapp-serve .
-#   docker run -v /path/to/site.uapp:/site/site.uapp:ro -p 8080:8080 uapp-serve
+#   docker run -v /path/to/sitedir:/site -e UAPP_TOKEN=... -p 8080:8080 uapp-serve
+#
+# The mount must be writable by the container user for publishing to work
+# (run with --user <uid> of the file's owner, or chown it); a read-only mount
+# still serves, and a publish is refused with an error.
 
 FROM rust:1-trixie AS build
 WORKDIR /src
@@ -43,12 +47,17 @@ COPY --from=build /src/target/release/uapp-server /usr/local/bin/uapp-server
 # because building it needs the wasm toolchain (clang + wasm-bindgen).
 COPY dist-web /opt/uapp-web
 
-# Read-only anyway (the DB is opened SQLITE_OPEN_READ_ONLY), but an unprivileged
-# user means a bug can't reach anything else either.
+# The engine keeps its per-user state (crash-rescue snapshots, the registry
+# lock) under HOME; world-writable so `--user <any uid>` works too.
+RUN mkdir -p /var/lib/uapp && chmod 1777 /var/lib/uapp
+ENV HOME=/var/lib/uapp
+# An unprivileged user means a bug can't reach anything but the site.
 USER uapp
 
 ENV UAPP_SITE=/site/site.uapp
 ENV UAPP_PORT=8080
+# UAPP_TOKEN: the publish secret (`--token`). Unset = a random one per start,
+# printed to the log — fine for a read-mostly site, useless for publishing.
 EXPOSE 8080
 
 # Defaults suit a hosted site that wants the in-browser editor:

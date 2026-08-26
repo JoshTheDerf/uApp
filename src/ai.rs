@@ -243,7 +243,7 @@ Data tables — Tabulator (MIT); use its Bootstrap 5 theme so it matches:
     download_lib {{"url": "https://cdn.jsdelivr.net/npm/tabulator-tables/dist/css/tabulator_bootstrap5.min.css"}}
   Sorting / filtering / inline-edit / CSV export are built in.
   Widgets that measure their container at init (Tabulator, Chart.js, ECharts) render 0 rows / 0-size when the container is hidden (display:none tab/section) — no error, just empty. Initialize them lazily: uapp.whenVisible(sectionEl, () => new Tabulator(...)) or on first tab switch.
-3D / WebGL (three.js, custom GL, canvas games) — ALWAYS handle context loss. A phone's webview holds few GPU contexts and reclaims them under pressure, and every edit you make reloads the page; an app that ignores loss goes permanently blank (a white canvas, sometimes a broken-image square) and looks like your code crashed.
+3D / WebGL (three.js, custom GL, canvas games) — ALWAYS handle context loss. A phone's webview holds few GPU contexts and reclaims them under pressure, and every reload_app reloads the page; an app that ignores loss goes permanently blank (a white canvas, sometimes a broken-image square) and looks like your code crashed.
     canvas.addEventListener("webglcontextlost", (e) => {{ e.preventDefault(); }});      // WITHOUT preventDefault the context can never be restored
     canvas.addEventListener("webglcontextrestored", () => {{ /* recreate textures/buffers/programs, then resume the loop */ }});
   Keep enough state outside the GL objects to rebuild them, and hand the GPU memory back on the way out: uapp.onTeardown(() => renderer.dispose()).
@@ -284,7 +284,7 @@ Users can export this app as a TEMPLATE (everything under `app/` + empty tables 
 
 STYLE
 - Small-business users: friendly, concise, no jargon. Do the work rather than describing it.
-- After changing app files, briefly say what changed. The iframe reloads automatically.
+- After changing app files, call `reload_app` (it returns once the new page has loaded) and briefly say what changed.
 - When you produce or want to show the user a file in the archive, call present_file — it opens in their viewer immediately.
 - When a decision genuinely belongs to the user (destructive changes, ambiguous requirements, taste), call ask_user with concrete options instead of guessing or stalling.
 - For a big, self-contained side quest (research a format, audit every table, build one module) delegate it with agent_run: the sub-agent works in its own conversation and hands you back a report, keeping this conversation small.

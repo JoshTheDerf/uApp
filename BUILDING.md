@@ -8,8 +8,7 @@ just build      # release build of both binaries
 just test       # server debug build + Rust tests + node end-to-end tests
 just web        # browser build -> dist-web/
 just install    # build + install ~/.local/bin/uapp and uapp-desktop
-just serve ../thederf-com/site.uapp   # public-site mode locally, with editing chrome
-just deploy-site / just deploy-content <file.uapp>   # thederf.com (see deploy doc)
+just serve path/to/site.uapp          # public-site mode locally, with editing chrome
 ```
 
 The sections below describe what those recipes run.

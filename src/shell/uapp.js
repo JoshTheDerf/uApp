@@ -33,7 +33,18 @@
   // Browser (wasm) demo build: no server — this page talks to the shell (its
   // parent window) over postMessage; the shell forwards to the wasm worker.
   // The flag is injected into served pages by the shell's service-worker path.
-  const wasmMode = !!window.__uappWasm && window.parent !== window;
+  // Browser build: the shell page (boot.js) flags itself with __uappWasmHost;
+  // a page in one of its frames — at any depth — finds it by walking up, and
+  // that window is where RPCs go. Nothing is injected into the page for this,
+  // so a site that stores rendered HTML can't pick up a stale marker.
+  const wasmHost = (() => {
+    try {
+      let w = window;
+      while (w.parent !== w) { w = w.parent; if (w.__uappWasmHost) return w; }
+    } catch {} // a cross-origin ancestor: not ours
+    return null;
+  })();
+  const wasmMode = !!wasmHost;
   // A hosted site's top-level page (served by `uapp serve`, which injects
   // /chrome.js ahead of everything else): there is no WebSocket server behind
   // it, and the editing shell is about to take this document over anyway. Do
@@ -45,7 +56,7 @@
   let ws, nextId = 1, openp;
   // One raw-send for both transports; JSON objects in, transport framing here.
   const rawSend = (obj) => {
-    if (wasmMode) { window.parent.postMessage({ __uappRPC: true, m: obj }, "*"); return true; }
+    if (wasmMode) { wasmHost.postMessage({ __uappRPC: true, m: obj }, "*"); return true; }
     if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; }
     return false;
   };
@@ -361,6 +372,16 @@
     pending.delete(m.id);
     m.error ? pr.reject(new Error(m.error.message)) : pr.resolve(m.result);
   }
+  // "This page has finished loading" (window load, or right away on a
+  // reconnect of a page that already had). ctx.register goes out from the
+  // <head>, before the page's own scripts ran; the AI's reload_app waits for
+  // THIS, so a run_js/read_console right after it sees the new page, not the
+  // old one or a half-initialized new one.
+  function announceLoaded() {
+    const send = () => rawSend({ method: "ctx.loaded", params: { context } });
+    if (document.readyState === "complete") send();
+    else window.addEventListener("load", send, { once: true });
+  }
   function connect() {
     if (hostedTop) { openp = new Promise(() => {}); return; }
     if (wasmMode) {
@@ -369,6 +390,7 @@
         if (d && d.__uappMsg && d.m) onTransportMessage(d.m);
       });
       rawSend({ method: "ctx.register", params: { context } });
+      announceLoaded();
       registerActions();
       logFlush();
       openp = Promise.resolve();
@@ -382,6 +404,7 @@
       ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
       ws.onopen = () => {
         ws.send(JSON.stringify({ method: "ctx.register", params: { context } }));
+        announceLoaded();
         registerActions();
         logFlush();
         resolve();

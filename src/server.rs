@@ -1,5 +1,22 @@
-//! HTTP + WebSocket server for one open .uapp.
-//! Everything binds to 127.0.0.1 with a per-session token.
+//! HTTP + WebSocket server for one open .uapp — the one router, in two modes.
+//!
+//! Private (the desktop app, `uapp open`): binds 127.0.0.1 with a per-session
+//! token; EVERY route checks it (`authed`), and a request with a non-loopback
+//! Host is refused (DNS rebinding).
+//!
+//! Public (`uapp serve`, `App::public` set): the same router faces the world
+//! as a website. Unauthenticated requests get exactly three things — the
+//! site's `app/` pages at real URLs (`public_page`), the sanitized archive at
+//! `GET /site.uapp`, and the browser-build assets of the editing chrome. The
+//! token (from `--token`/`UAPP_TOKEN`, sent as `?t=`, the cookie, or
+//! `Authorization: Bearer`) unlocks everything else — the shell, the
+//! WebSocket, and `PUT /site.uapp`, which is how an edited copy is published
+//! back. Rules that hold regardless of the token:
+//!   * unauthenticated file lookups resolve STRICTLY under `app/` — never the
+//!     `data/<name>` fallback of `store::sqlar_read`, which would publish
+//!     every user-data file in the archive;
+//!   * `/site.uapp` is `store::export_public` output: no chat, no config
+//!     secrets, `data/` only with `--publish-data`.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxPath, Query, State};
@@ -58,18 +75,37 @@ fn host_is_local(headers: &HeaderMap) -> bool {
     let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) else {
         return true; // HTTP/1.0 / some native webviews omit Host
     };
-    let hostname = host
-        .strip_prefix('[') // [::1]:port
-        .and_then(|h| h.split(']').next())
-        .unwrap_or_else(|| host.split(':').next().unwrap_or(host));
+    let hostname = hostname_of(host);
     matches!(hostname, "localhost" | "127.0.0.1" | "::1") || hostname.starts_with("127.")
 }
 
+/// `host[:port]` -> `host`, with `[::1]:port` handled.
+fn hostname_of(hostport: &str) -> &str {
+    hostport
+        .strip_prefix('[')
+        .and_then(|h| h.split(']').next())
+        .unwrap_or_else(|| hostport.split(':').next().unwrap_or(hostport))
+}
+
 fn authed(app: &App, headers: &HeaderMap, q: &HashMap<String, String>) -> bool {
-    if !host_is_local(headers) {
+    // The loopback check guards a 127.0.0.1 bind against DNS rebinding; a
+    // public site is reached through its real hostname (behind a proxy).
+    if app.public.is_none() && !host_is_local(headers) {
+        return false;
+    }
+    if app.token.is_empty() {
         return false;
     }
     if q.get("t").map(|t| t == &app.token).unwrap_or(false) {
+        return true;
+    }
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| t.trim() == app.token)
+        .unwrap_or(false)
+    {
         return true;
     }
     let want = format!("{}={}", cookie_name(app), app.token);
@@ -101,6 +137,10 @@ async fn shell(
     headers: HeaderMap,
 ) -> Response {
     if !authed(&app, &headers, &q) {
+        // A public site's front page is the site, not the shell.
+        if app.public.is_some() {
+            return public_page(&app, "/", &headers);
+        }
         return deny();
     }
     // A root-absolute `href="/"` followed INSIDE the app frame means the app's
@@ -305,6 +345,12 @@ async fn app_file(
     headers: HeaderMap,
 ) -> Response {
     if !authed(&app, &headers, &q) {
+        // The editing chrome's service worker normally answers /app/* from
+        // the visitor's own copy; when it isn't in control, the server's
+        // pages are the right fallback.
+        if app.public.is_some() {
+            return public_page(&app, &format!("/{path}"), &headers);
+        }
         return deny();
     }
     let name = if path.is_empty() { "index.html".to_string() } else { path };
@@ -391,14 +437,39 @@ async fn root_file(
     headers: HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
+    let path = percent_decode(uri.path());
+    // The browser build's assets win over site files of the same name — the
+    // editing chrome cannot boot if the site shadows its loader.
+    if let Some(chrome) = &app.chrome {
+        if let Some(bytes) = chrome.bundle.get(path.as_str()) {
+            let etag = etag_for(bytes);
+            if if_none_match(&headers, &etag) {
+                return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
+            }
+            return (
+                [
+                    (header::CONTENT_TYPE, content_type_for(&path).to_string()),
+                    (header::ETAG, etag),
+                    // Changes only with the server image, but must never outlive
+                    // a deploy: revalidate, and let the ETag make that cheap.
+                    (header::CACHE_CONTROL, "public, max-age=0, must-revalidate".to_string()),
+                ],
+                bytes.clone(),
+            )
+                .into_response();
+        }
+    }
     if !authed(&app, &headers, &q) {
+        if app.public.is_some() {
+            return public_page(&app, &path, &headers);
+        }
         return deny();
     }
-    let name = percent_decode(uri.path().trim_start_matches('/'));
+    let name = path.trim_start_matches('/');
     if name.is_empty() {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    serve_sqlar(&app, &name, &headers)
+    serve_sqlar(&app, name, &headers)
 }
 
 async fn app_root(
@@ -539,11 +610,18 @@ async fn ws_route(
             .split("//")
             .nth(1)
             .map(|hostport| {
-                let host = hostport
-                    .strip_prefix('[')
-                    .and_then(|h| h.split(']').next())
-                    .unwrap_or_else(|| hostport.split(':').next().unwrap_or(hostport));
-                matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
+                let host = hostname_of(hostport);
+                if app.public.is_some() {
+                    // A public site is its own origin: the page that opened
+                    // the socket must have come from the Host we were asked for.
+                    headers
+                        .get(header::HOST)
+                        .and_then(|h| h.to_str().ok())
+                        .map(|h| hostname_of(h) == host)
+                        .unwrap_or(false)
+                } else {
+                    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
+                }
             })
             .unwrap_or(false);
         if !ok {
@@ -564,6 +642,7 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
             // Actions and contexts registered by this page die with it.
             self.0.actions.lock().unwrap().retain(|_, a| a.conn != self.1);
             self.0.contexts.lock().unwrap().retain(|(_, c)| *c != self.1);
+            self.0.ctx_loaded.lock().unwrap().remove(&self.1);
         }
     }
     let conn_id = CONN_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -666,6 +745,10 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
             if !id.is_null() {
                 let _ = out_tx.send(json!({"id": id, "result": {"ok": true}}).to_string()).await;
             }
+            continue;
+        }
+        if method == "ctx.loaded" {
+            app.ctx_loaded.lock().unwrap().insert(conn_id);
             continue;
         }
         if method == "actions.result" || method == "eval.result" {
@@ -952,17 +1035,375 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/app/", get(app_root))
         .route("/app/*path", get(app_file))
         .route("/ws", get(ws_route))
+        .route(
+            "/site.uapp",
+            get(site_archive).put(site_publish).layer(axum::extract::DefaultBodyLimit::max(
+                crate::rpc::MAX_UPLOAD_BYTES + 1024 * 1024,
+            )),
+        )
         .fallback(get(root_file))
-        .layer(axum::middleware::map_response(security_headers))
+        .layer(axum::middleware::map_response_with_state(app.clone(), security_headers))
         .with_state(app)
 }
 
 /// Baseline security headers on every response. Deliberately no CSP: app pages
 /// run their own JS/styles by design, so a restrictive policy would break them
 /// — origin isolation of untrusted apps is a separate, larger change.
-async fn security_headers(mut resp: Response) -> Response {
+///
+/// A public site that opted in (`--coi`) gets COOP/COEP on its documents so
+/// the editing chrome is cross-origin isolated from birth (SharedArrayBuffer
+/// for the wasm bridge) — credentialless rather than require-corp, so plain
+/// cross-origin `<script>`/`<img>` in the pages keep loading.
+async fn security_headers(State(app): State<Arc<App>>, mut resp: Response) -> Response {
+    let is_html = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("text/html"))
+        .unwrap_or(false);
     let h = resp.headers_mut();
     h.insert(header::X_CONTENT_TYPE_OPTIONS, header::HeaderValue::from_static("nosniff"));
-    h.insert(header::REFERRER_POLICY, header::HeaderValue::from_static("no-referrer"));
+    match app.public {
+        None => {
+            h.insert(header::REFERRER_POLICY, header::HeaderValue::from_static("no-referrer"));
+        }
+        Some(opts) => {
+            h.insert(
+                header::REFERRER_POLICY,
+                header::HeaderValue::from_static("strict-origin-when-cross-origin"),
+            );
+            if opts.coi && is_html {
+                h.insert("cross-origin-opener-policy", header::HeaderValue::from_static("same-origin"));
+                h.insert(
+                    "cross-origin-embedder-policy",
+                    header::HeaderValue::from_static("credentialless"),
+                );
+            }
+        }
+    }
     resp
+}
+
+// ---- public site mode -------------------------------------------------------
+
+/// Load the browser build (`dist-web`) a public site serves as its editing
+/// chrome. Without it a site still serves perfectly well — it just has no
+/// editor.
+pub fn load_chrome(dir: &std::path::Path) -> anyhow::Result<crate::app::Chrome> {
+    use anyhow::Context as _;
+    use std::hash::{Hash, Hasher};
+    // The demo's own launcher and landing page (index.html would shadow the
+    // site's), plus build leftovers, must not be served.
+    fn skip(rel: &str) -> bool {
+        rel == "index.html"
+            || rel == "launcher.uapp"
+            || rel.starts_with("examples/")
+            || rel.ends_with(".d.ts")
+            || rel.ends_with(".map")
+    }
+    let mut bundle = HashMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).with_context(|| format!("reading web bundle {}", d.display()))? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let rel = path.strip_prefix(dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            if skip(&rel) {
+                continue;
+            }
+            bundle.insert(format!("/{rel}"), std::fs::read(&path)?);
+        }
+    }
+    anyhow::ensure!(
+        bundle.contains_key("/boot.js") && bundle.contains_key("/sw.js"),
+        "{} does not look like a uapp web build (no boot.js / sw.js) — run scripts/build-web.sh",
+        dir.display()
+    );
+    // site-chrome.js is the injected entry point; serve it under the shorter
+    // name the injected tag uses.
+    let Some(chrome) = bundle.get("/site-chrome.js").cloned() else {
+        anyhow::bail!("{} has no site-chrome.js — run scripts/build-web.sh", dir.display());
+    };
+    bundle.insert("/chrome.js".into(), chrome);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut names: Vec<&String> = bundle.keys().collect();
+    names.sort();
+    for n in names {
+        n.hash(&mut h);
+        bundle[n].hash(&mut h);
+    }
+    Ok(crate::app::Chrome { bundle, version: format!("{:x}", h.finish()) })
+}
+
+/// A strong-form validator over the served bytes. Only a cache validator, so
+/// a non-cryptographic hash is fine.
+fn etag_for(bytes: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    format!("\"{:x}\"", h.finish())
+}
+
+fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').any(|t| t.trim() == etag))
+        .unwrap_or(false)
+}
+
+/// Read one archive entry by its EXACT name. `store::sqlar_read` is the wrong
+/// tool for an anonymous request — see the module header.
+fn read_exact(db: &rusqlite::Connection, name: &str) -> Option<Vec<u8>> {
+    let mut stmt = db.prepare("SELECT sz, data FROM sqlar WHERE name=?1").ok()?;
+    let mut rows = stmt.query(rusqlite::params![name]).ok()?;
+    let row = rows.next().ok()??;
+    let sz: Option<i64> = row.get(0).ok()?;
+    let data: Option<Vec<u8>> = row.get(1).ok()?; // NULL = directory entry
+    crate::store::sqlar_inflate(sz, data?, name).ok()
+}
+
+/// Map a request path to an `app/` name the way a static host would: `/` and
+/// `/posts/` get `index.html`, and an extensionless path tries `<p>.html`
+/// then `<p>/index.html`, so posts can be linked as `/posts/hello` as well as
+/// `/posts/hello.html`.
+fn resolve_public(db: &rusqlite::Connection, path: &str) -> Option<(String, Vec<u8>)> {
+    let p = path.trim_start_matches('/');
+    if p.contains("..") || p.contains('\\') {
+        return None;
+    }
+    let mut tries: Vec<String> = Vec::new();
+    if p.is_empty() || p.ends_with('/') {
+        tries.push(format!("app/{p}index.html"));
+    } else {
+        tries.push(format!("app/{p}"));
+        if !p.rsplit('/').next().unwrap_or("").contains('.') {
+            tries.push(format!("app/{p}.html"));
+            tries.push(format!("app/{p}/index.html"));
+        }
+    }
+    tries.into_iter().find_map(|name| read_exact(db, &name).map(|b| (name, b)))
+}
+
+/// Add `<meta name="viewport">` when the document lacks one, and — when the
+/// editing chrome is available — the one script tag that offers it.
+///
+/// Deliberately NOT `inject_viewport`: that adds `/uapp.js`, whose console
+/// forwarding wants the privileged WebSocket. Nothing else is added, so a
+/// cold load stays the plain document a crawler wants.
+fn inject_chrome(bytes: Vec<u8>, chrome: Option<&str>) -> Vec<u8> {
+    const META: &str = r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#;
+    let text = match String::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(e) => return e.into_bytes(), // non-utf8: serve untouched
+    };
+    // A marker the browser build used to inject into frame HTML; a site that
+    // renders pages from fetched HTML persisted it, and at top level it told
+    // the chrome it was inside the wasm frame. Harmless now, still removed.
+    let text = strip_wasm_marker(&text);
+    let lower = text.to_ascii_lowercase();
+    let mut inject = String::new();
+    if !(lower.contains("name=\"viewport\"") || lower.contains("name='viewport'")) {
+        inject.push('\n');
+        inject.push_str(META);
+    }
+    if let Some(v) = chrome {
+        if !lower.contains("/chrome.js") {
+            inject.push('\n');
+            inject.push_str(&format!(r#"<script src="/chrome.js?v={v}" defer></script>"#));
+        }
+    }
+    if inject.is_empty() {
+        return text.into_bytes();
+    }
+    if let Some(pos) = lower.find("<head") {
+        if let Some(gt) = text[pos..].find('>') {
+            let at = pos + gt + 1;
+            return format!("{}{}{}", &text[..at], inject, &text[at..]).into_bytes();
+        }
+    }
+    format!("{inject}\n{text}").into_bytes()
+}
+
+fn strip_wasm_marker(text: &str) -> String {
+    const MARKERS: [&str; 2] =
+        ["<script>window.__uappWasm=1</script>", "<script>window.__uappWasm = 1;</script>"];
+    let mut out = text.to_string();
+    for m in MARKERS {
+        while let Some(pos) = out.find(m) {
+            let start = out[..pos].trim_end_matches(['\n', ' ', '\t']).len();
+            out.replace_range(start..pos + m.len(), "");
+        }
+    }
+    out
+}
+
+/// An anonymous visitor's view of the site: one `app/` page (or the site's
+/// `404.html`), with cache validators so a CDN or browser can revalidate.
+fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
+    let opts = app.public.unwrap_or_default();
+    let found = {
+        let eng = app.engine.lock().unwrap();
+        resolve_public(&eng.db, path)
+            .or_else(|| read_exact(&eng.db, "app/404.html").map(|b| ("app/404.html".to_string(), b)))
+    };
+    let Some((name, bytes)) = found else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let is_404 = name == "app/404.html" && path.trim_start_matches('/') != "404.html";
+    let ctype = content_type_for(&name);
+    let is_html = ctype.starts_with("text/html");
+    let bytes = if is_html {
+        inject_chrome(bytes, app.chrome.as_ref().map(|c| c.version.as_str()))
+    } else {
+        bytes
+    };
+    let cache = if is_html {
+        // Always revalidate: a reload must get the server's authoritative copy.
+        "public, max-age=0, must-revalidate".to_string()
+    } else {
+        format!("public, max-age={}", opts.asset_max_age)
+    };
+    let etag = etag_for(&bytes);
+    if !is_404 && if_none_match(headers, &etag) {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag), (header::CACHE_CONTROL, cache)])
+            .into_response();
+    }
+    (
+        if is_404 { StatusCode::NOT_FOUND } else { StatusCode::OK },
+        [
+            (header::CONTENT_TYPE, ctype.to_string()),
+            (header::ETAG, etag),
+            (header::CACHE_CONTROL, cache),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// When the site's content last changed (unix seconds); a HEAD is enough to
+/// read it. The editing chrome compares it with the copy it downloaded.
+const MODIFIED_HEADER: header::HeaderName = header::HeaderName::from_static("x-uapp-modified");
+
+/// The current `/site.uapp`, rebuilt only when something was written since.
+fn current_archive(app: &App) -> anyhow::Result<Arc<crate::app::PublicArchive>> {
+    let opts = app.public.unwrap_or_default();
+    let eng = app.engine.lock().unwrap();
+    let mut cache = app.archive_cache.lock().unwrap();
+    if let Some((gen, arc)) = cache.as_ref() {
+        if *gen == eng.writes {
+            return Ok(arc.clone());
+        }
+    }
+    let name = crate::store::meta_get(&eng.db, "name").ok().flatten().unwrap_or_else(|| "site".into());
+    let bytes = crate::store::export_public(&eng.db, &name, opts.export_data)?;
+    let modified: i64 = eng
+        .db
+        .query_row("SELECT coalesce(max(mtime), 0) FROM sqlar", [], |r| r.get(0))
+        .unwrap_or(0);
+    let arc = Arc::new(crate::app::PublicArchive { etag: etag_for(&bytes), bytes, modified });
+    *cache = Some((eng.writes, arc.clone()));
+    Ok(arc)
+}
+
+/// `GET /site.uapp`: the copy the in-browser engine boots from. Built by
+/// `store::export_public`, which keeps app files and user-table ROWS (the
+/// site's own SQL machinery) but drops chat, file history and config secrets.
+async fn site_archive(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    if !app.public.map(|o| o.archive).unwrap_or(false) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let arc = match tokio::task::spawn_blocking({
+        let app = app.clone();
+        move || current_archive(&app)
+    })
+    .await
+    {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    if if_none_match(&headers, &arc.etag) {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [(header::ETAG, arc.etag.clone()), (MODIFIED_HEADER, arc.modified.to_string())],
+        )
+            .into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (header::ETAG, arc.etag.clone()),
+            // Revalidate rather than cache blind: the client re-fetches on
+            // every full load and must see the current copy; a 304 keeps
+            // that cheap.
+            (header::CACHE_CONTROL, "public, max-age=0, must-revalidate".to_string()),
+            (MODIFIED_HEADER, arc.modified.to_string()),
+        ],
+        arc.bytes.clone(),
+    )
+        .into_response()
+}
+
+/// `PUT /site.uapp` (token required): publish an edited copy. The body is a
+/// whole .uapp as the browser engine exports it; `template::publish` makes
+/// the served site match it while keeping what the copy never had (config,
+/// chat, history). `If-Match` with the ETag of the copy's download refuses
+/// (409) to overwrite a site that moved on in the meantime — the browser
+/// then shows "server copy is newer" instead of silently losing that.
+async fn site_publish(
+    State(app): State<Arc<App>>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let Some(opts) = app.public else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    if !authed(&app, &headers, &q) {
+        return deny();
+    }
+    if body.len() > crate::rpc::MAX_UPLOAD_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "archive too large").into_response();
+    }
+    if !body.starts_with(b"SQLite format 3\0") {
+        return (StatusCode::BAD_REQUEST, "not a .uapp archive").into_response();
+    }
+    let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let done = tokio::task::spawn_blocking(move || -> Result<Value, Response> {
+        let err = |st: StatusCode, e: String| (st, e).into_response();
+        if let Some(want) = if_match {
+            let cur = current_archive(&app).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+            if want.split(',').all(|t| t.trim() != cur.etag && t.trim() != "*") {
+                return Err((
+                    StatusCode::CONFLICT,
+                    [(header::ETAG, cur.etag.clone()), (MODIFIED_HEADER, cur.modified.to_string())],
+                    axum::Json(json!({"error": "the site changed since this copy was downloaded", "etag": cur.etag})),
+                )
+                    .into_response());
+            }
+        }
+        // Rescue point before a whole-site change, like a template update.
+        if let Err(e) = app.engine.lock().unwrap().snapshot() {
+            eprintln!("uapp: snapshot before publish failed: {e:#}");
+        }
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body);
+        let result = crate::rpc::local_op(&app, "publish", json!({"b64": b64, "data": opts.export_data}))
+            .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, format!("publish failed: {e:#}")))?;
+        let arc = current_archive(&app).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+        Ok(json!({"ok": true, "result": result, "etag": arc.etag, "modified": arc.modified}))
+    })
+    .await;
+    match done {
+        Ok(Ok(v)) => {
+            let etag = v["etag"].as_str().unwrap_or("").to_string();
+            let modified = v["modified"].to_string();
+            ([(header::ETAG, etag), (MODIFIED_HEADER, modified)], axum::Json(v)).into_response()
+        }
+        Ok(Err(resp)) => resp,
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("publish failed: {e}")).into_response(),
+    }
 }

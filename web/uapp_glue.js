@@ -134,8 +134,9 @@ export function js_http_open(method, url, headersJson, body, connectTimeoutMs) {
   Atomics.store(new Int32Array(cfg.net), 0, 0);
   netBusy = id;
   postMessage({ type: "http.open", id, method, url, headers, body: body == null ? null : body });
-  const rec = netAwait(id, Math.max(connectTimeoutMs || 0, 1000));
-  if (!rec) { netBusy = 0; return JSON.stringify({ error: "connect timeout" }); }
+  const waitMs = Math.max(connectTimeoutMs || 0, 1000);
+  const rec = netAwait(id, waitMs);
+  if (!rec) { netBusy = 0; return JSON.stringify({ error: "no response from the provider within " + Math.round(waitMs / 1000) + "s (it accepted the request but sent nothing back in time)" }); }
   let r = {};
   try { r = JSON.parse(new TextDecoder().decode(rec.bytes)); } catch { r = { error: "bad open record" }; }
   if (r.error) { netBusy = 0; return JSON.stringify(r); }

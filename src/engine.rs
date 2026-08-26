@@ -60,6 +60,12 @@ impl ChangeSet {
                 self.data = true;
                 self.config = true;
             }
+            // A publish replaces app (and maybe data) files and the site's
+            // own tables wholesale; config and chat are untouched.
+            "publish" => {
+                self.files = true;
+                self.data = true;
+            }
             _ => self.data = true,
         }
     }
@@ -90,6 +96,9 @@ pub struct Engine {
     #[cfg(not(target_arch = "wasm32"))]
     _lock: Option<File>,
     dirty: bool,
+    /// Committed local ops so far. Cheap change detection for caches built
+    /// from the database (the public `/site.uapp`): every write is one op.
+    pub writes: u64,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     last_snapshot_ms: u64,
 }
@@ -148,6 +157,7 @@ impl Engine {
             crypt,
             _lock: Some(lock),
             dirty: false,
+            writes: 0,
             last_snapshot_ms: 0,
         };
         // The open-time rescue point (also what a corrupt future open restores).
@@ -387,7 +397,9 @@ impl Engine {
         if !same_file {
             registry::remove_addr(&self.path); // the old path is no longer served
         }
+        let writes = self.writes + 1;
         *self = reopened;
+        self.writes = writes;
         Ok(())
     }
 
@@ -441,7 +453,9 @@ impl Engine {
             reopen_with,
         )
         .context("re-opening after the encryption change")?;
+        let writes = self.writes + 1;
         *self = reopened;
+        self.writes = writes;
         transform
     }
 }
@@ -463,6 +477,7 @@ impl Engine {
             Ok(v) => match self.db.execute_batch("COMMIT") {
                 Ok(()) => {
                     self.dirty = true;
+                    self.writes += 1;
                     Ok((v, op))
                 }
                 Err(e) => {
@@ -504,6 +519,7 @@ impl Engine {
             db,
             app_id,
             dirty: false,
+            writes: 0,
             last_snapshot_ms: 0,
         })
     }

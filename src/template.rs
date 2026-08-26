@@ -160,20 +160,7 @@ fn validate(conn: &Connection) -> Result<()> {
 /// Every app-role file with its content, inflated so two archives compressed
 /// by different builds still compare equal.
 fn app_files(conn: &Connection) -> Result<BTreeMap<String, Vec<u8>>> {
-    let mut out = BTreeMap::new();
-    let mut stmt = conn.prepare("SELECT name, sz, data FROM sqlar ORDER BY name")?;
-    let mut rows = stmt.query([])?;
-    while let Some(r) = rows.next()? {
-        let name: String = r.get(0)?;
-        if store::file_role(&name) != "app" || name.ends_with('/') {
-            continue;
-        }
-        let sz: Option<i64> = r.get(1)?;
-        // NULL data = a directory entry, not a file.
-        let Some(data) = r.get::<_, Option<Vec<u8>>>(2)? else { continue };
-        out.insert(name.clone(), store::sqlar_inflate(sz, data, &name)?);
-    }
-    Ok(out)
+    files_by_role(conn, &["app"])
 }
 
 /// One schema object belonging to the app (never uapp_* / sqlar internals).
@@ -554,4 +541,114 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
         "configAdded": config_added,
     });
     Ok(plan)
+}
+
+// ---- publish: a site's edited copy replacing the served one ------------------
+
+/// Make `target` (the served site) carry exactly what `src` (a copy edited in
+/// the browser — `store::export_public` output) carries, without touching what
+/// that copy never had: config (API keys), chat, sessions, file history, the
+/// app's identity. This is the write half of `uapp serve`: the update goes
+/// the other way from a template — the CONTENT is authoritative, the schema
+/// is whatever it needs to be.
+///
+///   * `app/` files: added, replaced, and removed to match `src`. Every write
+///     is recorded in the file history, so a bad publish can be reverted.
+///   * `data/` files: the same, but only when `include_data` — a copy that was
+///     exported without `data/` says nothing about it, so the server's stays.
+///   * user tables, views, indexes, triggers: dropped and recreated from `src`
+///     WITH its rows. These are the site's own machinery (a posts table, a
+///     search index); their state lives in the copy, not on the server.
+///
+/// Runs inside the caller's transaction (`Engine::local_op`), so the whole
+/// publish lands or nothing does.
+pub fn publish(target: &Connection, src: &Connection, op: &Op, include_data: bool) -> Result<Value> {
+    let mtime = (op.ts / 1000) as i64;
+    let roles: &[&str] = if include_data { &["app", "data"] } else { &["app"] };
+
+    let src_files = files_by_role(src, roles)?;
+    let cur_files = files_by_role(target, roles)?;
+    let (mut written, mut removed, mut unchanged) = (0usize, 0usize, 0usize);
+    for (name, data) in &src_files {
+        if cur_files.get(name) == Some(data) {
+            unchanged += 1;
+            continue;
+        }
+        store::record_file_history(target, op, name, "put")?;
+        store::sqlar_write(target, name, mtime, data)?;
+        written += 1;
+    }
+    for name in cur_files.keys().filter(|n| !src_files.contains_key(*n)) {
+        store::record_file_history(target, op, name, "del")?;
+        target.execute("DELETE FROM sqlar WHERE name=?1", rusqlite::params![name])?;
+        removed += 1;
+    }
+
+    // Schema: everything the site owns goes, then comes back as the copy has
+    // it. Tables first and rows before indexes/triggers — a trigger created
+    // early would fire on the copied rows (same order as `export_public`).
+    for o in user_objects(target)?.iter().rev() {
+        let kind = match o.typ.as_str() {
+            "table" => "TABLE",
+            "view" => "VIEW",
+            "index" => "INDEX",
+            "trigger" => "TRIGGER",
+            _ => continue,
+        };
+        target.execute_batch(&format!("DROP {kind} IF EXISTS {}", q(&o.name)))?;
+    }
+    let objs = user_objects(src)?;
+    let mut tables = 0usize;
+    let mut rows = 0usize;
+    for o in objs.iter().filter(|o| o.typ == "table") {
+        target.execute_batch(&o.sql)?;
+        tables += 1;
+        let quoted = q(&o.name);
+        let mut sel = src.prepare(&format!("SELECT * FROM {quoted}"))?;
+        let ncols = sel.column_count();
+        if ncols == 0 {
+            continue;
+        }
+        let holders = (1..=ncols).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+        let mut ins = target.prepare(&format!("INSERT INTO {quoted} VALUES({holders})"))?;
+        let mut it = sel.query([])?;
+        while let Some(r) = it.next()? {
+            let vals: Vec<rusqlite::types::Value> = (0..ncols)
+                .map(|i| r.get::<_, rusqlite::types::Value>(i))
+                .collect::<rusqlite::Result<_>>()?;
+            ins.execute(rusqlite::params_from_iter(vals.iter()))?;
+            rows += 1;
+        }
+    }
+    let mut objects = 0usize;
+    for o in objs.iter().filter(|o| o.typ != "table") {
+        target.execute_batch(&o.sql)?;
+        objects += 1;
+    }
+
+    Ok(json!({
+        "ok": true,
+        "files": {"written": written, "removed": removed, "unchanged": unchanged},
+        "schema": {"tables": tables, "rows": rows, "objects": objects},
+        "data": include_data,
+    }))
+}
+
+/// Files of the given roles with their content, inflated so two archives
+/// compressed by different builds still compare equal. Directory entries
+/// (NULL data) are skipped.
+fn files_by_role(conn: &Connection, roles: &[&str]) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut out = BTreeMap::new();
+    let mut stmt = conn.prepare("SELECT name, sz, data FROM sqlar ORDER BY name")?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let name: String = r.get(0)?;
+        if !roles.contains(&store::file_role(&name)) || name.ends_with('/') {
+            continue;
+        }
+        let sz: Option<i64> = r.get(1)?;
+        let Some(data) = r.get::<_, Option<Vec<u8>>>(2)? else { continue };
+        out.insert(name.clone(), store::sqlar_inflate(sz, data, &name)?);
+    }
+    Ok(out)
 }

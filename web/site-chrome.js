@@ -27,8 +27,10 @@
   const SELF_SRC = (document.currentScript && document.currentScript.src) || "/chrome.js";
   // Only the top document gets chrome. Inside the shell's own app frame the
   // page is served by the service worker and gets uapp.js instead; injecting
-  // here too would stack a second editor inside the editor.
-  if (window.top !== window || window.__uappWasm || window.__uappChrome) return;
+  // here too would stack a second editor inside the editor. (Never keyed on a
+  // flag in the page itself: a site once stored our old `__uappWasm` marker
+  // in its own HTML and the editor silently stopped starting.)
+  if (window.top !== window || window.__uappChrome) return;
   window.__uappChrome = true;
 
   // ---- the shell's DOM ------------------------------------------------------
@@ -227,7 +229,62 @@
   let serverNow = 0;          // latest stamp seen
   let localEditAt = 0;        // ms; last change made in this tab
   let pill = null;
+  let publishing = false;
+  let publishNote = "";   // last publish outcome, shown briefly in the pill
   window.addEventListener("uapp-changes", () => { localEditAt = Date.now(); renderPill(); });
+
+  // ---- publish ------------------------------------------------------------------
+  // The local copy becomes the server's site: boot.js PUTs the export to
+  // /site.uapp with the site's publish token (server.rs). The token is asked
+  // for once per browser session and kept only in sessionStorage. A 409 means
+  // the server moved on since this copy was downloaded; the visitor chooses.
+  const TOKEN_KEY = "uapp.publish.token";
+  function publishToken(forget) {
+    try {
+      if (forget) { sessionStorage.removeItem(TOKEN_KEY); return null; }
+      let t = sessionStorage.getItem(TOKEN_KEY);
+      if (!t) {
+        t = window.prompt("Publish token for this site (set with --token / UAPP_TOKEN on the server):");
+        if (t && t.trim()) sessionStorage.setItem(TOKEN_KEY, t.trim()); else return null;
+      }
+      return t.trim();
+    } catch { return window.prompt("Publish token for this site:"); }
+  }
+  async function publish() {
+    if (publishing || !window.__uappSitePublish) return;
+    const token = publishToken(false);
+    if (!token) return;
+    publishing = true; publishNote = "Publishing…"; renderPill();
+    try {
+      let r;
+      try {
+        r = await window.__uappSitePublish(token);
+      } catch (e) {
+        if (e.status === 409) {
+          const go = window.confirm("The site on the server changed after your copy was downloaded. Publish anyway and replace it with your copy?");
+          if (!go) throw new Error("Not published — the server copy is newer.");
+          r = await window.__uappSitePublish(token, { force: true });
+        } else {
+          if (e.status === 403) publishToken(true);
+          throw e;
+        }
+      }
+      // The server now equals this copy: nothing local is pending.
+      const f = (r && r.result && r.result.files) || {};
+      publishNote = "Published (" + (f.written || 0) + " changed, " + (f.removed || 0) + " removed)";
+      localEditAt = 0;
+      serverBaseline = serverNow = (r && Number(r.modified)) || serverBaseline;
+      setTimeout(() => { publishNote = ""; renderPill(); }, 6000);
+    } catch (e) {
+      publishNote = "Publish failed: " + String((e && e.message) || e);
+      console.warn("uapp:", publishNote);
+      setTimeout(() => { publishNote = ""; renderPill(); }, 10000);
+    } finally {
+      publishing = false;
+      renderPill();
+    }
+  }
+  window.__uappPublish = publish;
 
   async function serverStamp() {
     try {
@@ -251,7 +308,7 @@
     if (!bar) return;
     const stale = serverBaseline && serverNow > serverBaseline;
     const local = localEditAt > 0;
-    if (!stale && !local) { if (pill) { pill.remove(); pill = null; } return; }
+    if (!stale && !local && !publishNote) { if (pill) { pill.remove(); pill = null; } return; }
     if (!pill) {
       pill = document.createElement("span");
       pill.id = "site-sync-pill";
@@ -272,6 +329,12 @@
     const txt = document.createElement("span");
     const btn = document.createElement("button");
     btn.onclick = () => (window.__uappSiteReset ? window.__uappSiteReset() : location.reload());
+    if (publishNote && !publishing) {
+      txt.textContent = publishNote;
+      pill.append(txt);
+      if (local || stale) pill.append(publishButton(stale));
+      return;
+    }
     if (stale) {
       const yours = local ? "your edits " + ago(Date.now() - localEditAt) : "your copy has no edits";
       txt.textContent = "Server copy is newer (updated " + ago(Date.now() - serverNow * 1000) + "; " + yours + ")";
@@ -286,6 +349,19 @@
       btn.style.cssText = "font:inherit;font-size:11px;padding:1px 6px;border-radius:999px;border:1px solid rgba(255,255,255,.25);background:transparent;color:inherit;cursor:pointer";
     }
     pill.append(txt, btn);
+    if (local) pill.append(publishButton(stale));
+  }
+  function publishButton(stale) {
+    const b = document.createElement("button");
+    b.id = "site-publish-btn";
+    b.textContent = publishing ? "Publishing…" : "Publish";
+    b.disabled = publishing;
+    b.title = "Make your copy the site everyone sees (needs the site's publish token)";
+    b.onclick = publish;
+    b.style.cssText = stale
+      ? "font:inherit;font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.6);background:#fff;color:#8a6400;font-weight:600;cursor:pointer"
+      : "font:inherit;font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.25);background:#3f6de6;color:#fff;font-weight:600;cursor:pointer";
+    return b;
   }
   async function checkServer() {
     const st = await serverStamp();

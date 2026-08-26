@@ -83,6 +83,64 @@ pub struct ConsoleEntry {
 /// Newest N console lines kept for the AI. A busy app can log a lot; this is a
 /// debugging aid, not a full log, so an older-than-N line just falls off.
 const CONSOLE_CAP: usize = 500;
+/// How long `reload_app` waits for the reloaded page to finish loading.
+pub const RELOAD_WAIT_MS: u64 = 10_000;
+
+/// Knobs of the PUBLIC ("hosted site") server mode — `uapp serve`. `None` on
+/// an `App` means the private desktop server, where every route needs the
+/// session token. Defaults are the conservative ones.
+#[derive(Clone, Copy, Debug)]
+pub struct PublicOpts {
+    /// Send COOP/COEP so pages are cross-origin isolated from birth (no
+    /// service-worker stamp, no boot reload). Costs cross-origin `<iframe>`
+    /// embeds — YouTube, CodePen and friends stop rendering unless they opt
+    /// in — so it is off unless the site wants the SharedArrayBuffer bridge
+    /// in the editing chrome.
+    pub coi: bool,
+    /// Expose `GET /site.uapp` (the sanitized archive the in-browser engine
+    /// boots from). Off means "plain static site, no editing chrome".
+    pub archive: bool,
+    /// Include `data/` in that archive — the content sources a site's build
+    /// pipeline reads, so visitors can re-run the build in their browser.
+    /// Anything included is PUBLIC: the archive is downloaded by every visitor.
+    /// Serving `data/` over HTTP stays blocked either way. Also decides what a
+    /// publish (`PUT /site.uapp`) replaces: with it, `data/` comes from the
+    /// uploaded copy; without it, the server's `data/` is kept.
+    pub export_data: bool,
+    /// max-age for non-HTML assets. HTML is always revalidated.
+    pub asset_max_age: u32,
+}
+
+impl Default for PublicOpts {
+    fn default() -> Self {
+        Self { coi: false, archive: true, export_data: false, asset_max_age: 3600 }
+    }
+}
+
+/// The browser build (`dist-web`: wasm engine + boot + service worker) a
+/// public site serves so its pages get the "Edit this site" chrome.
+pub struct Chrome {
+    /// Assets keyed by the root path they are served at (`/boot.js`, …).
+    ///
+    /// Served at the ROOT rather than under a prefix for two reasons: a
+    /// service worker's scope is its own directory, and `/sw.js` is the only
+    /// place it can be registered from to control `/app/*`; and boot.js
+    /// resolves everything it loads relative to its own URL. A site file with
+    /// one of these names is shadowed — the same trade the shell routes make.
+    pub bundle: HashMap<String, Vec<u8>>,
+    /// Short content hash, appended as `?v=` to the injected script tag.
+    /// Cloudflare (and other CDNs) rewrite Cache-Control on .js to hours of
+    /// browser caching, so without it a deploy leaves visitors on the previous
+    /// chrome until it expires.
+    pub version: String,
+}
+
+/// One built `/site.uapp`: bytes, ETag, newest sqlar mtime (unix seconds).
+pub struct PublicArchive {
+    pub bytes: Vec<u8>,
+    pub etag: String,
+    pub modified: i64,
+}
 
 /// A dropped template .uapp held between "here's what this would change" and
 /// the user pressing Update.
@@ -144,6 +202,9 @@ pub struct App {
     /// scratch iframe). Push-ordered; the newest still-connected registrant
     /// wins, so a reopened window takes over cleanly.
     pub contexts: Mutex<Vec<(String, u64)>>,
+    /// Connections whose page has fired its `load` event (`ctx.loaded`).
+    /// `invoke_reload` waits for a NEW "app" connection to appear here.
+    pub ctx_loaded: Mutex<std::collections::HashSet<u64>>,
     /// Ring buffer of console output / uncaught errors forwarded from the live
     /// app iframe, read by the AI via `read_console`. See [`ConsoleEntry`].
     pub console: Mutex<VecDeque<ConsoleEntry>>,
@@ -154,6 +215,56 @@ pub struct App {
     /// Highest error/warn seq already surfaced to the AI (via read_console or
     /// the auto-alert), so the alert fires only for genuinely new problems.
     pub console_ack: AtomicU64,
+    /// Set when this server is a public website (`uapp serve`): unauthenticated
+    /// requests get the site's `app/` pages; the token still unlocks everything
+    /// else. `None` is the private desktop server.
+    pub public: Option<PublicOpts>,
+    /// The browser build served alongside a public site (`--chrome`).
+    pub chrome: Option<Chrome>,
+    /// `/site.uapp`, built lazily and kept until the engine's write counter
+    /// moves (`Engine::writes`), so an unchanged site never rebuilds it and a
+    /// publish is visible on the very next request.
+    pub archive_cache: Mutex<Option<(u64, std::sync::Arc<PublicArchive>)>>,
+}
+
+impl App {
+    /// Every field an `App` starts with; the transports only differ in what
+    /// they set afterwards (`public`, `chrome`, `clients`).
+    pub fn new(engine: Engine, token: String, unsaved: bool) -> App {
+        let name = crate::store::meta_get(&engine.db, "name")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "uapp".into());
+        let (events, _) = broadcast::channel(1024);
+        App {
+            engine: Mutex::new(engine),
+            events,
+            token,
+            name,
+            ai_runs: Mutex::new(HashMap::new()),
+            unsaved: AtomicBool::new(unsaved),
+            ai_mode: Mutex::new("auto".into()),
+            pending: Mutex::new(HashMap::new()),
+            questions: Mutex::new(HashMap::new()),
+            always_allow: Mutex::new(std::collections::HashSet::new()),
+            clients: std::sync::atomic::AtomicUsize::new(0),
+            port: std::sync::atomic::AtomicU16::new(0),
+            conns: Mutex::new(HashMap::new()),
+            actions: Mutex::new(HashMap::new()),
+            invokes: Mutex::new(HashMap::new()),
+            drops: Mutex::new(HashMap::new()),
+            templates: Mutex::new(HashMap::new()),
+            contexts: Mutex::new(Vec::new()),
+            ctx_loaded: Mutex::new(std::collections::HashSet::new()),
+            console: Mutex::new(VecDeque::new()),
+            console_seq: AtomicU64::new(0),
+            console_gen: AtomicU64::new(0),
+            console_ack: AtomicU64::new(0),
+            public: None,
+            chrome: None,
+            archive_cache: Mutex::new(None),
+        }
+    }
 }
 
 impl App {
@@ -472,6 +583,41 @@ impl App {
     /// inside the browser with the full uapp API, so any writes it makes flow
     /// through the normal write path.
     #[cfg(not(target_arch = "wasm32"))]
+    /// Reload the live app page and wait until the NEW document has finished
+    /// loading (its uapp.js sent `ctx.loaded` over a fresh connection), so a
+    /// run_js / read_console right after this sees the new page. Without a
+    /// connected app page there is nothing to wait for; a page that never
+    /// finishes (throws on load, very slow) returns `loaded: false` after
+    /// [`RELOAD_WAIT_MS`] instead of hanging the turn.
+    pub fn invoke_reload(&self) -> Value {
+        let app_conns = || -> std::collections::HashSet<u64> {
+            let ctxs = self.contexts.lock().unwrap();
+            let conns = self.conns.lock().unwrap();
+            ctxs.iter()
+                .filter(|(c, id)| c == "app" && conns.contains_key(id))
+                .map(|(_, id)| *id)
+                .collect()
+        };
+        let before = app_conns();
+        self.notify("reload", json!({}));
+        if before.is_empty() {
+            return json!({"ok": true, "loaded": false,
+                "note": "no app page is connected, so there was nothing to wait for"});
+        }
+        let start = std::time::Instant::now();
+        while start.elapsed().as_millis() < RELOAD_WAIT_MS as u128 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let fresh = app_conns();
+            let loaded = self.ctx_loaded.lock().unwrap();
+            if fresh.iter().any(|id| !before.contains(id) && loaded.contains(id)) {
+                return json!({"ok": true, "loaded": true, "ms": start.elapsed().as_millis() as u64});
+            }
+        }
+        json!({"ok": true, "loaded": false,
+            "note": format!("the app page did not finish reloading within {}s — it may be slow or throwing on load; read_console will tell", RELOAD_WAIT_MS / 1000)})
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn invoke_eval(&self, context: &str, code: &str) -> anyhow::Result<Value> {
         let find_conn = || {
             let ctxs = self.contexts.lock().unwrap();
@@ -542,6 +688,16 @@ impl App {
 
     /// wasm: same, over the worker bridge (main-thread glue runs the code in
     /// the right iframe and writes the reply back).
+    /// See the native version: the page owns the frame, so boot.js does the
+    /// waiting (bridge kind "reload").
+    #[cfg(target_arch = "wasm32")]
+    pub fn invoke_reload(&self) -> Value {
+        match crate::wasm::bridge_call("reload", &json!({})) {
+            Ok(v) => v,
+            Err(e) => json!({"ok": true, "loaded": false, "note": format!("could not confirm the reload: {e}")}),
+        }
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub fn invoke_eval(&self, context: &str, code: &str) -> anyhow::Result<Value> {
         let reply =

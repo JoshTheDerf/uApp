@@ -134,6 +134,16 @@ async function archiveResponse(req, url, clientId, probe) {
   return withCoi(new Response(bytes, { status: r.status || 200, headers }));
 }
 
+// A frame navigation that must leave the frame: a stub that sends the TOP
+// window to the URL. `top.location` needs no same-origin access to assign.
+function breakOut(url) {
+  const href = JSON.stringify(url.href);
+  const html = "<!doctype html><meta charset=utf-8><title>Leaving the editor…</title>"
+    + "<script>try{top.location.replace(" + href + ")}catch(e){location.replace(" + href + ")}</script>"
+    + "<p style='font:14px system-ui;color:#666;margin:2em'>Opening <a href=" + href + " target=_top>" + url.href.replace(/[<&]/g, "") + "</a>…</p>";
+  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+}
+
 const ARCHIVE_PREFIX = /^\/(app|data|vendor|scratch)(\/|$)/;
 const ARCHIVE_EXACT = new Set(["/download.uapp", "/template.uapp", "/upload"]);
 
@@ -146,6 +156,9 @@ const SCOPE = new URL(self.registration.scope).pathname; // e.g. "/uapp/demo/"
 self.addEventListener("fetch", (ev) => {
   const url = new URL(ev.request.url);
   if (url.origin !== location.origin) return; // cross-origin: browser handles it
+  // Writes to the server (PUT /site.uapp — publishing the local copy) are the
+  // server's business alone; netFetch would rewrite the method anyway.
+  if (!["GET", "HEAD", "POST"].includes(ev.request.method)) return;
   // Root-form path relative to the scope: "/uapp/demo/app/x" and "/app/x"
   // both become "/app/x".
   const p = url.pathname.startsWith(SCOPE)
@@ -159,7 +172,16 @@ self.addEventListener("fetch", (ev) => {
       && !ARCHIVE_PREFIX.test(p) && !ARCHIVE_EXACT.has(p) && !p.startsWith("/shell/") && !BUNDLE.has(p)) {
     const u = new URL(url);
     u.pathname = "/app" + (p === "/" ? "/" : p);
-    ev.respondWith(archiveResponse(ev.request, u, ev.clientId));
+    ev.respondWith((async () => {
+      const r = await archiveResponse(ev.request, u, ev.clientId, true);
+      if (r) return r;
+      // Not a page of this site's archive: same host, but something else
+      // lives there (another service behind the same reverse proxy, a path
+      // the site never built). Leave the editor and let the server route it
+      // at the top level — which also gives real missing pages the site's
+      // own 404 page instead of the archive's.
+      return withCoi(breakOut(url));
+    })());
     return;
   }
   if (ARCHIVE_PREFIX.test(p) || ARCHIVE_EXACT.has(p)) {
@@ -190,7 +212,10 @@ self.addEventListener("fetch", (ev) => {
       const staticUrl = new URL(SCOPE.slice(1) + p.slice(1) + url.search, url.origin);
       const bust = p !== "/" && !p.startsWith("/shell/") && !BUNDLE.has(p);
       const resp = await netFetch(ev.request, p === "/" ? null : staticUrl, bust);
-      if (resp.status === 404 && ev.request.method === "GET" && p !== "/" && !p.startsWith("/shell/")) {
+      // (Never for a top-level navigation: that must stay the server's page —
+      // its 404 page carries the chrome, which then shows the local copy's
+      // version of the page in the frame.)
+      if (resp.status === 404 && ev.request.method === "GET" && ev.request.mode !== "navigate" && p !== "/" && !p.startsWith("/shell/")) {
         const u = new URL(url);
         u.pathname = p;
         return archiveResponse(ev.request, u, ev.clientId);

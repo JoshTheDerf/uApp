@@ -19,8 +19,6 @@ pub mod native;
 pub mod net;
 pub mod prefs;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod public;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod registry;
 pub mod rpc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -38,11 +36,7 @@ use anyhow::{Context, Result};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::AtomicBool;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, Mutex};
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::broadcast;
+use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native_serve {
@@ -174,33 +168,7 @@ pub fn serve_opts(
             return Err(e).with_context(|| format!("opening {}", path.display()));
         }
     };
-    let name = store::meta_get(&eng.db, "name")?
-        .unwrap_or_else(|| "uapp".into());
-    let (events, _) = broadcast::channel(1024);
-    let app = Arc::new(app::App {
-        engine: Mutex::new(eng),
-        events,
-        token: token.clone(),
-        name,
-        ai_runs: Mutex::new(std::collections::HashMap::new()),
-        unsaved: AtomicBool::new(unsaved),
-        ai_mode: Mutex::new("auto".into()),
-        pending: Mutex::new(std::collections::HashMap::new()),
-        questions: Mutex::new(std::collections::HashMap::new()),
-        always_allow: Mutex::new(std::collections::HashSet::new()),
-        clients: std::sync::atomic::AtomicUsize::new(0),
-        port: std::sync::atomic::AtomicU16::new(0),
-        conns: Mutex::new(std::collections::HashMap::new()),
-        actions: Mutex::new(std::collections::HashMap::new()),
-        invokes: Mutex::new(std::collections::HashMap::new()),
-        drops: Mutex::new(std::collections::HashMap::new()),
-        templates: Mutex::new(std::collections::HashMap::new()),
-        contexts: Mutex::new(Vec::new()),
-        console: Mutex::new(std::collections::VecDeque::new()),
-        console_seq: std::sync::atomic::AtomicU64::new(0),
-        console_gen: std::sync::atomic::AtomicU64::new(0),
-        console_ack: std::sync::atomic::AtomicU64::new(0),
-    });
+    let app = Arc::new(app::App::new(eng, token.clone(), unsaved));
 
     // Native window only: forward OS file drops to the shell (see native.rs +
     // App::native_drop). The webview never gets HTML5 drop events for them, so
@@ -341,42 +309,83 @@ pub fn serve_background(path: PathBuf, fixed_port: u16, unsaved: bool) -> Result
     }
 }
 
-/// Serve one .uapp as a PUBLIC, read-only website. Blocks until interrupted.
+/// Serve one .uapp as a PUBLIC website (`uapp serve`). Blocks until interrupted.
 ///
-/// Shares nothing with `serve_opts` beyond the archive format: no token, no
-/// WebSocket, no shell, no engine — see `public.rs` for why the router is
-/// separate rather than a flag. The file is opened read-only and without the
-/// registry lock, so it can stay open in the desktop app at the same time.
+/// The same router as the desktop server (`server.rs`), with `App::public`
+/// set: anonymous requests see the site's pages and `/site.uapp`; `token`
+/// unlocks the shell, the WebSocket and `PUT /site.uapp` (publishing an
+/// edited copy back). None of the desktop lifecycle applies — no browser to
+/// open, no exit when the last client leaves, no registry advertisement.
+///
+/// The file is opened read-write by the normal engine (so a publish can land
+/// and so the crash-rescue snapshots exist), which also means it takes the
+/// registry lock: the desktop app cannot have the same file open at once.
 pub fn serve_public(
     path: PathBuf,
     bind: &str,
     port: u16,
     passphrase: Option<String>,
-    opts: public::PublicOpts,
+    token: Option<String>,
+    opts: app::PublicOpts,
     chrome_dir: Option<PathBuf>,
 ) -> Result<()> {
     let path = if path.is_absolute() { path } else { std::env::current_dir()?.join(path) };
-    let db = public::open_readonly(&path, passphrase.as_deref())
+    anyhow::ensure!(
+        passphrase.is_some() || !store::is_encrypted_file(&path),
+        "{} is encrypted — pass --password (or set UAPP_PASSWORD) to serve it",
+        path.display()
+    );
+    let eng = engine::Engine::open_with_passphrase(path.clone(), device_id()?, "site".into(), passphrase)
         .with_context(|| format!("opening {}", path.display()))?;
-    let site = match &chrome_dir {
-        Some(dir) => public::site_with_chrome(db, opts, dir)?,
-        None => public::site(db, opts),
+    let generated = token.is_none();
+    let token = token.unwrap_or_else(|| (0..32).map(|_| fastrand::alphanumeric()).collect());
+    let mut app = app::App::new(eng, token.clone(), false);
+    app.public = Some(opts);
+    app.chrome = match &chrome_dir {
+        Some(dir) => Some(server::load_chrome(dir)?),
+        None => None,
     };
+    let app = Arc::new(app);
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind((bind, port)).await?;
         let addr = listener.local_addr()?;
+        app.port.store(addr.port(), std::sync::atomic::Ordering::Relaxed);
         eprintln!("uapp: serving {} at http://{}/", path.display(), addr);
         if opts.archive {
-            eprintln!("uapp: archive endpoint: http://{addr}/site.uapp");
+            eprintln!("uapp: archive endpoint: http://{addr}/site.uapp (PUT with the token publishes)");
+        }
+        if generated {
+            eprintln!("uapp: token (pass --token or set UAPP_TOKEN to fix it): {token}");
+        }
+        if std::fs::OpenOptions::new().write(true).open(&path).is_err() {
+            eprintln!("uapp: {} is not writable — publishing (PUT /site.uapp) will fail", path.display());
         }
         match &chrome_dir {
             Some(dir) => eprintln!("uapp: editing chrome enabled (web build: {})", dir.display()),
             None => eprintln!("uapp: no editing chrome (pass --chrome <dist-web> to enable)"),
         }
-        axum::serve(listener, public::router(site))
-            .with_graceful_shutdown(async {
+        // Rolling rescue snapshot while publishes keep landing.
+        {
+            let app = app.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tick.tick().await;
+                    let app2 = app.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        app2.engine.lock().unwrap().maybe_snapshot();
+                    })
+                    .await;
+                }
+            });
+        }
+        let shutdown_app = app.clone();
+        axum::serve(listener, server::router(app))
+            .with_graceful_shutdown(async move {
                 let _ = tokio::signal::ctrl_c().await;
+                shutdown_app.graceful_cleanup();
             })
             .await?;
         Ok::<_, anyhow::Error>(())

@@ -873,6 +873,12 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             let src = crate::template::Source::from_bytes(&bytes, p["password"].as_str())?;
             crate::template::apply(conn, src.conn(), op, p["remove_stale"].as_bool().unwrap_or(true))
         }
+        "publish" => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(p["b64"].as_str().unwrap_or_default())?;
+            let src = crate::template::Source::from_bytes(&bytes, None)?;
+            crate::template::publish(conn, src.conn(), op, p["data"].as_bool().unwrap_or(false))
+        }
         "config_set" => {
             let key = p["key"].as_str().ok_or_else(|| anyhow!("config_set missing key"))?;
             conn.execute(

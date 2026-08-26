@@ -139,6 +139,23 @@ $("appframe")?.addEventListener("load", () => {
   mirrorFrameUrl();
   // In-page hash routing inside the app.
   try { $("appframe").contentWindow.addEventListener("hashchange", mirrorFrameUrl); } catch {}
+  // Links to other origins leave the editor: the frame is this site's
+  // in-browser copy, so another site has no business loading inside it (and
+  // the service worker never sees a cross-origin frame navigation, so this is
+  // the only place to catch it). Same-origin links stay in the frame; those
+  // that aren't pages of the archive break out via sw.js instead.
+  try {
+    $("appframe").contentWindow.document.addEventListener("click", (e) => {
+      const a = e.target && e.target.closest && e.target.closest("a[href]");
+      if (!a || a.target || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      let u;
+      try { u = new URL(a.href, a.baseURI); } catch { return; }
+      if (u.origin === location.origin || !/^https?:$/.test(u.protocol)) return;
+      e.preventDefault();
+      // Let a pending local-copy save land first (browser build).
+      Promise.resolve(window.__uappFlushSave && window.__uappFlushSave()).then(() => { window.top.location.href = u.href; });
+    }, true);
+  } catch {}
 });
 window.addEventListener("popstate", () => {
   if (!MIRROR_URL) return;

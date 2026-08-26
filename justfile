@@ -6,10 +6,6 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # where `just install` puts the binaries
 install_dir := env("UAPP_INSTALL_DIR", env("HOME") + "/.local/bin")
-# public-site deployment target (see ../thederf-com/deploy/uapp-serve.md)
-deploy_host := env("UAPP_DEPLOY_HOST", "home")
-deploy_dir  := env("UAPP_DEPLOY_DIR", "/server/thederf/uApp/")
-compose_dir := env("UAPP_COMPOSE_DIR", "/server/thederf/compose")
 
 default:
     @just --list
@@ -51,16 +47,6 @@ open file:
 # serve a .uapp as a public website locally, with the editing chrome (needs `just web` once)
 serve file port="8080":
     cargo run --release --bin uapp-server --no-default-features -- serve "{{file}}" --port {{port}} --coi --publish-data --chrome dist-web
-
-# rsync this repo to the deploy host and rebuild the uapp-site container
-deploy-site:
-    rsync -a --delete --exclude target --exclude .git --exclude node_modules "{{justfile_directory()}}/" "{{deploy_host}}:{{deploy_dir}}"
-    ssh "{{deploy_host}}" 'cd {{compose_dir}} && timeout 1500 docker compose up -d --build uapp-site 2>&1 | grep -v level=warning | tail -2'
-
-# push a new site.uapp to the deploy host and restart the container (it holds the old inode otherwise)
-deploy-content file:
-    rsync -a "{{file}}" "{{deploy_host}}:/server/thederf/thederf-com/site.uapp"
-    ssh "{{deploy_host}}" 'cd {{compose_dir}} && docker compose restart uapp-site >/dev/null 2>&1 && echo restarted'
 
 # remove build output
 clean:

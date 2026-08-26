@@ -16,8 +16,7 @@ use crate::app::App;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(raw_module = "./uapp_glue.js")]
@@ -117,32 +116,9 @@ pub fn open_app(bytes: Option<Vec<u8>>, name: String, user: String) -> Result<St
             "browser".to_string(),
             if user.trim().is_empty() { "You".to_string() } else { user },
         )?;
-        let app_name = crate::store::meta_get(&eng.db, "name")?.unwrap_or_else(|| name.clone());
-        let (events, _) = tokio::sync::broadcast::channel(16);
-        let app = Arc::new(App {
-            engine: Mutex::new(eng),
-            events,
-            token: String::new(),
-            name: app_name,
-            ai_runs: Mutex::new(std::collections::HashMap::new()),
-            unsaved: AtomicBool::new(false),
-            ai_mode: Mutex::new("auto".into()),
-            pending: Mutex::new(std::collections::HashMap::new()),
-            questions: Mutex::new(std::collections::HashMap::new()),
-            always_allow: Mutex::new(std::collections::HashSet::new()),
-            clients: std::sync::atomic::AtomicUsize::new(1),
-            port: std::sync::atomic::AtomicU16::new(0),
-            conns: Mutex::new(std::collections::HashMap::new()),
-            actions: Mutex::new(std::collections::HashMap::new()),
-            invokes: Mutex::new(std::collections::HashMap::new()),
-            drops: Mutex::new(std::collections::HashMap::new()),
-        templates: Mutex::new(std::collections::HashMap::new()),
-            contexts: Mutex::new(Vec::new()),
-            console: Mutex::new(std::collections::VecDeque::new()),
-            console_seq: std::sync::atomic::AtomicU64::new(0),
-            console_gen: std::sync::atomic::AtomicU64::new(0),
-            console_ack: std::sync::atomic::AtomicU64::new(0),
-        });
+        let app = Arc::new(App::new(eng, String::new(), false));
+        // The page is the one, always-connected client.
+        app.clients.store(1, std::sync::atomic::Ordering::SeqCst);
         let info = crate::rpc::dispatch(&app, "app.info", json!({}))?;
         APP.with(|a| *a.borrow_mut() = Some(app));
         Ok(info.to_string())

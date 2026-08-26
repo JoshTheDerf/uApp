@@ -14,6 +14,13 @@
  */
 
 const enc = new TextEncoder();
+// How pages in our frames know they are in the browser build: uapp.js walks
+// up to the window carrying this flag and talks to it. A property on THIS
+// window, deliberately not a <script> injected into their HTML — a site whose
+// build pipeline renders pages from fetched HTML would persist such a script
+// into its own files (this happened), and a stored "I am inside the wasm
+// frame" marker then breaks the very page it is served in at top level.
+window.__uappWasmHost = true;
 const APPS_DIR = "apps";
 const LEGACY_FILE = "app.uapp";
 // The demo can be hosted under a subpath (e.g. /uapp/demo/) — everything we
@@ -173,20 +180,28 @@ function contentTypeFor(name) {
 }
 
 // Same idea as the native server's inject_viewport: make sure app pages get a
-// viewport, the wasm-mode flag, and uapp.js — flag BEFORE uapp.js.
+// viewport and uapp.js. Nothing else — see __uappWasmHost above. Stray copies
+// of the marker this used to inject (persisted by a site's own build) are
+// removed so the content heals on its next publish.
 function injectHtml(text) {
+  text = stripWasmMarker(text);
   const lower = text.toLowerCase();
   const hasVp = lower.includes('name="viewport"') || lower.includes("name='viewport'");
   const hasUapp = lower.includes("uapp.js");
-  let inject = "\n<script>window.__uappWasm=1</script>";
+  let inject = "";
   if (!hasVp) inject += '\n<meta name="viewport" content="width=device-width, initial-scale=1">';
   if (!hasUapp) inject += '\n<script src="/uapp.js"></script>';
+  if (!inject) return text;
   const pos = lower.indexOf("<head");
   if (pos >= 0) {
     const gt = text.indexOf(">", pos);
     if (gt >= 0) return text.slice(0, gt + 1) + inject + text.slice(gt + 1);
   }
   return inject + "\n" + text;
+}
+
+function stripWasmMarker(text) {
+  return text.replace(/\s*<script>\s*window\.__uappWasm\s*=\s*1;?\s*<\/script>/gi, "");
 }
 
 // ---- worker RPC -------------------------------------------------------------
@@ -403,6 +418,22 @@ async function invokeInContext(context, msg, timeoutMs = 60000) {
 // RPCs, which the transport intercepts below.
 let bridgePrompt = null; // {kind: "approval"|"question", id}
 
+// Bumped every time the app frame's page reports it has finished loading.
+let appLoadGen = 0;
+// The AI's reload_app (bridge kind "reload"): ask the shell to reload the
+// frame, then wait for the reloaded page's `ctx.loaded` so the tool returns
+// only once the new document is really there.
+async function reloadAndWait(timeoutMs = 10000) {
+  const gen = appLoadGen, t0 = Date.now();
+  emitShellEvent("reload", {});
+  while (Date.now() - t0 < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 50));
+    if (appLoadGen > gen) return { ok: true, loaded: true, ms: Date.now() - t0 };
+  }
+  return { ok: true, loaded: false,
+    note: "the app page did not finish reloading within " + timeoutMs / 1000 + "s — it may be slow or throwing on load; read_console will tell" };
+}
+
 function emitShellEvent(type, extra) {
   const envelope = { method: "event", params: { type, ...extra } };
   if (shellOnMessage) shellOnMessage(envelope);
@@ -430,6 +461,10 @@ async function handleBridge(kind, payloadJson) {
   }
   if (kind === "console.alert") {
     bridgeReply({ note: consoleAlert() || "" });
+    return;
+  }
+  if (kind === "reload") {
+    bridgeReply(await reloadAndWait());
     return;
   }
   if (kind === "eval") {
@@ -516,9 +551,7 @@ async function handleSwRequest(m) {
     if (p === "/scratch/" || p === "/scratch") {
       const html = await (await fetch(new URL("scratch.html", BASE))).text();
       // The context flag must land before uapp.js connects.
-      const patched = html.replace('window.__uappContext = "scratchpad";',
-        'window.__uappContext = "scratchpad"; window.__uappWasm = 1;');
-      reply({ bodyB64: b64FromBytes(enc.encode(patched)), contentType: "text/html; charset=utf-8" });
+      reply({ bodyB64: b64FromBytes(enc.encode(html)), contentType: "text/html; charset=utf-8" });
       return;
     }
     // Archive file. Like the native /app/* route, the /app/ URL prefix is a
@@ -581,6 +614,12 @@ window.addEventListener("message", (ev) => {
       if (ctx === "app") consolePush("reset", ""); // new page load, new generation
     }
     if (m.id != null) replyTo({ id: m.id, result: { ok: true } });
+    return;
+  }
+  if (m.method === "ctx.loaded") {
+    // The page's window `load` fired (uapp.js). reload_app waits for the
+    // app frame's next one of these.
+    if (m.params && m.params.context === "app") appLoadGen++;
     return;
   }
   if (m.method === "actions.register") {
@@ -718,8 +757,17 @@ async function appSave() {
 }
 function scheduleSave() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(appSave, 1500);
+  saveTimer = setTimeout(() => { saveTimer = null; appSave(); }, 1500);
 }
+// Write a pending (debounced) save now. The shell awaits this before a
+// navigation that leaves the page (a link out of the editor), and it runs
+// best-effort on pagehide, so an edit made moments before is not lost.
+window.__uappFlushSave = async () => {
+  if (!saveTimer) return;
+  clearTimeout(saveTimer); saveTimer = null;
+  try { await appSave(); } catch {}
+};
+window.addEventListener("pagehide", () => { window.__uappFlushSave(); });
 
 function onWorkerEvent(envelope) {
   const params = envelope.params || {};
@@ -764,7 +812,7 @@ let currentAppId = null;
 // same origin). `baseline` is the server's x-uapp-modified stamp of the copy
 // the edits were made on; the chrome compares it with the server's current
 // stamp. Reset = drop the saved copy and reload from the server.
-let siteState = null; // {id, baseline, hasLocal, localSavedAt}
+let siteState = null; // {id, baseline, etag, hasLocal, localSavedAt}
 const siteKey = (k) => "uapp.site." + k + ":" + siteState.id;
 function kvDel(key) { try { localStorage.removeItem(key); } catch {} memKV.delete(key); }
 window.__uappSiteReset = async () => {
@@ -774,7 +822,38 @@ window.__uappSiteReset = async () => {
   try { await (await blobStore()).remove(siteState.id); } catch {}
   kvDel(siteKey("saved"));
   kvDel(siteKey("baseline"));
+  kvDel(siteKey("etag"));
   location.reload();
+};
+
+// Publish this browser's copy back to the server (`PUT /site.uapp`, see
+// server.rs). `token` is the site's publish secret. The download's ETag goes
+// along as If-Match, so a site that moved on since (another publish, a
+// deploy) answers 409 instead of being overwritten; `force` drops that check.
+// On success the server equals this copy, which therefore becomes the new
+// baseline for the sync pill. Resolves to the server's reply.
+window.__uappSitePublish = async (token, { force = false } = {}) => {
+  if (!siteState || !window.__uappSiteArchive) throw new Error("not a hosted site");
+  await window.__uappFlushSave();
+  const r = await sendRpc("app.export");
+  const headers = { authorization: "Bearer " + token, "content-type": "application/octet-stream" };
+  if (siteState.etag && !force) headers["if-match"] = siteState.etag;
+  const resp = await fetch(new URL(window.__uappSiteArchive, location.origin), {
+    method: "PUT", headers, body: bytesFromB64(r.b64), cache: "no-store",
+  });
+  const text = await resp.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  if (!resp.ok) {
+    const e = new Error((json && json.error) || text || ("HTTP " + resp.status));
+    e.status = resp.status;
+    throw e;
+  }
+  siteState.etag = (json && json.etag) || resp.headers.get("etag") || "";
+  siteState.baseline = Number(json && json.modified) || siteState.baseline;
+  kvSet(siteKey("etag"), siteState.etag);
+  kvSet(siteKey("baseline"), String(siteState.baseline));
+  return json;
 };
 
 // localStorage *throws* (rather than returning null) when the browser blocks
@@ -1155,19 +1234,22 @@ if (tabChannel) {
       currentAppId = null;
       const site = window.__uappSiteArchive;
       if (site) {
-        siteState = { id: "site-" + location.host.replace(/[^a-z0-9.-]/gi, "_"), baseline: 0, hasLocal: false, localSavedAt: 0 };
+        siteState = { id: "site-" + location.host.replace(/[^a-z0-9.-]/gi, "_"), baseline: 0, etag: "", hasLocal: false, localSavedAt: 0 };
         const saved = await appRead(siteState.id);
         if (saved) {
           siteState.hasLocal = true;
           siteState.localSavedAt = Number(kvGet(siteKey("saved"))) || 0;
           siteState.baseline = Number(kvGet(siteKey("baseline"))) || 0;
+          siteState.etag = kvGet(siteKey("etag")) || "";
           info = await openApp(saved, window.__uappSiteName || "Site");
         } else {
           splashShow("Opening the editor…", "Downloading this site…");
           const r = await fetch(new URL(site, location.origin), { cache: "no-store" });
           if (!r.ok) throw new Error(`could not fetch this site (HTTP ${r.status})`);
           siteState.baseline = Number(r.headers.get("x-uapp-modified")) || Math.floor(Date.now() / 1000);
+          siteState.etag = r.headers.get("etag") || "";
           kvSet(siteKey("baseline"), String(siteState.baseline));
+          kvSet(siteKey("etag"), siteState.etag);
           info = await openApp(new Uint8Array(await r.arrayBuffer()), window.__uappSiteName || "Site");
         }
         // Saved from the first change on (scheduleSave fires on "changes").

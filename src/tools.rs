@@ -96,7 +96,7 @@ pub fn registry() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "write_file",
-            description: "Create or overwrite a text file in the app archive (e.g. index.html, js/app.js — those land under app/; user data goes under data/). Previous version is kept in history. The app iframe reloads automatically.",
+            description: "Create or overwrite a text file in the app archive (e.g. index.html, js/app.js — those land under app/; user data goes under data/). Previous version is kept in history. The live app page does NOT reload by itself — call reload_app once the whole change is written. read_file always returns what you just wrote.",
             gated: true,
             schema: || obj(json!({"name": {"type": "string"}, "content": {"type": "string"}}),
                            &["name", "content"]),
@@ -105,7 +105,7 @@ pub fn registry() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "edit_file",
-            description: "Edit a text file in the archive by exact string replacement — PREFER this over write_file for any change to an existing file (write_file resends the whole file). old_string must match the file byte-for-byte, whitespace included, and appear exactly once — include enough surrounding lines to make it unique — or set replace_all to change every occurrence. Previous version is kept in history. The app iframe reloads automatically.",
+            description: "Edit a text file in the archive by exact string replacement — PREFER this over write_file for any change to an existing file (write_file resends the whole file). old_string must match the file byte-for-byte, whitespace included, and appear exactly once — include enough surrounding lines to make it unique — or set replace_all to change every occurrence. Previous version is kept in history. The live app page does NOT reload by itself — call reload_app once the whole change is written.",
             gated: true,
             schema: || obj(json!({
                 "name": {"type": "string"},
@@ -160,10 +160,10 @@ pub fn registry() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reload_app",
-            description: "Reload the live app page in the user's view. Files you write are NOT shown automatically any more: finish the whole change (all files), then call this once so the user sees a consistent result — and follow with read_console to check the reload didn't throw.",
+            description: "Reload the live app page and wait until the new document has finished loading, so a run_js (context \"app\") or read_console right after it sees the NEW code. Files you write are NOT shown automatically: finish the whole change (all files), then call this once — and follow with read_console to check the reload didn't throw. `loaded: false` in the result means the page didn't finish within 10s.",
             gated: false,
             schema: || obj(json!({}), &[]),
-            run: |app, _input| rpc::dispatch(app, "app.reload", json!({})),
+            run: |app, _input| Ok(app.invoke_reload()),
         },
         ToolDef {
             name: "read_console",

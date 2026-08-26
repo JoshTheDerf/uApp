@@ -17,7 +17,7 @@ enum ShellMode {
 
 fn usage() -> ! {
     eprintln!(
-        "uapp {}\n\nUsage:\n  uapp <file.uapp>            open an app (creates it if empty/missing)\n  uapp open <file.uapp>       same, explicit\n  uapp new <file.uapp>        create a blank app without opening it\n  uapp encrypt <file.uapp>    encrypt a (plaintext) app with a master password\n  uapp decrypt <file.uapp>    remove encryption (needs the master password)\n  uapp passwd <file.uapp>     change the master password\n  uapp install                register .uapp with your desktop + file manager\n  uapp serve <file.uapp>      serve it as a PUBLIC read-only website\n  uapp update <app> <tpl>     update <app>'s code from a template .uapp,\n                              keeping its data\n\nServe options (public website mode):\n  --bind <addr>               interface to bind (default 127.0.0.1; use\n                              0.0.0.0 to accept outside connections)\n  --port <n>                  port (default 8080 in serve mode)\n  --coi                       send COOP/COEP so pages are cross-origin\n                              isolated. Needed for the editing chrome's\n                              run_js bridge; breaks cross-origin iframe\n                              embeds (YouTube etc.)\n  --no-archive                don't expose /site.uapp\n  --publish-data              include data/ (content sources) in /site.uapp\n                              so visitors can re-run the site's build\n                              pipeline. Everything in the archive is PUBLIC\n  --chrome <dist-web>         serve the browser build from this directory so\n                              pages get an \"Edit this site\" affordance that\n                              boots the wasm engine on a local copy\n\nOptions:\n  --headless                  don't open a browser; print the URL as JSON\n  --port <n>                  bind a fixed port (default: random)\n  --window                    force the native UApp window (the primary path\n                              and the default when the UApp app is installed)\n  --browser                   force the system browser (the fallback shell)\n  --password <pw>             master password for an encrypted app (else\n                              UAPP_PASSWORD, else a hidden prompt). Opening a\n                              plaintext app with a password encrypts it.\n  --encrypt                   with `new`: create the app encrypted\n  --dry-run                   with `update`: print what would change, as JSON\n  --keep-stale                with `update`: keep app files the template\n                              no longer has (they are removed by default)\n  --template-password <pw>    master password of an ENCRYPTED source .uapp\n",
+        "uapp {}\n\nUsage:\n  uapp <file.uapp>            open an app (creates it if empty/missing)\n  uapp open <file.uapp>       same, explicit\n  uapp new <file.uapp>        create a blank app without opening it\n  uapp encrypt <file.uapp>    encrypt a (plaintext) app with a master password\n  uapp decrypt <file.uapp>    remove encryption (needs the master password)\n  uapp passwd <file.uapp>     change the master password\n  uapp install                register .uapp with your desktop + file manager\n  uapp serve <file.uapp>      serve it as a PUBLIC website\n  uapp update <app> <tpl>     update <app>'s code from a template .uapp,\n                              keeping its data\n\nServe options (public website mode):\n  --bind <addr>               interface to bind (default 127.0.0.1; use\n                              0.0.0.0 to accept outside connections)\n  --port <n>                  port (default 8080 in serve mode)\n  --coi                       send COOP/COEP so pages are cross-origin\n                              isolated. Needed for the editing chrome's\n                              run_js bridge; breaks cross-origin iframe\n                              embeds (YouTube etc.)\n  --no-archive                don't expose /site.uapp\n  --publish-data              include data/ (content sources) in /site.uapp\n                              so visitors can re-run the site's build\n                              pipeline. Everything in the archive is PUBLIC\n  --chrome <dist-web>         serve the browser build from this directory so\n                              pages get an \"Edit this site\" affordance that\n                              boots the wasm engine on a local copy\n  --token <t>                 the secret that unlocks the shell, the WebSocket\n                              and publishing (PUT /site.uapp) on the public\n                              origin; else UAPP_TOKEN, else a random one is\n                              printed at start\n\nOptions:\n  --headless                  don't open a browser; print the URL as JSON\n  --port <n>                  bind a fixed port (default: random)\n  --window                    force the native UApp window (the primary path\n                              and the default when the UApp app is installed)\n  --browser                   force the system browser (the fallback shell)\n  --password <pw>             master password for an encrypted app (else\n                              UAPP_PASSWORD, else a hidden prompt). Opening a\n                              plaintext app with a password encrypts it.\n  --encrypt                   with `new`: create the app encrypted\n  --dry-run                   with `update`: print what would change, as JSON\n  --keep-stale                with `update`: keep app files the template\n                              no longer has (they are removed by default)\n  --template-password <pw>    master password of an ENCRYPTED source .uapp\n",
         env!("CARGO_PKG_VERSION")
     );
     std::process::exit(2);
@@ -81,6 +81,7 @@ fn run() -> Result<()> {
     let mut archive = true;
     let mut publish_data = false;
     let mut chrome_dir: Option<PathBuf> = None;
+    let mut token: Option<String> = std::env::var("UAPP_TOKEN").ok().filter(|t| !t.is_empty());
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -102,6 +103,9 @@ fn run() -> Result<()> {
             "--publish-data" => publish_data = true,
             "--chrome" => {
                 chrome_dir = Some(PathBuf::from(it.next().cloned().unwrap_or_else(|| usage())));
+            }
+            "--token" => {
+                token = Some(it.next().cloned().unwrap_or_else(|| usage()));
             }
             "--dry-run" => dry_run = true,
             "--keep-stale" => keep_stale = true,
@@ -134,7 +138,8 @@ fn run() -> Result<()> {
                 &bind,
                 if port == 0 { 8080 } else { port },
                 pw,
-                uapp::public::PublicOpts {
+                token,
+                uapp::app::PublicOpts {
                     coi,
                     archive,
                     export_data: publish_data,

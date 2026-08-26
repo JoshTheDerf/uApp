@@ -145,20 +145,30 @@ pub fn request(
         .iter()
         .map(|(k, v)| serde_json::json!([k, v]))
         .collect();
+    // A browser fetch() only settles once the response HEADERS arrive, so the
+    // "connect" phase here spans the provider's whole time-to-first-byte — a
+    // large prompt can take well over 20s before the first byte. Natively the
+    // connect timeout covers the TCP handshake only and the read timeout the
+    // wait for the response; the read timeout is the equivalent budget here.
     let reply = crate::wasm::http_open(
         method,
         url,
         &serde_json::Value::Array(hdrs).to_string(),
         body,
-        connect_timeout_secs * 1000,
+        connect_timeout_secs.max(read_timeout_secs) * 1000,
     );
     let v: serde_json::Value = serde_json::from_str(&reply)
         .map_err(|_| anyhow::anyhow!("bad reply from the HTTP glue"))?;
     if let Some(e) = v["error"].as_str() {
-        anyhow::bail!(
-            "request failed: {e} (browser note: the target must allow cross-origin \
-             requests — Anthropic, z.ai and OpenRouter do; most other hosts don't)"
-        );
+        // The CORS hint only helps when the browser refused/failed the fetch;
+        // a timeout is the provider being slow, and saying "CORS" misleads.
+        if e.contains("CORS") || e.contains("network") {
+            anyhow::bail!(
+                "request failed: {e} (browser note: the target must allow cross-origin \
+                 requests — Anthropic, z.ai and OpenRouter do; most other hosts don't)"
+            );
+        }
+        anyhow::bail!("request failed: {e}");
     }
     let headers = v["headers"]
         .as_array()
