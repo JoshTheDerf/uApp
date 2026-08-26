@@ -497,6 +497,10 @@ async fn app_download(
 /// uapp.js loaded, registered as the "scratchpad" eval context. Code the AI
 /// runs there has every tool and file but no app code — and its globals
 /// persist between run_js calls until the shell tab closes.
+///
+/// The shell requests this only when a run_js scratchpad call needs it (see
+/// `invoke_eval` and main.js), so it is not fetched at all in a session that
+/// never uses the tool.
 async fn scratch_page(
     State(app): State<Arc<App>>,
     Query(q): Query<HashMap<String, String>>,

@@ -23,8 +23,12 @@
   <iframe id="appframe" src="/app/"
           allow="camera; microphone; display-capture; geolocation; clipboard-read; storage-access"></iframe>
   <!-- Hidden eval context for the AI's run_js tool: uapp.js only, no app code.
-       Never reloaded, so scratch state survives across tool calls. -->
-  <iframe id="scratchframe" src="/scratch/" style="display:none" title="scratchpad"></iframe>
+       Starts EMPTY and is loaded on first use (the server asks for it when a
+       run_js call needs the scratchpad — see main.js): a permanently loaded
+       second document is memory nobody is looking at, which on a phone webview
+       comes out of the same budget as the app's own GPU/JS allocations. Once
+       loaded it is never reloaded, so scratch state survives across calls. -->
+  <iframe id="scratchframe" style="display:none" title="scratchpad"></iframe>
 
   <!-- Overlay panels: the topbar button toggles, X / Esc closes, opening one
        closes the others (they slide in/out; open state = .open). -->

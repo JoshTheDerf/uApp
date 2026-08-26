@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -19,6 +20,10 @@ import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import androidx.webkit.WebViewRenderProcess
+import androidx.webkit.WebViewRenderProcessClient
 import java.io.File
 
 // gen/android is a committed project (the standard Tauri v2 workflow): this
@@ -261,6 +266,47 @@ class MainActivity : TauriActivity() {
     super.onPause()
     // The user is leaving — make sure the linked original is current.
     flushMirror()
+  }
+
+  // Diagnosing a blanked-out page has to start from what is actually running:
+  // WebGL behaviour — including how many live contexts a renderer will hold
+  // before it starts dropping them — varies widely between WebView builds, and
+  // a renderer that has merely gone unresponsive looks identical from the
+  // outside to one that died. Record both.
+  //
+  // A renderer that DIES cannot be recovered from here: onRenderProcessGone is
+  // a WebViewClient method, and wry installs its own client (RustWebViewClient,
+  // generated into this project at build time) which we cannot replace without
+  // reimplementing its request interception. With no such override the
+  // framework kills the process outright — so a white screen with the app still
+  // running is evidence AGAINST a dead renderer, and for something the page
+  // itself lost, like a GL context.
+  override fun onWebViewCreate(webView: WebView) {
+    super.onWebViewCreate(webView)
+    val pkg = WebViewCompat.getCurrentWebViewPackage(this)
+    Log.i(TAG, "webview provider: ${pkg?.packageName} ${pkg?.versionName}")
+    if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_VIEW_RENDERER_CLIENT_BASIC_USAGE)) {
+      Log.i(TAG, "renderer client unsupported on this WebView — no liveness logging")
+      return
+    }
+    WebViewCompat.setWebViewRenderProcessClient(webView, object : WebViewRenderProcessClient() {
+      override fun onRenderProcessUnresponsive(view: WebView, renderer: WebViewRenderProcess?) {
+        Log.w(TAG, "renderer unresponsive — the page has stopped painting")
+      }
+
+      override fun onRenderProcessResponsive(view: WebView, renderer: WebViewRenderProcess?) {
+        Log.i(TAG, "renderer responsive again")
+      }
+    })
+  }
+
+  // Memory pressure precedes both a renderer kill and the WebView throwing away
+  // GPU resources, so record it: a canvas that blanks right after a
+  // TRIM_MEMORY_RUNNING_CRITICAL line is a different bug from one that blanks
+  // with no pressure reported at all.
+  override fun onTrimMemory(level: Int) {
+    super.onTrimMemory(level)
+    Log.i(TAG, "onTrimMemory level=$level")
   }
 
   private fun findWebView(view: View): WebView? = when (view) {
@@ -562,5 +608,7 @@ class MainActivity : TauriActivity() {
     private const val EXTRA_SHORTCUT_PATH = "uapp.shortcut_path"
     private const val SHORTCUT_PATH = "shortcut_open.path"
     private val CHROME_COLOR = Color.parseColor("#23293A")
+    // One tag for everything worth grepping out of logcat: `adb logcat -s uapp`.
+    private const val TAG = "uapp"
   }
 }

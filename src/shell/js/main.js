@@ -151,6 +151,18 @@ window.addEventListener("popstate", () => {
   } catch { f.src = APP_ROUTE + location.pathname.replace(/^\/+/, "") + location.search + location.hash; }
 });
 
+// ---------- scratch iframe ----------
+// The AI's run_js scratchpad context. Loaded on demand rather than with the
+// shell: it is a whole extra document, and on a phone webview that is budget
+// the app itself needs. The server broadcasts "scratch-load" when a scratchpad
+// call arrives with no frame connected, then waits for it to register.
+function loadScratchFrame() {
+  const f = $("scratchframe");
+  if (!f || f.getAttribute("src")) return; // already loading or loaded
+  f.src = (window.__uappBase || "/") + "scratch/";
+}
+on("scratch-load", loadScratchFrame);
+
 // ---------- shutdown ----------
 function shutdownShell(title, detail) {
   if (state.shuttingDown) return;

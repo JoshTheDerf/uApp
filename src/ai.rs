@@ -243,6 +243,10 @@ Data tables — Tabulator (MIT); use its Bootstrap 5 theme so it matches:
     download_lib {{"url": "https://cdn.jsdelivr.net/npm/tabulator-tables/dist/css/tabulator_bootstrap5.min.css"}}
   Sorting / filtering / inline-edit / CSV export are built in.
   Widgets that measure their container at init (Tabulator, Chart.js, ECharts) render 0 rows / 0-size when the container is hidden (display:none tab/section) — no error, just empty. Initialize them lazily: uapp.whenVisible(sectionEl, () => new Tabulator(...)) or on first tab switch.
+3D / WebGL (three.js, custom GL, canvas games) — ALWAYS handle context loss. A phone's webview holds few GPU contexts and reclaims them under pressure, and every edit you make reloads the page; an app that ignores loss goes permanently blank (a white canvas, sometimes a broken-image square) and looks like your code crashed.
+    canvas.addEventListener("webglcontextlost", (e) => {{ e.preventDefault(); }});      // WITHOUT preventDefault the context can never be restored
+    canvas.addEventListener("webglcontextrestored", () => {{ /* recreate textures/buffers/programs, then resume the loop */ }});
+  Keep enough state outside the GL objects to rebuild them, and hand the GPU memory back on the way out: uapp.onTeardown(() => renderer.dispose()).
 Charts — Chart.js (MIT) for ordinary charts, ECharts (Apache-2.0) for large or dashboard-grade viz:
     download_lib {{"url": "https://cdn.jsdelivr.net/npm/chart.js/dist/chart.umd.js"}}
     download_lib {{"url": "https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"}}

@@ -119,6 +119,8 @@ function handleEvent(p) {
     emit("question", p.pending || []);
   } else if (p.type === "sync") {
     emit("sync", p);
+  } else if (p.type === "scratch-load") {
+    emit("scratch-load"); // a run_js scratchpad call is waiting on the frame
   }
 }
 

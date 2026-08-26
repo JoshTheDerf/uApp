@@ -473,22 +473,35 @@ impl App {
     /// through the normal write path.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn invoke_eval(&self, context: &str, code: &str) -> anyhow::Result<Value> {
-        let conn_id = {
+        let find_conn = || {
             let ctxs = self.contexts.lock().unwrap();
             let conns = self.conns.lock().unwrap();
             ctxs.iter()
                 .rev()
                 .find(|(c, id)| c == context && conns.contains_key(id))
                 .map(|(_, id)| *id)
+        };
+        let mut conn_id = find_conn();
+        // The shell keeps its scratch frame empty until something needs it, so
+        // the first scratchpad call of a session normally finds no context at
+        // all. Ask the shells to load it and wait for it to register rather
+        // than failing a call that would have worked a second later.
+        if conn_id.is_none() && context == "scratchpad" {
+            self.notify("scratch-load", json!({}));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while conn_id.is_none() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                conn_id = find_conn();
+            }
         }
-        .ok_or_else(|| {
+        let conn_id = conn_id.ok_or_else(|| {
             if context == "app" {
                 anyhow::anyhow!(
                     "no 'app' page is connected — the app must be open in a browser and its page must include <script src=\"/uapp.js\"></script> (use the scratchpad context otherwise)"
                 )
             } else {
                 anyhow::anyhow!(
-                    "no '{context}' page is connected — the app must be open in a browser (the scratchpad iframe loads with the shell)"
+                    "no '{context}' page is connected — the app must be open in a browser (the shell loads the scratchpad frame on demand, so this means no shell is connected)"
                 )
             }
         })?;

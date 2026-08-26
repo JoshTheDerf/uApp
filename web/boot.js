@@ -349,16 +349,38 @@ function bridgeReply(obj) {
   wake(); // the worker waits on the shared WAKE cell (see blockUntil)
 }
 
-function invokeInContext(context, msg, timeoutMs = 60000) {
+function findCtxWin(context) {
+  for (let i = ctxRegistry.length - 1; i >= 0; i--) {
+    if (ctxRegistry[i].ctx === context) return ctxRegistry[i].win;
+  }
+  return null;
+}
+// The scratch frame starts empty and is loaded on first use (same reasoning as
+// the native shell: an idle second document costs memory a phone needs for the
+// app). Load it now and give it a moment to register.
+function loadScratchFrame() {
+  const f = document.getElementById("scratchframe");
+  if (!f || f.getAttribute("src")) return; // already loading or loaded
+  f.src = BASE.pathname + "scratch/";
+}
+async function waitForCtx(context, ms) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+    const win = findCtxWin(context);
+    if (win) return win;
+  }
+  return null;
+}
+
+async function invokeInContext(context, msg, timeoutMs = 60000) {
+  let win = findCtxWin(context);
+  if (!win && context === "scratchpad") {
+    loadScratchFrame();
+    win = await waitForCtx(context, 5000);
+  }
+  if (!win) return { error: `no '${context}' page is connected` };
   return new Promise((resolve) => {
-    let win = null;
-    for (let i = ctxRegistry.length - 1; i >= 0; i--) {
-      if (ctxRegistry[i].ctx === context) { win = ctxRegistry[i].win; break; }
-    }
-    if (!win) {
-      resolve({ error: `no '${context}' page is connected` });
-      return;
-    }
     const id = "inv" + workerSeq++;
     const timer = setTimeout(() => {
       if (invokes.has(id)) { invokes.delete(id); resolve({ error: "the page did not respond within " + timeoutMs / 1000 + "s" }); }
@@ -1202,14 +1224,11 @@ if (tabChannel) {
       appFrame.addEventListener("load", resolve, { once: true });
       setTimeout(resolve, 8000);
     });
-    const entry = window.__uappSiteEntry || "app/";
-    for (const [id, path] of [["appframe", entry], ["scratchframe", "scratch/"]]) {
-      const f = document.getElementById(id);
-      // No cache-buster: these are served no-store, and a stable url lets
-      // later reloads replace this history entry instead of pushing a new one
-      // (see reloadAppFrame in shell/main.js).
-      if (f) f.src = BASE.pathname + path;
-    }
+    // Only the app frame: the scratch frame is loaded on demand (see
+    // loadScratchFrame). No cache-buster — these are served no-store, and a
+    // stable url lets later reloads replace this history entry instead of
+    // pushing a new one (see reloadAppFrame in shell/main.js).
+    if (appFrame) appFrame.src = BASE.pathname + (window.__uappSiteEntry || "app/");
 
     await import(new URL("shell/main.js", BASE));
     await framePainted;

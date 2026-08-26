@@ -59,6 +59,48 @@
   // hidden scratch iframe ("scratchpad", set by /scratch/ before this loads).
   const context = window.__uappContext || "app";
 
+  // ---- WebGL contexts: release them when the page goes away ----------------
+  // Chromium caps how many live WebGL contexts one renderer may hold, and a
+  // discarded document's context is only released when GC gets around to it.
+  // Editing an app reloads this page over and over, so contexts belonging to
+  // pages nobody can reach any more pile up against that cap until the renderer
+  // starts dropping the LIVE one and the canvas blanks. Android WebView has the
+  // smallest budget of the lot, so it hits this first. Release them
+  // deterministically on the way out instead of waiting for the collector.
+  //
+  // Contexts are recorded as they're handed out rather than by sweeping the DOM
+  // at teardown, for two reasons: asking a context-less <canvas> for "webgl"
+  // would CREATE one — allocating against the very cap we're trying to relieve
+  // — and canvases an app keeps off-DOM would be missed entirely. Only contexts
+  // created after this script runs are tracked, which is all of them: it's
+  // injected at the top of <head> (see inject_viewport in server.rs).
+  const glContexts = [];
+  const teardownCbs = [];
+  // WeakRef so tracking never keeps a context the app itself has dropped.
+  const Ref = typeof WeakRef === "function"
+    ? WeakRef
+    : class { constructor(v) { this.v = v; } deref() { return this.v; } };
+  if (typeof HTMLCanvasElement !== "undefined") {
+    const realGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, ...rest) {
+      const ctx = realGetContext.call(this, type, ...rest);
+      if (ctx && /webgl/i.test(String(type))) glContexts.push(new Ref(ctx));
+      return ctx;
+    };
+  }
+  // pagehide, not beforeunload: it fires however the document goes away, and it
+  // doesn't disqualify the page from the back/forward cache the way unload does.
+  window.addEventListener("pagehide", () => {
+    // App teardown first — a renderer that disposes itself (three.js and
+    // friends) frees more than the context alone.
+    for (const cb of teardownCbs.splice(0)) { try { cb(); } catch {} }
+    for (const ref of glContexts.splice(0)) {
+      const gl = ref.deref();
+      if (!gl || gl.isContextLost()) continue;
+      try { gl.getExtension("WEBGL_lose_context")?.loseContext(); } catch {}
+    }
+  });
+
   // ---- console + error forwarding (for the chat-tab AI's read_console) -------
   // Patched at load so early logs are caught, buffered until the socket opens,
   // then streamed over the SAME /ws connection (method "log.write") — no second
@@ -421,6 +463,11 @@
     tool: (name, input = {}) => rpc("tools.call", { name, input }),
     tools: () => rpc("tools.list"),
     onChange: (cb) => changeCbs.push(cb),
+    /// Run `cb` just before this page goes away (an edit reloads it). Dispose
+    /// renderers here — `renderer.dispose()` for three.js — so the GPU
+    /// resources go with the page instead of outliving it; the WebGL context
+    /// itself is released for you either way.
+    onTeardown: (cb) => teardownCbs.push(cb),
     /// Run `cb` as soon as `el` is actually visible (right away if it already
     /// is). Use this before initializing grid/table/chart widgets: most of
     /// them (Tabulator included) compute sizes at init and silently render 0
