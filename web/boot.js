@@ -472,6 +472,12 @@ async function handleBridge(kind, payloadJson) {
     return;
   }
   if (kind === "action") {
+    // A freshly reloaded page registers its actions only once its bootstrap
+    // scripts have run — give it a few seconds rather than "unknown action".
+    if (!(await waitForAction(p.name, p.wait_ms || 8000))) {
+      bridgeReply({ unregistered: true }); // app.rs turns this into action_missing_msg
+      return;
+    }
     bridgeReply(await invokeInContext("app", { method: "action.invoke", params: { name: p.name, input: p.input || {} } }));
     return;
   }
@@ -591,6 +597,19 @@ async function handleSwRequest(m) {
 
 // ---- iframe (uapp.js) routing -------------------------------------------------
 
+function hasAction(name) {
+  for (const list of iframeActions.values()) if (list.some((a) => a && a.name === name)) return true;
+  return false;
+}
+async function waitForAction(name, timeoutMs) {
+  const t0 = Date.now();
+  while (!hasAction(name)) {
+    if (Date.now() - t0 >= timeoutMs) return false;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return true;
+}
+
 function rebuildActionsSync() {
   const merged = [];
   for (const list of iframeActions.values()) merged.push(...list);
@@ -612,6 +631,9 @@ window.addEventListener("message", (ev) => {
       }
       ctxRegistry.push({ ctx, win });
       if (ctx === "app") consolePush("reset", ""); // new page load, new generation
+      // The WindowProxy survives a reload, so the old document's actions would
+      // otherwise linger under the same key and defeat waitForAction below.
+      if (iframeActions.delete(win)) rebuildActionsSync();
     }
     if (m.id != null) replyTo({ id: m.id, result: { ok: true } });
     return;

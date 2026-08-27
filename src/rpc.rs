@@ -368,23 +368,14 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 bail!("tool '{name}' is disabled in this app's settings");
             }
             // Check if this is a gated tool and requires approval for app-triggered calls
-            let gated = if name.starts_with("app__") {
-                // App actions inherit the gating from their definition
-                app.actions_snapshot()
-                    .iter()
-                    .find(|(n, _)| *n == name.strip_prefix("app__").unwrap_or(""))
-                    .map(|(_, a)| !a.readonly)
-                    .unwrap_or(false)
-            } else if name.starts_with("mcp__") {
-                true // MCP tools are always gated
-            } else {
-                crate::tools::registry()
-                    .iter()
-                    .find(|t| t.name == name)
-                    .map(|t| t.gated)
-                    .unwrap_or(false)
-            };
-            if gated {
+            // Let a freshly reloaded page finish registering before deciding
+            // whether the action is gated (its readonly flag lives on the
+            // registration). Gating itself lives in one place: tools::is_gated.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(action) = name.strip_prefix("app__") {
+                app.wait_for_action(action)?;
+            }
+            if crate::tools::is_gated(app, &name) {
                 crate::ai::app_approval_gate(app, &name, &p["input"])?;
             }
             crate::ai::run_tool(app, &name, &p["input"])

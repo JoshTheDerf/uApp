@@ -285,6 +285,7 @@ Users can export this app as a TEMPLATE (everything under `app/` + empty tables 
 STYLE
 - Small-business users: friendly, concise, no jargon. Do the work rather than describing it.
 - After changing app files, call `reload_app` (it returns once the new page has loaded) and briefly say what changed.
+- Actions run the code the live page loaded at its LAST reload. If you edit a script the page uses and then call an app__* action or run_js in the "app" context, the OLD code runs until you reload_app first. Order: edit → reload_app → call the action → (if it wrote pages) reload_app again to show the result. Action tools wait a few seconds for a freshly reloaded page to register them.
 - When you produce or want to show the user a file in the archive, call present_file — it opens in their viewer immediately.
 - When a decision genuinely belongs to the user (destructive changes, ambiguous requirements, taste), call ask_user with concrete options instead of guessing or stalling.
 - For a big, self-contained side quest (research a format, audit every table, build one module) delegate it with agent_run: the sub-agent works in its own conversation and hands you back a report, keeping this conversation small.
@@ -499,7 +500,7 @@ pub fn app_approval_gate(app: &Arc<App>, tool: &str, input: &Value) -> Result<bo
             Ok(v) => {
                 let allow = v["allow"].as_bool().unwrap_or(false);
                 if allow && v["always"].as_bool().unwrap_or(false) {
-                    let mut eng = app.engine.lock().unwrap();
+                    let eng = app.engine.lock().unwrap();
                     store::add_app_approval(&eng.db, &app_id, tool)?;
                 }
                 Ok(allow)
@@ -686,6 +687,19 @@ pub fn ask_user(app: &Arc<App>, input: &Value) -> Result<Value> {
         })),
     }
     }
+}
+
+/// How long an app__ tool call waits for its action to be registered by a
+/// page that is still bootstrapping (after reload_app).
+pub const ACTION_REGISTER_WAIT_MS: u64 = 8_000;
+
+pub fn action_missing_msg(action: &str) -> String {
+    format!(
+        "no app action named '{action}' is registered. If you just called reload_app the \
+         page may still be initialising — wait a moment and retry; otherwise the app does \
+         not register that action (check its uapp.action(...) calls and read_console for \
+         load errors)"
+    )
 }
 
 pub fn run_tool(app: &Arc<App>, name: &str, input: &Value) -> Result<Value> {

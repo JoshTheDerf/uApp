@@ -19,6 +19,7 @@ const proc = spawn(BIN, ["open", `${DIR}/r.uapp`, "--headless"], {
 });
 const line = await new Promise((res) => { let b = ""; proc.stdout.on("data", (d) => { b += d; const i = b.indexOf("\n"); if (i >= 0) res(b.slice(0, i)); }); });
 const info = JSON.parse(line);
+if (process.env.UAPP_DEBUG) proc.stderr.pipe(process.stderr);
 const TOKEN = new URL(info.url).searchParams.get("t");
 
 function client({ context = null, loadDelayMs = 0, onReload = null } = {}) {
@@ -94,6 +95,35 @@ console.log("\n[3] plain app.reload RPC (topbar button) stays fire-and-forget");
   shell.close();
 }
 
+console.log("\n[4] app__ action called before the page has registered it: waits, then runs");
+{
+  // Like a page whose bootstrap chain (uapp.js → build.js → …) registers its
+  // actions a while after `load`. readonly: a not-yet-registered action counts
+  // as gated (tools::is_gated), and this client never answers approval prompts.
+  const page = client({ context: "app" }); await page.open;
+  page.ws.addEventListener("message", (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.method === "action.invoke") {
+      page.ws.send(JSON.stringify({ method: "actions.result", params: { id: m.params.id, result: { built: m.params.input.n * 2 } } }));
+    }
+  });
+  await sleep(200);
+  const shell = client(); await shell.open;
+  setTimeout(() => page.ws.send(JSON.stringify({ method: "actions.register", params: { actions: [{ name: "build_site", description: "b", readonly: true, schema: { type: "object", properties: {} } }] } })), 1500);
+  const t0 = Date.now();
+  const r = await shell.rpc("tools.call", { name: "app__build_site", input: { n: 21 } });
+  const ms = Date.now() - t0;
+  ok(r && r.built === 42, "action ran once registered", JSON.stringify(r));
+  ok(ms >= 1400 && ms < 5000, "waited for the registration (~1.5s)", `${ms}ms`);
+  const t1 = Date.now();
+  const e = await shell.rpc("tools.call", { name: "app__nope", input: {} }).catch((e) => e.message);
+  ok(/no app action named 'nope'/.test(String(e)), "never-registered action: clear error", String(e));
+  ok(Date.now() - t1 >= 7500 && Date.now() - t1 < 12000, "gave up after ~8s", `${Date.now() - t1}ms`);
+  page.close(); shell.close();
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
-proc.kill();
+// SIGTERM lets the server linger for other clients; make sure it is gone so the
+// next run does not hand off to this (stale) instance.
+proc.kill(); await sleep(300); proc.kill("SIGKILL");
 process.exit(failed ? 1 : 0);

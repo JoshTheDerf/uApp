@@ -518,18 +518,31 @@ impl App {
         v
     }
 
+    /// Block (AI / RPC worker thread) until `name` is registered, returning the
+    /// owning connection. Right after reload_app the page has loaded but may
+    /// still be running its bootstrap chain, so its actions register a moment
+    /// later; waiting here beats failing with "unknown action".
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn wait_for_action(&self, name: &str) -> anyhow::Result<u64> {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(crate::ai::ACTION_REGISTER_WAIT_MS);
+        loop {
+            if let Some(conn) = self.actions.lock().unwrap().get(name).map(|a| a.conn) {
+                return Ok(conn);
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("{}", crate::ai::action_missing_msg(name));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     /// Invoke an app-registered action in the page that registered it and
     /// block (AI thread) until it replies or times out. Writes the handler
     /// makes flow through the normal write path like any user click.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn invoke_action(&self, name: &str, input: &Value) -> anyhow::Result<Value> {
-        let conn_id = self
-            .actions
-            .lock()
-            .unwrap()
-            .get(name)
-            .map(|a| a.conn)
-            .ok_or_else(|| anyhow::anyhow!("no app action named '{name}' is currently registered (is the app open?)"))?;
+        let conn_id = self.wait_for_action(name)?;
         let sender = self
             .conns
             .lock()
@@ -571,9 +584,13 @@ impl App {
     /// (Atomics.wait) until it replies.
     #[cfg(target_arch = "wasm32")]
     pub fn invoke_action(&self, name: &str, input: &Value) -> anyhow::Result<Value> {
-        let reply = crate::wasm::bridge_call("action", &json!({"name": name, "input": input}))?;
-        if let Some(err) = reply["error"].as_str() {
-            anyhow::bail!("action '{name}' failed: {err}");
+        let reply = crate::wasm::bridge_call(
+            "action",
+            &json!({"name": name, "input": input,
+                    "wait_ms": crate::ai::ACTION_REGISTER_WAIT_MS}),
+        )?;
+        if reply["unregistered"].as_bool() == Some(true) {
+            anyhow::bail!("{}", crate::ai::action_missing_msg(name));
         }
         Ok(reply["result"].clone())
     }

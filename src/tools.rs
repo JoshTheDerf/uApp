@@ -160,7 +160,7 @@ pub fn registry() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reload_app",
-            description: "Reload the live app page and wait until the new document has finished loading, so a run_js (context \"app\") or read_console right after it sees the NEW code. Files you write are NOT shown automatically: finish the whole change (all files), then call this once — and follow with read_console to check the reload didn't throw. `loaded: false` in the result means the page didn't finish within 10s.",
+            description: "Reload the live app page and wait until the new document has finished loading, so a run_js (context \"app\") or read_console right after it sees the NEW code. Files you write are NOT shown automatically: finish the whole change (all files), then call this once — and follow with read_console to check the reload didn't throw. `loaded: false` in the result means the page didn't finish within 10s. Also required BEFORE calling an app__* action or app-context run_js after editing a script the page uses — actions run the code the page loaded at its last reload, so without this the old code runs.",
             gated: false,
             schema: || obj(json!({}), &[]),
             run: |app, _input| Ok(app.invoke_reload()),
