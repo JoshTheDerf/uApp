@@ -29,7 +29,6 @@
 //! that could grant a permission no longer exist. This is the same reason a
 //! browser draws permission prompts in its chrome rather than in the document.
 
-use serde_json::{json, Value};
 use std::sync::OnceLock;
 
 /// One thing an app can ask for. Each is remembered separately: allowing the
@@ -141,122 +140,6 @@ impl Ask {
     }
 }
 
-/// The user's standing answer for one feature on one app.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Grant {
-    Allow,
-    Deny,
-    /// No stored decision — ask.
-    Ask,
-}
-
-impl Grant {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Grant::Allow => "allow",
-            Grant::Deny => "deny",
-            Grant::Ask => "ask",
-        }
-    }
-    pub fn from_str(s: &str) -> Grant {
-        match s {
-            "allow" => Grant::Allow,
-            "deny" => Grant::Deny,
-            _ => Grant::Ask,
-        }
-    }
-}
-
-// ---- stored decisions -------------------------------------------------
-// Machine-local (prefs.json), NOT in the .uapp file: a grant is this user on
-// this device trusting this app, and it must never travel to whoever they send
-// the file to next.
-
-const PREF_KEY: &str = "permissions";
-
-/// All remembered decisions, as `{ app_id: { camera: "allow", ... } }`.
-pub fn grants() -> Value {
-    crate::prefs::get_value(PREF_KEY)
-        .filter(|v| v.is_object())
-        .unwrap_or_else(|| json!({}))
-}
-
-/// Where one decision is filed. Unscoped features use their bare key; scoped
-/// ones (storage access) hang the scope off it, so `storage@example.com` and
-/// `storage@tracker.test` are genuinely separate answers.
-fn grant_key(feature: Feature, scope: Option<&str>) -> String {
-    match scope {
-        Some(s) if !s.is_empty() => format!("{}@{}", feature.key(), s),
-        _ => feature.key().to_string(),
-    }
-}
-
-/// The standing decision for one feature on one app.
-pub fn grant_for(app_id: &str, feature: Feature, scope: Option<&str>) -> Grant {
-    grants()
-        .get(app_id)
-        .and_then(|a| a.get(grant_key(feature, scope)))
-        .and_then(|v| v.as_str())
-        .map(Grant::from_str)
-        .unwrap_or(Grant::Ask)
-}
-
-/// Remember (or with `Grant::Ask`, forget) a decision.
-pub fn set_grant(
-    app_id: &str,
-    feature: Feature,
-    scope: Option<&str>,
-    g: Grant,
-) -> anyhow::Result<()> {
-    let mut all = grants();
-    let obj = all.as_object_mut().expect("grants() returns an object");
-    let entry = obj.entry(app_id.to_string()).or_insert_with(|| json!({}));
-    let key = grant_key(feature, scope);
-    if let Some(e) = entry.as_object_mut() {
-        if g == Grant::Ask {
-            e.remove(&key);
-        } else {
-            e.insert(key, json!(g.as_str()));
-        }
-    }
-    // Drop apps with nothing left, so the file doesn't accumulate empty keys.
-    if obj
-        .get(app_id)
-        .and_then(|v| v.as_object())
-        .is_some_and(|o| o.is_empty())
-    {
-        obj.remove(app_id);
-    }
-    crate::prefs::set(PREF_KEY, all)
-}
-
-/// Forget every decision for one app (Settings → "Reset permissions").
-pub fn clear_app(app_id: &str) -> anyhow::Result<()> {
-    let mut all = grants();
-    if let Some(o) = all.as_object_mut() {
-        o.remove(app_id);
-    }
-    crate::prefs::set(PREF_KEY, all)
-}
-
-/// Every feature's standing decision for one app, for the Settings panel.
-/// Scoped entries (`storage@example.com`) are surfaced verbatim alongside the
-/// base features, so the panel can show and clear them individually.
-pub fn summary(app_id: &str) -> Value {
-    let mut out = serde_json::Map::new();
-    for f in Feature::ALL {
-        out.insert(f.key().to_string(), json!(grant_for(app_id, *f, None).as_str()));
-    }
-    if let Some(stored) = grants().get(app_id).and_then(|v| v.as_object()) {
-        for (k, v) in stored {
-            if k.contains('@') {
-                out.insert(k.clone(), v.clone());
-            }
-        }
-    }
-    Value::Object(out)
-}
-
 // ---- the ask-the-user bridge ------------------------------------------
 // The webview's permission request arrives on the platform UI thread, which is
 // also the thread that has to paint our prompt — so the answer can never be
@@ -268,7 +151,7 @@ pub fn summary(app_id: &str) -> Value {
 ///
 /// Installed by `gui.rs`, deliberately not by the server: nothing reachable
 /// from the page may take part in this decision.
-type Prompt = Box<dyn Fn(Ask) -> (bool, bool) + Send + Sync>;
+type Prompt = Box<dyn Fn(Ask) -> bool + Send + Sync>;
 static PROMPT: OnceLock<Prompt> = OnceLock::new();
 
 /// Identify the running app to the grant store. Installed by the server, which
@@ -314,10 +197,13 @@ pub fn current_app_id() -> String {
 /// no prompting. Used for device labels, which ride on an existing capture
 /// grant rather than asking a question of their own.
 pub fn any_allowed(features: &[Feature]) -> bool {
+    // "Already said yes this session" — decisions are not persisted, so this
+    // only reflects what the user allowed since the app was opened.
     let app_id = current_app_id();
-    features
-        .iter()
-        .any(|f| grant_for(&app_id, *f, None) == Grant::Allow)
+    let Ok(sess) = SESSION_ALLOW.get_or_init(Default::default).lock() else {
+        return false;
+    };
+    features.iter().any(|f| sess.contains(&session_key(&app_id, &Ask::one(*f))))
 }
 
 /// Requests whose answer is already settled, and background asks in flight.
@@ -349,18 +235,6 @@ pub fn known(ask: &Ask) -> Option<bool> {
         .unwrap_or(false)
     {
         return Some(true);
-    }
-    let scope = ask.scope.as_deref();
-    let stored: Vec<Grant> = ask
-        .features
-        .iter()
-        .map(|f| grant_for(&app_id, *f, scope))
-        .collect();
-    if !stored.is_empty() && stored.iter().all(|g| *g == Grant::Allow) {
-        return Some(true);
-    }
-    if stored.iter().any(|g| *g == Grant::Deny) {
-        return Some(false);
     }
     if refusals(&key) >= MAX_REFUSALS {
         return Some(false);
@@ -411,20 +285,16 @@ pub fn decide(ask: Ask) -> bool {
         return false;
     }
     let app_id = current_app_id();
-    let scope = ask.scope.as_deref();
 
-    // A request covering several features is only auto-answered when they all
-    // agree; a half-remembered set goes back to the user.
-    let stored: Vec<Grant> = ask
-        .features
-        .iter()
-        .map(|f| grant_for(&app_id, *f, scope))
-        .collect();
-    if stored.iter().all(|g| *g == Grant::Allow) {
+    // Already allowed this session? (Decisions are not persisted to disk.)
+    let skey = session_key(&app_id, &ask);
+    if SESSION_ALLOW
+        .get_or_init(Default::default)
+        .lock()
+        .map(|s| s.contains(&skey))
+        .unwrap_or(false)
+    {
         return true;
-    }
-    if stored.iter().any(|g| *g == Grant::Deny) {
-        return false;
     }
 
     let Some(prompt) = PROMPT.get() else {
@@ -440,15 +310,16 @@ pub fn decide(ask: Ask) -> bool {
         return false;
     }
 
-    let (allow, remember) = prompt(ask.clone());
-    if !allow {
-        note_refusal(&nag_key);
-    }
-    if remember && !app_id.is_empty() {
-        let g = if allow { Grant::Allow } else { Grant::Deny };
-        for f in &ask.features {
-            let _ = set_grant(&app_id, *f, scope, g);
+    let allow = prompt(ask.clone());
+    if allow {
+        // Remembered for the rest of this session so the next attempt (the
+        // click that triggered this cannot also be the one that succeeds) is
+        // answered inline — not written to disk.
+        if let Ok(mut s) = SESSION_ALLOW.get_or_init(Default::default).lock() {
+            s.insert(skey);
         }
+    } else {
+        note_refusal(&nag_key);
     }
     allow
 }
@@ -483,8 +354,7 @@ fn locale() -> &'static str {
 pub struct PromptText {
     pub title: String,
     pub body: String,
-    pub always_allow: &'static str,
-    pub allow_once: &'static str,
+    pub allow: &'static str,
     pub deny: &'static str,
 }
 
@@ -521,8 +391,7 @@ impl Ask {
         PromptText {
             title: title.to_string(),
             body,
-            always_allow: btn_always(l),
-            allow_once: btn_once(l),
+            allow: btn_allow(l),
             deny: btn_deny(l),
         }
     }
@@ -628,23 +497,13 @@ fn esc_hint(l: &str) -> &'static str {
     }
 }
 
-fn btn_always(l: &str) -> &'static str {
+fn btn_allow(l: &str) -> &'static str {
     match l {
-        "fr" => "Toujours autoriser",
-        "es" => "Permitir siempre",
-        "de" => "Immer erlauben",
-        "zh" => "始终允许",
-        _ => "Always allow",
-    }
-}
-
-fn btn_once(l: &str) -> &'static str {
-    match l {
-        "fr" => "Autoriser une fois",
-        "es" => "Permitir una vez",
-        "de" => "Einmal erlauben",
-        "zh" => "允许一次",
-        _ => "Allow once",
+        "fr" => "Autoriser",
+        "es" => "Permitir",
+        "de" => "Erlauben",
+        "zh" => "允许",
+        _ => "Allow",
     }
 }
 
@@ -663,19 +522,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scoped_grants_do_not_speak_for_other_domains() {
-        // The whole point of scoping: one embed's answer is not every embed's.
-        assert_ne!(
-            grant_key(Feature::StorageAccess, Some("a.example")),
-            grant_key(Feature::StorageAccess, Some("b.example"))
-        );
-        assert_eq!(grant_key(Feature::Camera, None), "camera");
-        assert_eq!(
-            grant_key(Feature::StorageAccess, Some("a.example")),
-            "storage@a.example"
-        );
-        // An empty scope must not produce a dangling "storage@".
-        assert_eq!(grant_key(Feature::StorageAccess, Some("")), "storage");
+    fn scoped_asks_do_not_speak_for_other_domains() {
+        // The whole point of scoping: one embed's session answer is not every
+        // embed's (keys_joined feeds session_key).
+        let a = Ask::one(Feature::StorageAccess).scoped("a.example".into(), String::new());
+        let b = Ask::one(Feature::StorageAccess).scoped("b.example".into(), String::new());
+        assert_ne!(a.keys_joined(), b.keys_joined());
+        assert_eq!(Ask::one(Feature::Camera).keys_joined(), "camera");
+        assert_eq!(a.keys_joined(), "storage@a.example");
     }
 
     #[test]
@@ -688,11 +542,11 @@ mod tests {
 
     #[test]
     fn screen_capture_is_not_camera() {
-        // A remembered camera grant must never answer a screen-share request.
+        // A camera allow must never answer a screen-share request.
         assert_ne!(Feature::Screen.key(), Feature::Camera.key());
         assert_ne!(
-            grant_key(Feature::Screen, None),
-            grant_key(Feature::Camera, None)
+            Ask::one(Feature::Screen).keys_joined(),
+            Ask::one(Feature::Camera).keys_joined()
         );
     }
 

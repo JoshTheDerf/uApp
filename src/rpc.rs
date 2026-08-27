@@ -494,28 +494,6 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             crate::prefs::set(need_str(&p, "key")?, p["value"].clone())?;
             Ok(json!({"ok": true}))
         }
-        // Web permissions. READ-ONLY from here on purpose: the shell and the
-        // app iframe share an origin, so any RPC that could grant a permission
-        // is an RPC untrusted app code can call on itself. Granting happens
-        // only through the native dialog in `gui.rs`; there is deliberately no
-        // `perm.setGrant` and no `perm.answer`.
-        #[cfg(not(target_arch = "wasm32"))]
-        "perm.grants" => {
-            let app_id = app.engine.lock().unwrap().app_id.clone();
-            Ok(json!({"appId": app_id, "grants": crate::permissions::summary(&app_id)}))
-        }
-        // Forgetting grants only ever removes privilege, but it can still be
-        // abused — clearing a denial buys another prompt — so it is confirmed
-        // in a native dialog the page cannot draw or click.
-        #[cfg(not(target_arch = "wasm32"))]
-        "perm.clearGrants" => {
-            let app_id = app.engine.lock().unwrap().app_id.clone();
-            if !crate::native::confirm_reset_permissions() {
-                return Ok(json!({"ok": false, "cancelled": true}));
-            }
-            crate::permissions::clear_app(&app_id)?;
-            Ok(json!({"ok": true}))
-        }
         "web.search" => web_search(p),
         "web.fetch" => web_fetch(p),
         // Open a URL in the system browser (from apps or AI tools).

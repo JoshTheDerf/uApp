@@ -25,9 +25,6 @@ pub enum NativeReq {
     /// chosen absolute path, or None if the user cancelled. The way in when
     /// the machine has no .uapp file association to double-click.
     OpenDialog,
-    /// Confirm forgetting this app's permission grants. Native, because the
-    /// page asking is the page the grants are about.
-    ConfirmResetPermissions,
 }
 
 type Handler = Box<dyn Fn(NativeReq) -> Option<String> + Send + Sync>;
@@ -103,11 +100,6 @@ pub fn install_drop_sink(sink: DropSink) {
     let _ = DROP_SINK.set(sink);
 }
 
-/// Ask the user, in a native dialog, to confirm clearing permission grants.
-/// False in the browser CLI, where there is no native window to draw it.
-pub fn confirm_reset_permissions() -> bool {
-    dispatch(NativeReq::ConfirmResetPermissions).as_deref() == Some("yes")
-}
 
 /// Hand a native drop to the server. No-op when nothing is listening.
 pub fn deliver_drop(info: DropInfo) {

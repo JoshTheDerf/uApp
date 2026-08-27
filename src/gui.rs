@@ -184,9 +184,8 @@ fn install_permission_prompt(handle: tauri::AppHandle) {
             .message(&t.body)
             .title(&t.title)
             .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::YesNoCancelCustom(
-                t.always_allow.to_string(),
-                t.allow_once.to_string(),
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                t.allow.to_string(),
                 t.deny.to_string(),
             ));
         // Modal to the app window, so it can't be lost behind it and answered
@@ -213,21 +212,19 @@ fn install_permission_prompt(handle: tauri::AppHandle) {
         }
 
         match &result {
-            R::Custom(s) if s.as_str() == t.always_allow => (true, true),
-            R::Custom(s) if s.as_str() == t.allow_once => (true, false),
-            R::Custom(s) if s.as_str() == t.deny => (false, false),
-            R::Yes => (true, true),
-            R::No => (true, false),
+            R::Custom(s) if s.as_str() == t.allow => true,
+            R::Custom(s) if s.as_str() == t.deny => false,
+            R::Ok => true,
             // Dismissing the dialog is a denial, the safe direction. Anything
             // genuinely unrecognised denies too, but says so — a silent
             // fall-through here is what made every button mean "deny" once.
-            R::Cancel => (false, false),
+            R::Cancel => false,
             other => {
                 eprintln!(
                     "uapp: unrecognised permission dialog result {other:?} — denying. \
                      This is a bug: the button labels and the result mapping disagree."
                 );
-                (false, false)
+                false
             }
         }
     }));
@@ -581,18 +578,6 @@ fn install_native_bridge(handle: tauri::AppHandle) {
             }
             NativeReq::SaveDialog { default_name } => save_dialog(&handle, &default_name),
             NativeReq::OpenDialog => open_dialog(&handle),
-            // Native, for the same reason the permission dialog is: the page
-            // asking to forget these grants is the page they are about.
-            NativeReq::ConfirmResetPermissions => {
-                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-                let ok = handle
-                    .dialog()
-                    .message("Forget this app's camera, microphone, location and other permission decisions?")
-                    .title("Reset permissions")
-                    .buttons(MessageDialogButtons::OkCancel)
-                    .blocking_show();
-                Some(if ok { "yes".into() } else { "no".into() })
-            }
         }
     }));
 }
