@@ -85,6 +85,12 @@ pub struct ConsoleEntry {
 const CONSOLE_CAP: usize = 500;
 /// How long `reload_app` waits for the reloaded page to finish loading.
 pub const RELOAD_WAIT_MS: u64 = 10_000;
+/// How long an `app__*` call waits for a page that is still bootstrapping
+/// (right after reload_app) to register the action before giving up.
+pub const ACTION_REGISTER_WAIT_MS: u64 = 8_000;
+
+/// Pushes one JSON text message to a connected page; `false` once it is gone.
+pub type ConnSender = std::sync::Arc<dyn Fn(String) -> bool + Send + Sync>;
 
 /// Knobs of the PUBLIC ("hosted site") server mode — `uapp serve`. `None` on
 /// an `App` means the private desktop server, where every route needs the
@@ -180,13 +186,16 @@ pub struct App {
     /// overwrite each other's `uapp_t` cookie (seen as "missing or bad
     /// token" on iframe reloads).
     pub port: std::sync::atomic::AtomicU16,
-    /// Outbound message channel per WebSocket connection (for server->client
-    /// action invocations). Unused on wasm (the bridge routes invocations).
-    pub conns: Mutex<HashMap<u64, tokio::sync::mpsc::Sender<String>>>,
+    /// Connected pages, by connection id: how to push a message to each one.
+    /// Native: a WebSocket's outbound queue; wasm: a postMessage to the iframe
+    /// boot.js gave that id. Everything above this map — actions, contexts,
+    /// run_js, reload_app — is transport-neutral.
+    pub conns: Mutex<HashMap<u64, ConnSender>>,
     /// App-registered actions: name -> definition + owning connection.
     pub actions: Mutex<HashMap<String, AppAction>>,
-    /// In-flight action invocations awaiting a client reply.
-    pub invokes: Mutex<HashMap<String, std::sync::mpsc::SyncSender<Value>>>,
+    /// In-flight page invocations (actions, run_js): `None` until the page's
+    /// `*.result` message lands, then its params. Polled by [`App::page_call`].
+    pub invokes: Mutex<HashMap<String, Option<Value>>>,
     /// Files dropped onto the native window, keyed by a one-shot id: the page
     /// is told the id and the file names, never the OS paths, and asks the
     /// server to ingest them by id. Paths therefore always come from the real
@@ -316,20 +325,6 @@ impl App {
     /// Read recent console entries for the AI. `min_error`/`only_latest`/`limit`
     /// filter; reading acks everything returned so the auto-alert won't repeat
     /// it. Returns `{entries, dropped, latest_gen}`.
-    ///
-    /// wasm: console lines are buffered on the MAIN thread (the worker is
-    /// blocked during AI runs, so log.write RPCs can't land here in time) —
-    /// read them over the bridge.
-    #[cfg(target_arch = "wasm32")]
-    pub fn console_read(&self, only_errors: bool, only_latest: bool, limit: usize) -> Value {
-        crate::wasm::bridge_call("console.read", &json!({
-            "only_errors": only_errors, "only_latest": only_latest, "limit": limit,
-        }))
-        .unwrap_or_else(|e| json!({"entries": [], "dropped": 0, "latest_gen": 0,
-                                   "note": format!("console unavailable: {e}")}))
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn console_read(&self, only_errors: bool, only_latest: bool, limit: usize) -> Value {
         let latest_gen = self.console_gen.load(Ordering::Relaxed);
         let buf = self.console.lock().unwrap();
@@ -362,23 +357,22 @@ impl App {
     /// since it last looked — errors, warnings, or plain log lines — or `None`
     /// when nothing new has appeared (so a quiet console is never mentioned).
     /// Marks the new lines acked so it fires once per batch, not every turn.
-    #[cfg(target_arch = "wasm32")]
-    pub fn console_alert(&self) -> Option<String> {
-        crate::wasm::bridge_call("console.alert", &json!({}))
-            .ok()
-            .and_then(|v| v["note"].as_str().map(|s| s.to_string()))
-            .filter(|s| !s.is_empty())
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn console_alert(&self) -> Option<String> {
         let ack = self.console_ack.load(Ordering::Relaxed);
         let buf = self.console.lock().unwrap();
+        // A line the AI has already been shown (same text, e.g. a framework
+        // warning repeated on every page load) is not news again.
+        let seen: std::collections::HashSet<&str> =
+            buf.iter().filter(|e| e.seq <= ack).map(|e| e.text.as_str()).collect();
         let mut errs = 0usize;
         let mut warns = 0usize;
         let mut others = 0usize;
         let mut top = 0u64;
         for e in buf.iter().filter(|e| e.seq > ack) {
+            if seen.contains(e.text.as_str()) {
+                top = top.max(e.seq);
+                continue;
+            }
             match e.level.as_str() {
                 "error" => errs += 1,
                 "warn" => warns += 1,
@@ -389,6 +383,7 @@ impl App {
         drop(buf);
         // Nothing new at all: stay silent — don't report "console status".
         if errs == 0 && warns == 0 && others == 0 {
+            self.console_ack.fetch_max(top, Ordering::Relaxed);
             return None;
         }
         self.console_ack.fetch_max(top, Ordering::Relaxed);
@@ -518,88 +513,232 @@ impl App {
         v
     }
 
-    /// Block (AI / RPC worker thread) until `name` is registered, returning the
-    /// owning connection. Right after reload_app the page has loaded but may
-    /// still be running its bootstrap chain, so its actions register a moment
-    /// later; waiting here beats failing with "unknown action".
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn wait_for_action(&self, name: &str) -> anyhow::Result<u64> {
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_millis(crate::ai::ACTION_REGISTER_WAIT_MS);
-        loop {
-            if let Some(conn) = self.actions.lock().unwrap().get(name).map(|a| a.conn) {
-                return Ok(conn);
+    // ---- connected pages (transport-neutral) --------------------------------
+    //
+    // A "connection" is one live document that included uapp.js: natively a
+    // WebSocket, in the browser build an iframe boot.js assigned an id to (a
+    // reload of the same frame is a NEW connection — the old one is closed).
+    // Both transports feed the same three entry points below and everything
+    // the AI does with pages (actions, run_js, reload_app) is written once.
+
+    /// A page connected. `send` delivers server→page messages to it.
+    pub fn conn_open(&self, id: u64, send: ConnSender) {
+        self.clients.fetch_add(1, Ordering::SeqCst);
+        self.conns.lock().unwrap().insert(id, send);
+    }
+
+    /// A page went away: everything it registered dies with it.
+    pub fn conn_close(&self, id: u64) {
+        if self.conns.lock().unwrap().remove(&id).is_some() {
+            self.clients.fetch_sub(1, Ordering::SeqCst);
+        }
+        self.actions.lock().unwrap().retain(|_, a| a.conn != id);
+        self.contexts.lock().unwrap().retain(|(_, c)| *c != id);
+        self.ctx_loaded.lock().unwrap().remove(&id);
+    }
+
+    /// Transport-level messages a page sends about ITSELF (they need the
+    /// connection's identity, so they never reach `rpc::dispatch`). Returns
+    /// `None` for anything else, `Some(reply)` for a handled one.
+    pub fn conn_message(&self, id: u64, method: &str, params: &Value) -> Option<Value> {
+        match method {
+            "ctx.register" => {
+                let ctx = params["context"].as_str().unwrap_or("");
+                if !ctx.is_empty() && ctx.len() <= 32 {
+                    let mut ctxs = self.contexts.lock().unwrap();
+                    ctxs.retain(|(c, cid)| !(c == ctx && *cid == id));
+                    ctxs.push((ctx.to_string(), id));
+                }
+                Some(json!({"ok": true}))
             }
-            if std::time::Instant::now() >= deadline {
-                anyhow::bail!("{}", crate::ai::action_missing_msg(name));
+            "ctx.loaded" => {
+                self.ctx_loaded.lock().unwrap().insert(id);
+                Some(json!({"ok": true}))
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            "actions.register" => {
+                let mut reg = self.actions.lock().unwrap();
+                reg.retain(|_, a| a.conn != id);
+                let mut count = 0;
+                for a in params["actions"].as_array().cloned().unwrap_or_default() {
+                    let Some(name) = a["name"].as_str() else { continue };
+                    if name.is_empty() || name.len() > 64 {
+                        continue;
+                    }
+                    reg.insert(
+                        name.to_string(),
+                        AppAction {
+                            description: a["description"].as_str().unwrap_or("").to_string(),
+                            schema: if a["schema"].is_object() {
+                                a["schema"].clone()
+                            } else {
+                                json!({"type": "object", "properties": {}})
+                            },
+                            readonly: a["readonly"].as_bool().unwrap_or(false),
+                            conn: id,
+                        },
+                    );
+                    count += 1;
+                }
+                Some(json!({"ok": true, "count": count}))
+            }
+            "actions.result" | "eval.result" => {
+                let iid = params["id"].as_str().unwrap_or("");
+                if let Some(slot) = self.invokes.lock().unwrap().get_mut(iid) {
+                    *slot = Some(params.clone());
+                }
+                Some(json!({"ok": true}))
+            }
+            // Console output / uncaught errors forwarded from the live app
+            // iframe, buffered for the AI's read_console tool.
+            "log.write" => {
+                self.console_push(
+                    params["level"].as_str().unwrap_or("log"),
+                    params["text"].as_str().unwrap_or(""),
+                );
+                Some(json!({"ok": true}))
+            }
+            _ => None,
         }
     }
 
-    /// Invoke an app-registered action in the page that registered it and
-    /// block (AI thread) until it replies or times out. Writes the handler
-    /// makes flow through the normal write path like any user click.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn invoke_action(&self, name: &str, input: &Value) -> anyhow::Result<Value> {
-        let conn_id = self.wait_for_action(name)?;
-        let sender = self
+    /// Newest still-connected page that registered `context`.
+    fn context_conn(&self, context: &str) -> Option<u64> {
+        let ctxs = self.contexts.lock().unwrap();
+        let conns = self.conns.lock().unwrap();
+        ctxs.iter()
+            .rev()
+            .find(|(c, id)| c == context && conns.contains_key(id))
+            .map(|(_, id)| *id)
+    }
+
+    /// Poll `pred` every `step_ms` until it holds (`true`) or `timeout_ms`
+    /// passes (`false`). The one blocking primitive under every page wait:
+    /// natively a thread sleep, in the browser build a wait that keeps
+    /// servicing page RPCs (the reply we wait for arrives through them).
+    pub fn wait_until(&self, timeout_ms: u64, step_ms: u64, mut pred: impl FnMut() -> bool) -> anyhow::Result<bool> {
+        let start = crate::store::now_ms();
+        loop {
+            if pred() {
+                return Ok(true);
+            }
+            if crate::store::now_ms().saturating_sub(start) >= timeout_ms {
+                return Ok(false);
+            }
+            sleep_ms(step_ms)?;
+        }
+    }
+
+    /// Block until `name` is registered, returning the owning connection.
+    /// Right after reload_app the page has loaded but may still be running
+    /// its bootstrap chain, so its actions register a moment later; waiting
+    /// here beats failing with "unknown action".
+    pub fn wait_for_action(&self, name: &str) -> anyhow::Result<u64> {
+        let find = || self.actions.lock().unwrap().get(name).map(|a| a.conn);
+        if self.wait_until(ACTION_REGISTER_WAIT_MS, 100, || find().is_some())? {
+            return Ok(find().unwrap());
+        }
+        anyhow::bail!(
+            "no app action named '{name}' is registered. If you just called reload_app the \
+             page may still be initialising — wait a moment and retry; otherwise the app does \
+             not register that action (check its uapp.action(...) calls and read_console for \
+             load errors)"
+        )
+    }
+
+    /// Send `method` to one page and block until it answers (`*.result` with
+    /// the same id) or `timeout_ms` passes. `what` names the call in errors.
+    fn page_call(&self, conn_id: u64, method: &str, mut params: Value, timeout_ms: u64, what: &str) -> anyhow::Result<Value> {
+        let send = self
             .conns
             .lock()
             .unwrap()
             .get(&conn_id)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("the app page that registered '{name}' has disconnected"))?;
+            .ok_or_else(|| anyhow::anyhow!("the page for {what} has disconnected"))?;
         let id: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(1);
-        self.invokes.lock().unwrap().insert(id.clone(), tx);
-        let msg = json!({"method": "action.invoke",
-                         "params": {"id": id, "name": name, "input": input}});
-        if sender.blocking_send(msg.to_string()).is_err() {
+        params["id"] = json!(id);
+        self.invokes.lock().unwrap().insert(id.clone(), None);
+        let msg = json!({"method": method, "params": params}).to_string();
+        if !send(msg) {
             self.invokes.lock().unwrap().remove(&id);
-            anyhow::bail!("the app page disconnected before the action could run");
+            anyhow::bail!("the page disconnected before {what} could run");
         }
-        let timeout_ms: u64 = std::env::var("UAPP_ACTION_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(60_000);
-        let res = rx.recv_timeout(std::time::Duration::from_millis(timeout_ms));
-        self.invokes.lock().unwrap().remove(&id);
-        match res {
-            Ok(v) => {
+        let done = || self.invokes.lock().unwrap().get(&id).map(|v| v.is_some()).unwrap_or(true);
+        let finished = self.wait_until(timeout_ms, 20, done);
+        let reply = self.invokes.lock().unwrap().remove(&id).flatten();
+        finished?;
+        match reply {
+            Some(v) => {
                 if let Some(err) = v["error"].as_str() {
-                    anyhow::bail!("action '{name}' failed: {err}");
+                    anyhow::bail!("{err}");
                 }
                 Ok(v["result"].clone())
             }
-            Err(_) => anyhow::bail!(
-                "action '{name}' did not respond within {}s (page busy or reloading?)",
-                timeout_ms / 1000
-            ),
+            None => anyhow::bail!("{what} did not respond within {}s", timeout_ms / 1000),
         }
     }
 
-    /// wasm: route the invocation over the worker bridge — the main thread
-    /// glue delivers it to the page that registered the action and blocks us
-    /// (Atomics.wait) until it replies.
-    #[cfg(target_arch = "wasm32")]
+    /// Invoke an app-registered action in the page that registered it and
+    /// block until it replies or times out. Writes the handler makes flow
+    /// through the normal write path like any user click.
     pub fn invoke_action(&self, name: &str, input: &Value) -> anyhow::Result<Value> {
-        let reply = crate::wasm::bridge_call(
-            "action",
-            &json!({"name": name, "input": input,
-                    "wait_ms": crate::ai::ACTION_REGISTER_WAIT_MS}),
-        )?;
-        if reply["unregistered"].as_bool() == Some(true) {
-            anyhow::bail!("{}", crate::ai::action_missing_msg(name));
-        }
-        Ok(reply["result"].clone())
+        let conn_id = self.wait_for_action(name)?;
+        let timeout_ms = env_ms("UAPP_ACTION_TIMEOUT_MS", 60_000);
+        self.page_call(conn_id, "action.invoke", json!({"name": name, "input": input}), timeout_ms, &format!("action '{name}'"))
+            .map_err(|e| {
+                let m = e.to_string();
+                if m.contains("did not respond") {
+                    anyhow::anyhow!("{m} (page busy or reloading?)")
+                } else if m.contains("disconnected") {
+                    e
+                } else {
+                    anyhow::anyhow!("action '{name}' failed: {m}")
+                }
+            })
     }
 
     /// Run JavaScript in a connected page context ("scratchpad" or "app") and
-    /// block (AI thread) until the page replies or times out. The code runs
-    /// inside the browser with the full uapp API, so any writes it makes flow
-    /// through the normal write path.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// block until the page replies or times out. The code runs inside the
+    /// browser with the full uapp API, so any writes it makes flow through
+    /// the normal write path.
+    pub fn invoke_eval(&self, context: &str, code: &str) -> anyhow::Result<Value> {
+        let mut conn_id = self.context_conn(context);
+        // The shell keeps its scratch frame empty until something needs it, so
+        // the first scratchpad call of a session normally finds no context at
+        // all. Ask the shells to load it and wait for it to register rather
+        // than failing a call that would have worked a second later.
+        if conn_id.is_none() && context == "scratchpad" {
+            self.notify("scratch-load", json!({}));
+            self.wait_until(5_000, 50, || {
+                conn_id = self.context_conn(context);
+                conn_id.is_some()
+            })?;
+        }
+        let conn_id = conn_id.ok_or_else(|| {
+            if context == "app" {
+                anyhow::anyhow!(
+                    "no 'app' page is connected — the app must be open in a browser and its page must include <script src=\"/uapp.js\"></script> (use the scratchpad context otherwise)"
+                )
+            } else {
+                anyhow::anyhow!(
+                    "no '{context}' page is connected — the app must be open in a browser (the shell loads the scratchpad frame on demand, so this means no shell is connected)"
+                )
+            }
+        })?;
+        let timeout_ms = env_ms("UAPP_EVAL_TIMEOUT_MS", 60_000);
+        self.page_call(conn_id, "eval.invoke", json!({"code": code}), timeout_ms, &format!("code in '{context}'"))
+            .map_err(|e| {
+                let m = e.to_string();
+                if m.contains("did not respond") {
+                    anyhow::anyhow!("{} (infinite loop, or a promise that never resolves?)", m.replace("did not respond", "did not finish"))
+                } else if m.contains("disconnected") {
+                    e
+                } else {
+                    anyhow::anyhow!("code failed in {context}: {m}")
+                }
+            })
+    }
+
     /// Reload the live app page and wait until the NEW document has finished
     /// loading (its uapp.js sent `ctx.loaded` over a fresh connection), so a
     /// run_js / read_console right after this sees the new page. Without a
@@ -621,108 +760,43 @@ impl App {
             return json!({"ok": true, "loaded": false,
                 "note": "no app page is connected, so there was nothing to wait for"});
         }
-        let start = std::time::Instant::now();
-        while start.elapsed().as_millis() < RELOAD_WAIT_MS as u128 {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        let start = crate::store::now_ms();
+        let loaded = self.wait_until(RELOAD_WAIT_MS, 50, || {
             let fresh = app_conns();
             let loaded = self.ctx_loaded.lock().unwrap();
-            if fresh.iter().any(|id| !before.contains(id) && loaded.contains(id)) {
-                return json!({"ok": true, "loaded": true, "ms": start.elapsed().as_millis() as u64});
-            }
-        }
-        json!({"ok": true, "loaded": false,
-            "note": format!("the app page did not finish reloading within {}s — it may be slow or throwing on load; read_console will tell", RELOAD_WAIT_MS / 1000)})
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn invoke_eval(&self, context: &str, code: &str) -> anyhow::Result<Value> {
-        let find_conn = || {
-            let ctxs = self.contexts.lock().unwrap();
-            let conns = self.conns.lock().unwrap();
-            ctxs.iter()
-                .rev()
-                .find(|(c, id)| c == context && conns.contains_key(id))
-                .map(|(_, id)| *id)
-        };
-        let mut conn_id = find_conn();
-        // The shell keeps its scratch frame empty until something needs it, so
-        // the first scratchpad call of a session normally finds no context at
-        // all. Ask the shells to load it and wait for it to register rather
-        // than failing a call that would have worked a second later.
-        if conn_id.is_none() && context == "scratchpad" {
-            self.notify("scratch-load", json!({}));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while conn_id.is_none() && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                conn_id = find_conn();
-            }
-        }
-        let conn_id = conn_id.ok_or_else(|| {
-            if context == "app" {
-                anyhow::anyhow!(
-                    "no 'app' page is connected — the app must be open in a browser and its page must include <script src=\"/uapp.js\"></script> (use the scratchpad context otherwise)"
-                )
-            } else {
-                anyhow::anyhow!(
-                    "no '{context}' page is connected — the app must be open in a browser (the shell loads the scratchpad frame on demand, so this means no shell is connected)"
-                )
-            }
-        })?;
-        let sender = self
-            .conns
-            .lock()
-            .unwrap()
-            .get(&conn_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("the '{context}' page has disconnected"))?;
-        let id: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(1);
-        self.invokes.lock().unwrap().insert(id.clone(), tx);
-        let msg = json!({"method": "eval.invoke", "params": {"id": id, "code": code}});
-        if sender.blocking_send(msg.to_string()).is_err() {
-            self.invokes.lock().unwrap().remove(&id);
-            anyhow::bail!("the '{context}' page disconnected before the code could run");
-        }
-        let timeout_ms: u64 = std::env::var("UAPP_EVAL_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(60_000);
-        let res = rx.recv_timeout(std::time::Duration::from_millis(timeout_ms));
-        self.invokes.lock().unwrap().remove(&id);
-        match res {
-            Ok(v) => {
-                if let Some(err) = v["error"].as_str() {
-                    anyhow::bail!("code failed in {context}: {err}");
-                }
-                Ok(v["result"].clone())
-            }
-            Err(_) => anyhow::bail!(
-                "code in '{context}' did not finish within {}s (infinite loop, or a promise that never resolves?)",
-                timeout_ms / 1000
-            ),
-        }
-    }
-
-    /// wasm: same, over the worker bridge (main-thread glue runs the code in
-    /// the right iframe and writes the reply back).
-    /// See the native version: the page owns the frame, so boot.js does the
-    /// waiting (bridge kind "reload").
-    #[cfg(target_arch = "wasm32")]
-    pub fn invoke_reload(&self) -> Value {
-        match crate::wasm::bridge_call("reload", &json!({})) {
-            Ok(v) => v,
+            fresh.iter().any(|id| !before.contains(id) && loaded.contains(id))
+        });
+        match loaded {
+            Ok(true) => json!({"ok": true, "loaded": true, "ms": crate::store::now_ms() - start}),
+            Ok(false) => json!({"ok": true, "loaded": false,
+                "note": format!("the app page did not finish reloading within {}s — it may be slow or throwing on load; read_console will tell", RELOAD_WAIT_MS / 1000)}),
             Err(e) => json!({"ok": true, "loaded": false, "note": format!("could not confirm the reload: {e}")}),
         }
     }
+}
 
+fn env_ms(var: &str, default: u64) -> u64 {
+    std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Sleep without holding any `App` lock. Native: a plain thread sleep (page
+/// replies arrive on the WebSocket tasks meanwhile). wasm: the worker blocks
+/// on the shared-memory wait cell while draining the page's RPC inbox, which
+/// is how `ctx.loaded` / `actions.result` reach us mid-run; without
+/// SharedArrayBuffer there is no way to wait, so the call errors out at once.
+fn sleep_ms(ms: u64) -> anyhow::Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        Ok(())
+    }
     #[cfg(target_arch = "wasm32")]
-    pub fn invoke_eval(&self, context: &str, code: &str) -> anyhow::Result<Value> {
-        let reply =
-            crate::wasm::bridge_call("eval", &json!({"context": context, "code": code}))?;
-        if let Some(err) = reply["error"].as_str() {
-            anyhow::bail!("code failed in {context}: {err}");
+    {
+        if crate::wasm::sleep_ms(ms) {
+            Ok(())
+        } else {
+            anyhow::bail!("page bridge unavailable (the page is not cross-origin isolated — run_js, app actions and reload waits need COOP/COEP headers)")
         }
-        Ok(reply["result"].clone())
     }
 }
 

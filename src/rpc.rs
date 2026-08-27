@@ -116,10 +116,12 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             Ok(json!({"ok": true, "name": name}))
         }
         "files.delete" => {
+            // A miss is an error, never a silent no-op: "deleted" must mean gone.
             let name = {
                 let eng = app.engine.lock().unwrap();
-                store::resolve_name(&eng.db, need_str(&p, "name")?)?
-                    .unwrap_or_else(|| store::canon_name(need_str(&p, "name").unwrap_or("")))
+                let asked = need_str(&p, "name")?;
+                store::resolve_name(&eng.db, asked)?
+                    .ok_or_else(|| anyhow!("no file named '{asked}' (list_files shows the archive's names)"))?
             };
             local_op(app, "file_del", json!({"name": name}))
         }
@@ -371,7 +373,6 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             // Let a freshly reloaded page finish registering before deciding
             // whether the action is gated (its readonly flag lives on the
             // registration). Gating itself lives in one place: tools::is_gated.
-            #[cfg(not(target_arch = "wasm32"))]
             if let Some(action) = name.strip_prefix("app__") {
                 app.wait_for_action(action)?;
             }
@@ -599,33 +600,6 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 (eng.app_id.clone(), name)
             };
             crate::shortcut::remove(&app_id, &name).map(|msg| json!({ "ok": true, "message": msg }))
-        }
-        // wasm build: methods the JS glue uses in place of the native
-        // transport layer (server.rs handles these before dispatch natively).
-        #[cfg(target_arch = "wasm32")]
-        "log.write" => {
-            app.console_push(p["level"].as_str().unwrap_or("log"), p["text"].as_str().unwrap_or(""));
-            Ok(json!({"ok": true}))
-        }
-        #[cfg(target_arch = "wasm32")]
-        "actions.sync" => {
-            let mut reg = app.actions.lock().unwrap();
-            reg.clear();
-            for a in p["actions"].as_array().cloned().unwrap_or_default() {
-                if let Some(name) = a["name"].as_str() {
-                    if name.is_empty() || name.len() > 64 {
-                        continue;
-                    }
-                    reg.insert(name.to_string(), crate::app::AppAction {
-                        description: a["description"].as_str().unwrap_or("").to_string(),
-                        schema: if a["schema"].is_object() { a["schema"].clone() }
-                                else { json!({"type": "object", "properties": {}}) },
-                        readonly: a["readonly"].as_bool().unwrap_or(false),
-                        conn: 0,
-                    });
-                }
-            }
-            Ok(json!({"ok": true}))
         }
         // The whole current app as .uapp bytes (base64) — OPFS auto-save and
         // the Download button.

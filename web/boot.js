@@ -143,9 +143,13 @@ let workerSeq = 1;
 const workerPending = new Map(); // rpc id -> {resolve, reject}
 let shellOnMessage = null;       // core.js's handler
 const clientWindows = new Set(); // iframe windows that spoke to us
-const ctxRegistry = [];          // [{ctx, win}] push-ordered
-const iframeActions = new Map(); // win -> actions array
-const invokes = new Map();       // invoke id -> resolve
+// Page connections, as the core sees them (see App::conn_open in app.rs): one
+// id per DOCUMENT. A WindowProxy survives its frame's navigation, so a reload
+// closes the old id and mints a new one — that is how the core notices a
+// fresh page (reload_app) and forgets the old page's actions.
+let connSeq = 1;
+const connOfWin = new Map(); // win -> conn id
+const winOfConn = new Map(); // conn id -> win
 
 // ---- tiny helpers -----------------------------------------------------------
 
@@ -310,46 +314,6 @@ function netHandle(m) {
 
 // ---- console buffer (main-thread copy of App's ring buffer) ------------------
 
-const CONSOLE_CAP = 500;
-const consoleBuf = [];
-let consoleSeq = 0, consoleGen = 0, consoleAck = 0;
-function consolePush(level, text) {
-  if (level === "reset") { consoleGen++; return; }
-  consoleBuf.push({ seq: ++consoleSeq, gen: consoleGen, level, text: String(text).slice(0, 8000), ts: Date.now() });
-  while (consoleBuf.length > CONSOLE_CAP) consoleBuf.shift();
-}
-function consoleRead(onlyErrors, onlyLatest, limit) {
-  let rows = consoleBuf.filter((e) =>
-    (!onlyLatest || e.gen === consoleGen) &&
-    (!onlyErrors || e.level === "error" || e.level === "warn"));
-  const total = rows.length;
-  if (rows.length > limit) rows = rows.slice(rows.length - limit);
-  consoleAck = Math.max(consoleAck, consoleSeq);
-  return {
-    entries: rows.map((e) => ({ level: e.level, text: e.text, gen: e.gen, ts: e.ts })),
-    dropped: total - rows.length,
-    latest_gen: consoleGen,
-  };
-}
-function consoleAlert() {
-  let errs = 0, warns = 0, others = 0, top = consoleAck;
-  for (const e of consoleBuf) {
-    if (e.seq <= consoleAck) continue;
-    if (e.level === "error") errs++; else if (e.level === "warn") warns++; else others++;
-    top = Math.max(top, e.seq);
-  }
-  if (!errs && !warns && !others) return null;
-  consoleAck = top;
-  const s = (n) => (n === 1 ? "" : "s");
-  const parts = [];
-  if (errs) parts.push(`${errs} error${s(errs)}`);
-  if (warns) parts.push(`${warns} warning${s(warns)}`);
-  if (others) parts.push(`${others} log line${s(others)}`);
-  return `\n\n[console] ${parts.join(", ")} in the live app since you last checked — call read_console to see the messages${errs ? " and stack traces" : ""}.`;
-}
-
-// ---- SAB bridge (worker blocked mid-AI-run asks us for things) ---------------
-
 function bridgeReply(obj) {
   if (!sab) return;
   const i32 = new Int32Array(sab);
@@ -364,75 +328,15 @@ function bridgeReply(obj) {
   wake(); // the worker waits on the shared WAKE cell (see blockUntil)
 }
 
-function findCtxWin(context) {
-  for (let i = ctxRegistry.length - 1; i >= 0; i--) {
-    if (ctxRegistry[i].ctx === context) return ctxRegistry[i].win;
-  }
-  return null;
-}
 // The scratch frame starts empty and is loaded on first use (same reasoning as
 // the native shell: an idle second document costs memory a phone needs for the
-// app). Load it now and give it a moment to register.
-function loadScratchFrame() {
-  const f = document.getElementById("scratchframe");
-  if (!f || f.getAttribute("src")) return; // already loading or loaded
-  f.src = BASE.pathname + "scratch/";
-}
-async function waitForCtx(context, ms) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 50));
-    const win = findCtxWin(context);
-    if (win) return win;
-  }
-  return null;
-}
-
-async function invokeInContext(context, msg, timeoutMs = 60000) {
-  let win = findCtxWin(context);
-  if (!win && context === "scratchpad") {
-    loadScratchFrame();
-    win = await waitForCtx(context, 5000);
-  }
-  if (!win) return { error: `no '${context}' page is connected` };
-  return new Promise((resolve) => {
-    const id = "inv" + workerSeq++;
-    const timer = setTimeout(() => {
-      if (invokes.has(id)) { invokes.delete(id); resolve({ error: "the page did not respond within " + timeoutMs / 1000 + "s" }); }
-    }, timeoutMs);
-    invokes.set(id, (params) => {
-      clearTimeout(timer);
-      if (params.error != null) resolve({ error: String(params.error) });
-      else resolve({ result: params.result === undefined ? null : params.result });
-    });
-    msg.params.id = id;
-    try { win.postMessage({ __uappMsg: true, m: msg }, "*"); } catch (e) {
-      invokes.delete(id); clearTimeout(timer);
-      resolve({ error: "the page is gone: " + e });
-    }
-  });
-}
+// app). The core asks for it with a "scratch-load" event, which the shell
+// (main.js) answers — nothing to do here.
 
 // The one in-flight bridge prompt (the worker is blocked, so there is never
 // more than one). The shell answers it with its normal ai.approve/ai.answer
 // RPCs, which the transport intercepts below.
 let bridgePrompt = null; // {kind: "approval"|"question", id}
-
-// Bumped every time the app frame's page reports it has finished loading.
-let appLoadGen = 0;
-// The AI's reload_app (bridge kind "reload"): ask the shell to reload the
-// frame, then wait for the reloaded page's `ctx.loaded` so the tool returns
-// only once the new document is really there.
-async function reloadAndWait(timeoutMs = 10000) {
-  const gen = appLoadGen, t0 = Date.now();
-  emitShellEvent("reload", {});
-  while (Date.now() - t0 < timeoutMs) {
-    await new Promise((r) => setTimeout(r, 50));
-    if (appLoadGen > gen) return { ok: true, loaded: true, ms: Date.now() - t0 };
-  }
-  return { ok: true, loaded: false,
-    note: "the app page did not finish reloading within " + timeoutMs / 1000 + "s — it may be slow or throwing on load; read_console will tell" };
-}
 
 function emitShellEvent(type, extra) {
   const envelope = { method: "event", params: { type, ...extra } };
@@ -455,32 +359,6 @@ function resolveBridgePrompt(reply) {
 async function handleBridge(kind, payloadJson) {
   let p = {};
   try { p = JSON.parse(payloadJson); } catch {}
-  if (kind === "console.read") {
-    bridgeReply(consoleRead(!!p.only_errors, p.only_latest !== false, Math.min(Math.max(p.limit || 100, 1), 500)));
-    return;
-  }
-  if (kind === "console.alert") {
-    bridgeReply({ note: consoleAlert() || "" });
-    return;
-  }
-  if (kind === "reload") {
-    bridgeReply(await reloadAndWait());
-    return;
-  }
-  if (kind === "eval") {
-    bridgeReply(await invokeInContext(p.context || "scratchpad", { method: "eval.invoke", params: { code: p.code || "" } }));
-    return;
-  }
-  if (kind === "action") {
-    // A freshly reloaded page registers its actions only once its bootstrap
-    // scripts have run — give it a few seconds rather than "unknown action".
-    if (!(await waitForAction(p.name, p.wait_ms || 8000))) {
-      bridgeReply({ unregistered: true }); // app.rs turns this into action_missing_msg
-      return;
-    }
-    bridgeReply(await invokeInContext("app", { method: "action.invoke", params: { name: p.name, input: p.input || {} } }));
-    return;
-  }
   if (kind === "approval") {
     // Show the shell's normal approval card; its ai.approve RPC is
     // intercepted by the transport and answered into the SAB.
@@ -597,23 +475,18 @@ async function handleSwRequest(m) {
 
 // ---- iframe (uapp.js) routing -------------------------------------------------
 
-function hasAction(name) {
-  for (const list of iframeActions.values()) if (list.some((a) => a && a.name === name)) return true;
-  return false;
+// Transport messages a page sends about itself go to the core tagged with
+// the page's connection id (the core opens the connection on first sight).
+const CONN_METHODS = new Set(["ctx.register", "ctx.loaded", "actions.register", "actions.result", "eval.result", "log.write"]);
+function connFor(win) {
+  let id = connOfWin.get(win);
+  if (!id) { id = connSeq++; connOfWin.set(win, id); winOfConn.set(id, win); }
+  return id;
 }
-async function waitForAction(name, timeoutMs) {
-  const t0 = Date.now();
-  while (!hasAction(name)) {
-    if (Date.now() - t0 >= timeoutMs) return false;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return true;
-}
-
-function rebuildActionsSync() {
-  const merged = [];
-  for (const list of iframeActions.values()) merged.push(...list);
-  sendRpc("actions.sync", { actions: merged }).catch(() => {});
+function connMessage(win, m, replyTo) {
+  const p = sendRpc("conn.msg", { conn: connFor(win), method: m.method, params: m.params || {} });
+  if (m.id != null) p.then((result) => replyTo({ id: m.id, result }), (e) => replyTo({ id: m.id, error: { message: String((e && e.message) || e) } }));
+  else p.catch(() => {});
 }
 
 window.addEventListener("message", (ev) => {
@@ -624,47 +497,17 @@ window.addEventListener("message", (ev) => {
   clientWindows.add(win);
   const replyTo = (obj) => { try { win.postMessage({ __uappMsg: true, m: obj }, "*"); } catch {} };
   if (m.method === "ctx.register") {
-    const ctx = (m.params && m.params.context) || "";
-    if (ctx && ctx.length <= 32) {
-      for (let i = ctxRegistry.length - 1; i >= 0; i--) {
-        if (ctxRegistry[i].win === win && ctxRegistry[i].ctx === ctx) ctxRegistry.splice(i, 1);
-      }
-      ctxRegistry.push({ ctx, win });
-      if (ctx === "app") consolePush("reset", ""); // new page load, new generation
-      // The WindowProxy survives a reload, so the old document's actions would
-      // otherwise linger under the same key and defeat waitForAction below.
-      if (iframeActions.delete(win)) rebuildActionsSync();
-    }
-    if (m.id != null) replyTo({ id: m.id, result: { ok: true } });
-    return;
+    // A new document in this frame: the previous one (same WindowProxy) is
+    // gone, and with it its actions and contexts.
+    const old = connOfWin.get(win);
+    if (old) { connOfWin.delete(win); winOfConn.delete(old); sendRpc("conn.close", { conn: old }).catch(() => {}); }
   }
-  if (m.method === "ctx.loaded") {
-    // The page's window `load` fired (uapp.js). reload_app waits for the
-    // app frame's next one of these.
-    if (m.params && m.params.context === "app") appLoadGen++;
-    return;
-  }
-  if (m.method === "actions.register") {
-    iframeActions.set(win, (m.params && m.params.actions) || []);
-    rebuildActionsSync();
-    if (m.id != null) replyTo({ id: m.id, result: { ok: true } });
-    return;
-  }
-  if (m.method === "log.write") {
-    consolePush((m.params && m.params.level) || "log", (m.params && m.params.text) || "");
-    return;
-  }
+  if (CONN_METHODS.has(m.method)) { connMessage(win, m, replyTo); return; }
   if (m.method.startsWith("host.")) {
     handleHostRpc(m).then(
       (result) => { if (m.id != null) replyTo({ id: m.id, result }); },
       (e) => { if (m.id != null) replyTo({ id: m.id, error: { message: String((e && e.message) || e) } }); },
     );
-    return;
-  }
-  if (m.method === "actions.result" || m.method === "eval.result") {
-    const cb = invokes.get(m.params && m.params.id);
-    if (cb) { invokes.delete(m.params.id); cb(m.params); }
-    if (m.id != null) replyTo({ id: m.id, result: { ok: true } });
     return;
   }
   // Everything else goes to the worker; route the reply back to this iframe
@@ -1220,6 +1063,11 @@ if (tabChannel) {
         return;
       }
       if (m.type === "bridge") { handleBridge(m.kind, m.payload); return; }
+      if (m.type === "conn.send") {
+        const win = winOfConn.get(m.conn);
+        if (win) { try { win.postMessage({ __uappMsg: true, m: JSON.parse(m.msg) }, "*"); } catch {} }
+        return;
+      }
       if (m.type === "fatal") fatal(m.error);
     });
     await new Promise((resolve, reject) => {

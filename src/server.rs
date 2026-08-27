@@ -637,21 +637,18 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
     struct ClientGuard(Arc<App>, u64);
     impl Drop for ClientGuard {
         fn drop(&mut self) {
-            self.0.clients.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            self.0.conns.lock().unwrap().remove(&self.1);
-            // Actions and contexts registered by this page die with it.
-            self.0.actions.lock().unwrap().retain(|_, a| a.conn != self.1);
-            self.0.contexts.lock().unwrap().retain(|(_, c)| *c != self.1);
-            self.0.ctx_loaded.lock().unwrap().remove(&self.1);
+            self.0.conn_close(self.1);
         }
     }
     let conn_id = CONN_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    app.clients.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let _guard = ClientGuard(app.clone(), conn_id);
     let (mut tx, mut rx) = socket.split();
     let mut events = app.events.subscribe();
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(256);
-    app.conns.lock().unwrap().insert(conn_id, out_tx.clone());
+    {
+        let tx = out_tx.clone();
+        app.conn_open(conn_id, std::sync::Arc::new(move |m: String| tx.blocking_send(m).is_ok()));
+    }
 
     // Fan-in: broadcast events + rpc responses -> socket. The periodic Ping
     // detects half-open connections: a suspended/frozen webview (e.g. Android
@@ -693,74 +690,9 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
         let method = req["method"].as_str().unwrap_or("").to_string();
         let params = req["params"].clone();
         // Transport-level messages that need this connection's identity.
-        if method == "actions.register" {
-            let count = {
-                let mut reg = app.actions.lock().unwrap();
-                reg.retain(|_, a| a.conn != conn_id);
-                let mut count = 0;
-                for a in params["actions"].as_array().cloned().unwrap_or_default() {
-                    if let Some(name) = a["name"].as_str() {
-                        if name.is_empty() || name.len() > 64 {
-                            continue;
-                        }
-                        reg.insert(
-                            name.to_string(),
-                            AppAction {
-                                description: a["description"].as_str().unwrap_or("").to_string(),
-                                schema: if a["schema"].is_object() {
-                                    a["schema"].clone()
-                                } else {
-                                    json!({"type": "object", "properties": {}})
-                                },
-                                readonly: a["readonly"].as_bool().unwrap_or(false),
-                                conn: conn_id,
-                            },
-                        );
-                        count += 1;
-                    }
-                }
-                count
-            };
+        if let Some(reply) = app.conn_message(conn_id, &method, &params) {
             if !id.is_null() {
-                let _ = out_tx.send(json!({"id": id, "result": {"ok": true, "count": count}}).to_string()).await;
-            }
-            continue;
-        }
-        if method == "log.write" {
-            // Console output / uncaught errors forwarded from the live app
-            // iframe. Fire-and-forget: buffered for the AI's read_console tool,
-            // never echoed to a reply.
-            let level = params["level"].as_str().unwrap_or("log");
-            let text = params["text"].as_str().unwrap_or("");
-            app.console_push(level, text);
-            continue;
-        }
-        if method == "ctx.register" {
-            let ctx = params["context"].as_str().unwrap_or("").to_string();
-            if !ctx.is_empty() && ctx.len() <= 32 {
-                let mut ctxs = app.contexts.lock().unwrap();
-                ctxs.retain(|(c, id)| !(c == &ctx && *id == conn_id));
-                ctxs.push((ctx, conn_id));
-            }
-            if !id.is_null() {
-                let _ = out_tx.send(json!({"id": id, "result": {"ok": true}}).to_string()).await;
-            }
-            continue;
-        }
-        if method == "ctx.loaded" {
-            app.ctx_loaded.lock().unwrap().insert(conn_id);
-            continue;
-        }
-        if method == "actions.result" || method == "eval.result" {
-            let iid = params["id"].as_str().unwrap_or("").to_string();
-            {
-                let entry = app.invokes.lock().unwrap().remove(&iid);
-                if let Some(tx2) = entry {
-                    let _ = tx2.try_send(params.clone());
-                }
-            }
-            if !id.is_null() {
-                let _ = out_tx.send(json!({"id": id, "result": {"ok": true}}).to_string()).await;
+                let _ = out_tx.send(json!({"id": id, "result": reply}).to_string()).await;
             }
             continue;
         }

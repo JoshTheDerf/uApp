@@ -262,7 +262,7 @@ Every write (sql_exec / sql_batch / uapp.exec) is recorded in a log and REPLAYED
 CODE EXECUTION — run_js
 You can execute JavaScript in the user's browser with the run_js tool. The code is the body of an async function receiving (uapp, loadScript); `return` a JSON-serializable value. console.log output is captured and returned too. Top-level declarations (e.g. `function render() {{}}`) are exposed as page globals after the run — the page's event handlers and later run_js calls can call them — and the result lists them under `exposed`. Error line numbers refer to your code as written (syntax errors include the offending line and an excerpt). Two contexts:
 - "scratchpad" (default): a hidden empty page with the FULL uapp API but none of the app's code. Globals persist between calls (load a library once, use it in later calls). Use it to parse uploaded files, transform data, prototype logic, or verify a computation without touching the live app.
-- "app": runs inside the LIVE app page — inspect or manipulate its DOM and globals, call its actions via uapp.call(...), debug "why does the button not work".
+- "app": runs inside the LIVE app page — the document in the app frame (for a hosted site that is the site page itself; there is no separate editor frame). Inspect or manipulate its DOM and globals, call its actions via uapp.call(...), debug "why does the button not work". If your code navigates or reloads that page, the call ends with "the page unloaded" rather than a result — expected; run a fresh run_js against the new page.
 Recipe — user uploads an Excel file:
   1. download_lib {{"url": "https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"}}
   2. run_js: await loadScript("/vendor/xlsx.full.min.js");
@@ -687,19 +687,6 @@ pub fn ask_user(app: &Arc<App>, input: &Value) -> Result<Value> {
         })),
     }
     }
-}
-
-/// How long an app__ tool call waits for its action to be registered by a
-/// page that is still bootstrapping (after reload_app).
-pub const ACTION_REGISTER_WAIT_MS: u64 = 8_000;
-
-pub fn action_missing_msg(action: &str) -> String {
-    format!(
-        "no app action named '{action}' is registered. If you just called reload_app the \
-         page may still be initialising — wait a moment and retry; otherwise the app does \
-         not register that action (check its uapp.action(...) calls and read_console for \
-         load errors)"
-    )
 }
 
 pub fn run_tool(app: &Arc<App>, name: &str, input: &Value) -> Result<Value> {

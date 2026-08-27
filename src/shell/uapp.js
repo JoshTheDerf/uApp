@@ -197,8 +197,23 @@
     }, 20);
   }
 
+  // Host invocations (action.invoke / eval.invoke) still running when this
+  // document goes away get an answer NOW, so the caller learns "the page
+  // navigated/reloaded under me" at once instead of waiting out its timeout.
+  const inflight = new Map(); // invoke id -> result method
+  window.addEventListener("pagehide", () => {
+    for (const [id, method] of inflight) {
+      rawSend({ method, params: { id, error: "the page unloaded (a navigation or reload) before this finished — if the code navigated on purpose that is expected; inspect the new page with a fresh run_js" } });
+    }
+    inflight.clear();
+  });
+  function replyOnce(method, id) {
+    inflight.set(id, method);
+    return (params) => { if (inflight.delete(id)) rawSend({ method, params }); };
+  }
+
   async function handleInvoke(p) {
-    const send = (params) => rawSend({ method: "actions.result", params });
+    const send = replyOnce("actions.result", p.id);
     const def = actions.get(p.name);
     if (!def) return send({ id: p.id, error: `unknown action ${p.name}` });
     try {
@@ -296,7 +311,7 @@
   }
 
   async function handleEval(p) {
-    const send = (params) => rawSend({ method: "eval.result", params });
+    const send = replyOnce("eval.result", p.id);
     const logs = [];
     const orig = { log: console.log, warn: console.warn, error: console.error };
     const cap = (lvl) => (...a) => {
@@ -430,11 +445,25 @@
     setTimeout(() => { if (!alive && ws && ws.readyState === 1) { try { ws.close(); } catch {} } }, 3000);
   });
 
+  // No call pends forever: a lost reply (a transport hiccup, a host that went
+  // away) surfaces as a typed, retryable error naming the call instead of a
+  // button stuck on "Saving…". `uapp.rpcTimeout` (ms) tunes it per page.
   async function rpc(method, params = {}) {
     await openp;
     return new Promise((resolve, reject) => {
       const id = nextId++;
-      pending.set(id, { resolve, reject });
+      const ms = Number(window.uapp && window.uapp.rpcTimeout) || 60000;
+      const timer = setTimeout(() => {
+        if (!pending.has(id)) return;
+        pending.delete(id);
+        const e = new Error(`uapp: ${method} (call #${id}) got no reply within ${Math.round(ms / 1000)}s — the host may be busy or the reply was lost; retrying is safe for reads`);
+        e.name = "UappTimeout"; e.method = method; e.callId = id;
+        reject(e);
+      }, ms);
+      pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
       rawSend({ id, method, params });
     });
   }

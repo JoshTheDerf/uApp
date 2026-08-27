@@ -43,6 +43,11 @@ extern "C" {
     /// Returns the reply JSON, or {"error": "..."} (including when SAB is
     /// unavailable because the site isn't cross-origin isolated).
     pub fn js_bridge_call(kind: &str, payload_json: &str) -> String;
+    /// Push one message to the page connection boot.js knows by this id.
+    pub fn js_conn_send(conn: f64, msg: &str) -> bool;
+    /// Block for `ms` while servicing the page's RPC inbox; false when there is
+    /// no SharedArrayBuffer to wait on.
+    pub fn js_sleep(ms: f64) -> bool;
     /// Ask the glue to call `ai_tick(session)` as a fresh task, after the
     /// current RPC has replied.
     pub fn js_schedule_ai(session: &str);
@@ -95,6 +100,10 @@ pub fn bridge_call(kind: &str, payload: &Value) -> Result<Value> {
     Ok(v)
 }
 
+pub fn sleep_ms(ms: u64) -> bool {
+    js_sleep(ms as f64)
+}
+
 pub fn schedule_ai(session: &str) {
     js_schedule_ai(session);
 }
@@ -138,6 +147,29 @@ pub fn rpc_dispatch(method: String, params_json: String) -> String {
         if let Some(o) = params.as_object_mut() {
             o.remove("_user_approved");
             o.remove("_assistant");
+        }
+        // Page-connection bookkeeping (server.rs does the same before its
+        // dispatch): boot.js wraps each iframe's transport messages with the
+        // connection id it assigned to that document.
+        match method.as_str() {
+            "conn.close" => {
+                app.conn_close(params["conn"].as_u64().unwrap_or(0));
+                return Ok(json!({"ok": true}));
+            }
+            "conn.msg" => {
+                let id = params["conn"].as_u64().unwrap_or(0);
+                // First message from a document opens its connection: one
+                // message shape, no open/msg ordering to get wrong between
+                // the postMessage and inbox paths.
+                if !app.conns.lock().unwrap().contains_key(&id) {
+                    app.conn_open(id, Arc::new(move |m: String| js_conn_send(id as f64, &m)));
+                }
+                let inner = params["method"].as_str().unwrap_or("");
+                return app
+                    .conn_message(id, inner, &params["params"])
+                    .ok_or_else(|| anyhow!("{inner} is not a connection message"));
+            }
+            _ => {}
         }
         crate::rpc::dispatch(&app, &method, params)
     })();

@@ -101,6 +101,20 @@ export function js_bridge_call(kind, payloadJson) {
   }
 }
 
+// Server→page message for one connection (boot.js routes it to the iframe).
+export function js_conn_send(conn, msg) {
+  postMessage({ type: "conn.send", conn, msg });
+  return true;
+}
+
+// Sleep while servicing the inbox — the core's one wait primitive (page
+// replies, ctx.loaded, actions.register all arrive through the inbox).
+export function js_sleep(ms) {
+  if (!cfg.sab) return false;
+  blockUntil(() => false, ms);
+  return true;
+}
+
 // ---- HTTP: fetch on the main thread, body streamed through `net` -----------
 
 let netSeq = 1;

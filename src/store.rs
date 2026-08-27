@@ -646,6 +646,16 @@ pub fn sql_to_json(v: ValueRef) -> Value {
 }
 
 fn bind_params(stmt: &mut rusqlite::Statement, params: &[Value]) -> Result<()> {
+    let want = stmt.parameter_count();
+    if want != params.len() {
+        bail!(
+            "statement has {want} placeholder{} but {} param{} were given: {}",
+            if want == 1 { "" } else { "s" },
+            params.len(),
+            if params.len() == 1 { "" } else { "s" },
+            stmt.expanded_sql().unwrap_or_default().chars().take(120).collect::<String>()
+        );
+    }
     for (i, p) in params.iter().enumerate() {
         stmt.raw_bind_parameter(i + 1, json_to_sql(p)?)?;
     }
@@ -793,7 +803,7 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             // Rowid of the row this write created (0 = none: UPDATE/DELETE/DDL
             // or a table without a rowid alias). Lets actions do
             // `const {insert_id} = await uapp.exec("INSERT ...")`.
-            let iid = conn.last_insert_rowid();
+            let iid = if matches!(first_keyword(sql).as_str(), "insert" | "replace") { conn.last_insert_rowid() } else { 0 };
             Ok(json!({"changes": n, "insert_id": if iid > 0 { json!(iid) } else { Value::Null } }))
         }
         "batch" => {
