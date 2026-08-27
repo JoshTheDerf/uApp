@@ -137,6 +137,24 @@ async function archiveResponse(req, url, clientId, probe) {
     "cache-control": "no-store",
   };
   if (r.disposition) headers["content-disposition"] = r.disposition;
+  // Range requests: a <video>/<audio> from the archive must support seeking,
+  // and Safari won't even start playback without a 206. We have the whole
+  // body in memory, so honour a single byte range.
+  const range = (r.status || 200) === 200 && req.headers.get("range");
+  const m = range && /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+  if (m && (m[1] || m[2])) {
+    const total = bytes.length;
+    let start = m[1] ? parseInt(m[1], 10) : total - parseInt(m[2], 10);
+    let end = m[1] && m[2] ? parseInt(m[2], 10) : total - 1;
+    if (!isNaN(start) && !isNaN(end) && start <= end && start < total) {
+      end = Math.min(end, total - 1);
+      headers["content-range"] = `bytes ${start}-${end}/${total}`;
+      headers["accept-ranges"] = "bytes";
+      return withCoi(new Response(bytes.subarray(start, end + 1), { status: 206, headers }));
+    }
+    return withCoi(new Response(null, { status: 416, headers: { "content-range": `bytes */${total}` } }));
+  }
+  headers["accept-ranges"] = "bytes";
   return withCoi(new Response(bytes, { status: r.status || 200, headers }));
 }
 

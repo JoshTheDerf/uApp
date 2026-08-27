@@ -12,6 +12,8 @@ let passed = 0, failed = 0;
 const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (failed++, console.log(`  ✗ FAIL: ${n} ${x}`)); };
 
 // ---------- mock provider ----------
+// Anthropic system is a string OR (with caching) cacheable text blocks.
+const sysText = (x) => Array.isArray(x) ? x.map((b) => b.text).join("") : String(x || "");
 // Routes (each becomes an ai.base_url): plain replies, sub-agent flow,
 // summarizer, and a stalling endpoint for the concurrency check.
 let plainCalls = [], agentCalls = [], sumCalls = [], stallCalls = [];
@@ -51,7 +53,7 @@ const mock = createServer(async (req, res) => {
       input: { description: "audit tables", prompt: "Audit every table and report." } }] });
   }
   if (req.url === "/sum/v1/messages") {
-    if (String(body.system || "").startsWith("You are a summarizer")) {
+    if (sysText(body.system).startsWith("You are a summarizer")) {
       sumCalls.push(body);
       return text("SUMMARY: user asked four things; app unchanged; nothing open.");
     }
@@ -176,7 +178,7 @@ let comp;
   ok(before.length === 8, `8 rows before compaction (${before.length})`);
   comp = await A.rpc("chat.compact", { session: s });
   ok(comp.ok && comp.kept === 4 && comp.summarized_bytes > 0, `compact result ${JSON.stringify(comp)}`);
-  ok(sumCalls.length === 1 && sumCalls[0].system.startsWith("You are a summarizer"), "summarizer prompt used");
+  ok(sumCalls.length === 1 && sysText(sumCalls[0].system).startsWith("You are a summarizer"), "summarizer prompt used");
   ok(String(sumCalls[0].messages[0].content[0].text).includes("question one"), "old turns went into the summarizer");
   const after = (await A.rpc("chat.list", { session: s })).rows;
   ok(after.length === 5, `summary + kept tail (${after.length} rows)`);
@@ -221,7 +223,7 @@ await A.rpc("config.set", { key: "ai", value: { provider: "anthropic", api_key: 
   ok(!!innerReq, "sub-agent ran with its own toolset");
   ok(!(innerReq.tools || []).some((t) => t.name === "agent_send"), "agent_send also excluded inside an agent");
   ok((innerReq.tools || []).some((t) => t.name === "sql_query"), "sub-agent keeps the ordinary tools");
-  ok(String(innerReq.system).includes("autonomous sub-agent"), "sub-agent system prompt suffix");
+  ok(sysText(innerReq.system).includes("autonomous sub-agent"), "sub-agent system prompt suffix");
   ok(!list.some((s) => s.id === payload.session && s.kind === "chat"), "agent session not a normal chat");
 }
 

@@ -1003,24 +1003,75 @@ fn ai_timeout(cfg: &AiConfig) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// One place to turn a failed provider HTTP response into an error, so the
+/// message shape ("provider returned 429: …") is identical on every path.
+fn provider_error(resp: crate::net::Resp) -> anyhow::Error {
+    let code = resp.status;
+    let body = resp.into_string().unwrap_or_default();
+    let msg = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().or(v["message"].as_str()).map(String::from))
+        .unwrap_or_else(|| body.chars().take(400).collect());
+    anyhow!("provider returned {code}: {msg}")
+}
+
+/// Anthropic `system` as cacheable blocks: the big stable prompt (instructions
+/// + tool docs) is one cached block, the volatile tail (current files/schema,
+/// which change as work proceeds) a second uncached one — so the cached prefix
+/// stays valid across a turn's many iterations. `cache=false` (z.ai) returns
+/// the plain string unchanged.
+fn system_blocks(system: &str, cache: bool) -> Value {
+    if !cache {
+        return json!(system);
+    }
+    let split = system.find("\n\nCURRENT APP FILES:").unwrap_or(system.len());
+    let (stable, volatile) = system.split_at(split);
+    let mut blocks = vec![json!({
+        "type": "text", "text": stable,
+        "cache_control": {"type": "ephemeral"},
+    })];
+    if !volatile.is_empty() {
+        blocks.push(json!({"type": "text", "text": volatile}));
+    }
+    json!(blocks)
+}
+
+/// Mark the last tool with `cache_control`, so the whole (stable) tools array
+/// caches with the system prefix.
+fn cache_last_tool(tools: &[Value], cache: bool) -> Value {
+    if !cache || tools.is_empty() {
+        return json!(tools);
+    }
+    let mut out = tools.to_vec();
+    if let Some(last) = out.last_mut() {
+        last["cache_control"] = json!({"type": "ephemeral"});
+    }
+    json!(out)
+}
+
+/// Cache the conversation prefix by marking the last content block of the last
+/// message: everything before this turn's tail is reused on the next
+/// iteration instead of re-billed.
+fn cache_last_message(messages: &[Value], cache: bool) -> Value {
+    if !cache || messages.is_empty() {
+        return json!(messages);
+    }
+    let mut out = messages.to_vec();
+    if let Some(content) = out.last_mut().and_then(|m| m["content"].as_array_mut()) {
+        if let Some(block) = content.last_mut() {
+            block["cache_control"] = json!({"type": "ephemeral"});
+        }
+    }
+    json!(out)
+}
+
 fn http_post(url: &str, headers: &[(&str, &str)], body: Value, timeout: std::time::Duration) -> Result<Value> {
     let mut hdrs = headers.to_vec();
     hdrs.push(("content-type", "application/json"));
     let resp = crate::net::request("POST", url, &hdrs, Some(&body.to_string()), 20, timeout.as_secs())
         .map_err(|e| anyhow!("provider request failed: {e}"))?;
     if resp.status >= 400 {
-        let code = resp.status;
-        let body = resp.into_string().unwrap_or_default();
-        let msg = serde_json::from_str::<Value>(&body)
-            .ok()
-            .and_then(|v| {
-                v["error"]["message"]
-                    .as_str()
-                    .or(v["message"].as_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| body.chars().take(400).collect());
-        bail!("provider returned {code}: {msg}")
+        return Err(provider_error(resp));
     }
     Ok(serde_json::from_str(&resp.into_string()?)?)
 }
@@ -1217,14 +1268,18 @@ fn call_anthropic(
         "zai" => cfg.max_tokens, // None = omit the field entirely
         _ => Some(cfg.max_tokens.unwrap_or_else(|| default_max_tokens(&cfg.provider))),
     };
+    // Prompt caching pays off across a long tool loop, but only real
+    // Anthropic is guaranteed to honour `cache_control`; z.ai's compatible
+    // endpoint is left alone.
+    let cache = cfg.provider == "anthropic";
     let mut attempt = 0;
     loop {
         attempt += 1;
         let mut body = json!({
             "model": if cfg.model.is_empty() { default_model } else { &cfg.model },
-            "system": system,
-            "messages": messages,
-            "tools": tools,
+            "system": system_blocks(system, cache),
+            "messages": cache_last_message(&messages, cache),
+            "tools": cache_last_tool(tools, cache),
         });
         if let Some(b) = budget {
             body["max_tokens"] = json!(b);
@@ -1260,15 +1315,7 @@ fn call_anthropic(
         )
         .map_err(|e| anyhow!("provider request failed: {e}"))?;
         if resp.status >= 400 {
-            let code = resp.status;
-            let body = resp.into_string().unwrap_or_default();
-            let msg = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|v| {
-                    v["error"]["message"].as_str().or(v["message"].as_str()).map(String::from)
-                })
-                .unwrap_or_else(|| body.chars().take(400).collect());
-            bail!("provider returned {code}: {msg}")
+            return Err(provider_error(resp));
         }
         let (out, stop_reason, think_chars) = if resp.content_type.contains("event-stream") {
             read_anthropic_sse(app, session, resp.reader)?
@@ -1567,13 +1614,7 @@ fn call_openai_compat(
             )
             .map_err(|e| anyhow!("provider request failed: {e}"))?;
             if resp.status >= 400 {
-                let code = resp.status;
-                let b = resp.into_string().unwrap_or_default();
-                let msg = serde_json::from_str::<Value>(&b)
-                    .ok()
-                    .and_then(|v| v["error"]["message"].as_str().or(v["message"].as_str()).map(|t| t.to_string()))
-                    .unwrap_or_else(|| b.chars().take(400).collect());
-                bail!("provider returned {code}: {msg}")
+                return Err(provider_error(resp));
             }
             read_openai_sse(app, session, resp.reader)?
         };

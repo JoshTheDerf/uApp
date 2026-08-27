@@ -297,157 +297,51 @@ fn migrate_paths(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-/// Build a template .uapp from the live app: everything under `app/` (copied
-/// verbatim, still sqlar-compressed) + empty user tables (schema only) +
-/// config minus the API key. No user data: no `data/` files, no table rows, no
-/// chat, no file history, and a fresh app_id so the template is a new lineage.
-pub fn export_template(mem: &Connection, app_name: &str) -> Result<Vec<u8>> {
-    let tmp = std::env::temp_dir().join(format!(
-        "uapp-template-{}.uapp",
-        (0..10).map(|_| fastrand::alphanumeric()).collect::<String>()
-    ));
-    let build = (|| -> Result<()> {
-        let out = Connection::open(&tmp)?;
-        out.pragma_update(None, "journal_mode", "DELETE")?;
-        out.execute_batch(SCHEMA)?;
-        let app_id: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
-        out.execute(
-            "INSERT INTO uapp_meta(key,value) VALUES
-             ('app_id',?1),('name',?2),('format_version',?3),('created',?4)",
-            rusqlite::params![
-                app_id,
-                app_name,
-                FORMAT_VERSION.to_string(),
-                now_ms().to_string()
-            ],
-        )?;
-        // App files, stored form copied verbatim (compression preserved).
-        {
-            let mut sel = mem.prepare("SELECT name, mode, mtime, sz, data FROM sqlar")?;
-            let mut ins = out.prepare(
-                "INSERT INTO sqlar(name,mode,mtime,sz,data) VALUES(?1,?2,?3,?4,?5)",
-            )?;
-            let mut rows = sel.query([])?;
-            while let Some(row) = rows.next()? {
-                let name: String = row.get(0)?;
-                if file_role(&name) != "app" {
-                    continue;
-                }
-                ins.execute(rusqlite::params![
-                    name,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<Vec<u8>>>(4)?
-                ])?;
+/// Fill a fresh destination connection with an export of `mem`: a new app_id +
+/// meta, the sqlar files for the wanted roles, the user schema (with rows only
+/// when `include_rows`), and config minus secrets. The one body behind
+/// `export_template` (app files, tables emptied), `export_public` (+ rows, and
+/// `data/` when asked) and their wasm twin — they differ only in these two
+/// flags and in how the destination is opened.
+fn populate_export(
+    out: &Connection,
+    mem: &Connection,
+    app_name: &str,
+    include_data: bool,
+    include_rows: bool,
+) -> Result<()> {
+    out.execute_batch(SCHEMA)?;
+    let app_id: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
+    out.execute(
+        "INSERT INTO uapp_meta(key,value) VALUES
+         ('app_id',?1),('name',?2),('format_version',?3),('created',?4)",
+        rusqlite::params![app_id, app_name, FORMAT_VERSION.to_string(), now_ms().to_string()],
+    )?;
+    // Files: stored form copied verbatim (compression preserved). `data/` only
+    // when the caller opted in; app files always.
+    {
+        let mut sel = mem.prepare("SELECT name, mode, mtime, sz, data FROM sqlar")?;
+        let mut ins =
+            out.prepare("INSERT INTO sqlar(name,mode,mtime,sz,data) VALUES(?1,?2,?3,?4,?5)")?;
+        let mut rows = sel.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(0)?;
+            let role = file_role(&name);
+            if role != "app" && !(include_data && role == "data") {
+                continue;
             }
+            ins.execute(rusqlite::params![
+                name,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?
+            ])?;
         }
-        // User tables: schema only, no rows (tables first, then indexes etc.).
-        for phase in ["type = 'table'", "type != 'table'"] {
-            let mut sel = mem.prepare(&format!(
-                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND {phase}
-                 AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
-                 ORDER BY rowid"
-            ))?;
-            let mut rows = sel.query([])?;
-            while let Some(row) = rows.next()? {
-                let sql: String = row.get(0)?;
-                out.execute_batch(&sql)?;
-            }
-        }
-        // Config: everything except secrets — the ai entry is copied minus
-        // api_key so the template keeps the provider/model choice.
-        {
-            let mut sel = mem.prepare("SELECT key, value FROM uapp_config")?;
-            let mut rows = sel.query([])?;
-            while let Some(row) = rows.next()? {
-                let key: String = row.get(0)?;
-                let raw: String = row.get(1)?;
-                let value = if key == "ai" {
-                    let mut v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-                    if let Some(o) = v.as_object_mut() {
-                        o.remove("api_key");
-                    }
-                    if v.is_null() {
-                        continue;
-                    }
-                    v.to_string()
-                } else {
-                    raw
-                };
-                out.execute(
-                    "INSERT INTO uapp_config(key,value) VALUES(?1,?2)",
-                    rusqlite::params![key, value],
-                )?;
-            }
-        }
-        out.pragma_update(None, "synchronous", "FULL")?;
-        drop(out);
-        Ok(())
-    })();
-    let bytes = build.and_then(|_| Ok(std::fs::read(&tmp)?));
-    let _ = std::fs::remove_file(&tmp);
-    bytes
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-/// Export the copy a hosted site hands to a visitor's browser.
-///
-/// Sits between `export_template` (app files, tables emptied) and a raw copy of
-/// the file. A hosted site's own SQL machinery — post index, tags, whatever the
-/// build pipeline reads — is useless without its rows, so user tables are copied
-/// WITH their data. Chat, sessions, file history and config secrets never leave.
-///
-/// `include_data` also ships `data/` — the markdown/asset SOURCES a site's build
-/// pipeline reads, so a visitor can re-run that pipeline in their browser.
-/// Everything in the result is world-readable by definition: this archive is
-/// downloaded by anyone who visits. Off unless the caller opts in.
-pub fn export_public(mem: &Connection, app_name: &str, include_data: bool) -> Result<Vec<u8>> {
-    let tmp = std::env::temp_dir().join(format!(
-        "uapp-public-{}.uapp",
-        (0..10).map(|_| fastrand::alphanumeric()).collect::<String>()
-    ));
-    let build = (|| -> Result<()> {
-        let out = Connection::open(&tmp)?;
-        out.pragma_update(None, "journal_mode", "DELETE")?;
-        out.execute_batch(SCHEMA)?;
-        let app_id: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
-        out.execute(
-            "INSERT INTO uapp_meta(key,value) VALUES
-             ('app_id',?1),('name',?2),('format_version',?3),('created',?4)",
-            rusqlite::params![
-                app_id,
-                app_name,
-                FORMAT_VERSION.to_string(),
-                now_ms().to_string()
-            ],
-        )?;
-        // Stored form copied verbatim (compression preserved). `data/` rides
-        // along only when the caller asked for it — see the doc comment.
-        {
-            let mut sel = mem.prepare("SELECT name, mode, mtime, sz, data FROM sqlar")?;
-            let mut ins = out.prepare(
-                "INSERT INTO sqlar(name,mode,mtime,sz,data) VALUES(?1,?2,?3,?4,?5)",
-            )?;
-            let mut rows = sel.query([])?;
-            while let Some(row) = rows.next()? {
-                let name: String = row.get(0)?;
-                let role = file_role(&name);
-                if role != "app" && !(include_data && role == "data") {
-                    continue;
-                }
-                ins.execute(rusqlite::params![
-                    name,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<Vec<u8>>>(4)?
-                ])?;
-            }
-        }
-        // User tables: create them, fill them, and only then add indexes and
-        // triggers — a trigger created first would fire on the copied rows.
+    }
+    if include_rows {
+        // Create the tables, fill them, and only THEN add indexes and triggers
+        // — a trigger created first would fire on the copied rows.
         let mut tables: Vec<String> = Vec::new();
         {
             let mut sel = mem.prepare(
@@ -480,46 +374,97 @@ pub fn export_public(mem: &Connection, app_name: &str, include_data: bool) -> Re
                 ins.execute(rusqlite::params_from_iter(vals.iter()))?;
             }
         }
-        {
-            let mut sel = mem.prepare(
-                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type != 'table'
+        let mut sel = mem.prepare(
+            "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type != 'table'
+             AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
+             ORDER BY rowid",
+        )?;
+        let mut rows = sel.query([])?;
+        while let Some(row) = rows.next()? {
+            let sql: String = row.get(0)?;
+            out.execute_batch(&sql)?;
+        }
+    } else {
+        // Schema only, no rows (tables first, then indexes/triggers).
+        for phase in ["type = 'table'", "type != 'table'"] {
+            let mut sel = mem.prepare(&format!(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND {phase}
                  AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
-                 ORDER BY rowid",
-            )?;
+                 ORDER BY rowid"
+            ))?;
             let mut rows = sel.query([])?;
             while let Some(row) = rows.next()? {
                 let sql: String = row.get(0)?;
                 out.execute_batch(&sql)?;
             }
         }
-        // Config: everything except secrets — the ai entry keeps the
-        // provider/model choice, minus the key.
-        {
-            let mut sel = mem.prepare("SELECT key, value FROM uapp_config")?;
-            let mut rows = sel.query([])?;
-            while let Some(row) = rows.next()? {
-                let key: String = row.get(0)?;
-                let raw: String = row.get(1)?;
-                let value = if key == "ai" {
-                    let mut v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-                    if let Some(o) = v.as_object_mut() {
-                        o.remove("api_key");
-                    }
-                    if v.is_null() {
-                        continue;
-                    }
-                    v.to_string()
-                } else {
-                    raw
-                };
-                out.execute(
-                    "INSERT INTO uapp_config(key,value) VALUES(?1,?2)",
-                    rusqlite::params![key, value],
-                )?;
+    }
+    // Config: everything except secrets — the `ai` entry keeps the
+    // provider/model choice, minus api_key.
+    let mut sel = mem.prepare("SELECT key, value FROM uapp_config")?;
+    let mut rows = sel.query([])?;
+    while let Some(row) = rows.next()? {
+        let key: String = row.get(0)?;
+        let raw: String = row.get(1)?;
+        let value = if key == "ai" {
+            let mut v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+            if let Some(o) = v.as_object_mut() {
+                o.remove("api_key");
             }
-        }
+            if v.is_null() {
+                continue;
+            }
+            v.to_string()
+        } else {
+            raw
+        };
+        out.execute("INSERT INTO uapp_config(key,value) VALUES(?1,?2)", rusqlite::params![key, value])?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Build a template .uapp from the live app: `app/` files + empty user tables +
+/// config minus the API key, a fresh app_id — no data/, rows, chat or history.
+pub fn export_template(mem: &Connection, app_name: &str) -> Result<Vec<u8>> {
+    let tmp = std::env::temp_dir().join(format!(
+        "uapp-template-{}.uapp",
+        (0..10).map(|_| fastrand::alphanumeric()).collect::<String>()
+    ));
+    let build = (|| -> Result<()> {
+        let out = Connection::open(&tmp)?;
+        out.pragma_update(None, "journal_mode", "DELETE")?;
+        populate_export(&out, mem, app_name, false, false)?;
         out.pragma_update(None, "synchronous", "FULL")?;
-        drop(out);
+        Ok(())
+    })();
+    let bytes = build.and_then(|_| Ok(std::fs::read(&tmp)?));
+    let _ = std::fs::remove_file(&tmp);
+    bytes
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Export the copy a hosted site hands to a visitor's browser.
+///
+/// Sits between `export_template` (app files, tables emptied) and a raw copy of
+/// the file. A hosted site's own SQL machinery — post index, tags, whatever the
+/// build pipeline reads — is useless without its rows, so user tables are copied
+/// WITH their data. Chat, sessions, file history and config secrets never leave.
+///
+/// `include_data` also ships `data/` — the markdown/asset SOURCES a site's build
+/// pipeline reads, so a visitor can re-run that pipeline in their browser.
+/// Everything in the result is world-readable by definition: this archive is
+/// downloaded by anyone who visits. Off unless the caller opts in.
+pub fn export_public(mem: &Connection, app_name: &str, include_data: bool) -> Result<Vec<u8>> {
+    let tmp = std::env::temp_dir().join(format!(
+        "uapp-public-{}.uapp",
+        (0..10).map(|_| fastrand::alphanumeric()).collect::<String>()
+    ));
+    let build = (|| -> Result<()> {
+        let out = Connection::open(&tmp)?;
+        out.pragma_update(None, "journal_mode", "DELETE")?;
+        populate_export(&out, mem, app_name, include_data, true)?;
+        out.pragma_update(None, "synchronous", "FULL")?;
         Ok(())
     })();
     let bytes = build.and_then(|_| Ok(std::fs::read(&tmp)?));
@@ -1177,71 +1122,7 @@ pub fn export_full(db: &Connection, _key: Option<&str>) -> Result<Vec<u8>> {
 #[cfg(target_arch = "wasm32")]
 pub fn export_template(mem: &Connection, app_name: &str) -> Result<Vec<u8>> {
     let out = Connection::open_in_memory()?;
-    out.execute_batch(SCHEMA)?;
-    let app_id: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
-    out.execute(
-        "INSERT INTO uapp_meta(key,value) VALUES
-         ('app_id',?1),('name',?2),('format_version',?3),('created',?4)",
-        rusqlite::params![app_id, app_name, FORMAT_VERSION.to_string(), now_ms().to_string()],
-    )?;
-    // App files, stored form copied verbatim (compression preserved).
-    {
-        let mut sel = mem.prepare("SELECT name, mode, mtime, sz, data FROM sqlar")?;
-        let mut ins =
-            out.prepare("INSERT INTO sqlar(name,mode,mtime,sz,data) VALUES(?1,?2,?3,?4,?5)")?;
-        let mut rows = sel.query([])?;
-        while let Some(row) = rows.next()? {
-            let name: String = row.get(0)?;
-            if file_role(&name) != "app" {
-                continue;
-            }
-            ins.execute(rusqlite::params![
-                name,
-                row.get::<_, Option<i64>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<Vec<u8>>>(4)?
-            ])?;
-        }
-    }
-    // User tables: schema only, no rows (tables first, then indexes etc.).
-    for phase in ["type = 'table'", "type != 'table'"] {
-        let mut sel = mem.prepare(&format!(
-            "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND {phase}
-             AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
-             ORDER BY rowid"
-        ))?;
-        let mut rows = sel.query([])?;
-        while let Some(row) = rows.next()? {
-            let sql: String = row.get(0)?;
-            out.execute_batch(&sql)?;
-        }
-    }
-    // Config: everything except secrets.
-    {
-        let mut sel = mem.prepare("SELECT key, value FROM uapp_config")?;
-        let mut rows = sel.query([])?;
-        while let Some(row) = rows.next()? {
-            let key: String = row.get(0)?;
-            let raw: String = row.get(1)?;
-            let value = if key == "ai" {
-                let mut v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-                if let Some(o) = v.as_object_mut() {
-                    o.remove("api_key");
-                }
-                if v.is_null() {
-                    continue;
-                }
-                v.to_string()
-            } else {
-                raw
-            };
-            out.execute(
-                "INSERT INTO uapp_config(key,value) VALUES(?1,?2)",
-                rusqlite::params![key, value],
-            )?;
-        }
-    }
+    populate_export(&out, mem, app_name, false, false)?;
     serialize_conn(&out)
 }
 

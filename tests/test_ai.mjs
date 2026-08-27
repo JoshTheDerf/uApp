@@ -217,7 +217,12 @@ await A.rpc("config.set", { key: "ai", value: { provider: "anthropic", api_key: 
   const req = anthCalls[1];
   ok(req && req.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === "tool_result" && b.tool_use_id === "a1")),
      "tool_result threaded back in Anthropic format");
-  ok(typeof req.system === "string" && req.system.includes("uapp"), "anthropic system prompt");
+  // Real Anthropic gets system as cacheable blocks: stable prompt (cached) + volatile tail.
+  ok(Array.isArray(req.system) && req.system[0].text.includes("uapp")
+     && req.system[0].cache_control && req.system.map((b) => b.text).join("").includes("CURRENT APP FILES"),
+     "anthropic system prompt sent as cached blocks");
+  ok(req.tools.at(-1).cache_control && req.messages.at(-1).content.at(-1).cache_control,
+     "cache_control on the last tool and last message");
   const hist = await A.rpc("files.history", { name: "index.html" });
   ok(hist.rows.length >= 1, "AI file write recorded in history (rollback available)");
   const stream = A.aiEvents.filter((e) => e.state === "streaming");

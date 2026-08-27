@@ -174,13 +174,34 @@ pub fn serve_opts(
         Err(e) => {
             // Locked (or a race): another instance has this file open — hand
             // the caller its window instead.
-            if let Some((url, port)) = reusable_server(&path) {
-                if let Some(or) = on_ready.take() {
-                    or(&url, port, true);
+            let reuse = reusable_server(&path);
+            if let Some(or) = on_ready.take() {
+                // The caller hasn't been pointed anywhere yet: give it the
+                // running server's URL, or surface the error.
+                match &reuse {
+                    Some((url, port)) => {
+                        or(url, *port, true);
+                        return Ok(());
+                    }
+                    None => return Err(e).with_context(|| format!("opening {}", path.display())),
                 }
-                return Ok(());
             }
-            return Err(e).with_context(|| format!("opening {}", path.display()));
+            // on_ready already fired (the unlock page pointed the tab HERE) and
+            // we can no longer serve on this socket: answer the waiting tab
+            // with a redirect to the running server, or a readable error —
+            // never a bare "connection refused".
+            let (redirect, message) = match &reuse {
+                Some((url, _)) => (Some(url.clone()), String::new()),
+                None => (
+                    None,
+                    format!(
+                        "<!doctype html><meta charset=utf-8><title>Couldn't open</title>                         <body style=\"font:15px system-ui;margin:3em;color:#333\">                         <h1>Couldn't open this app</h1><p>{}</p>",
+                        e
+                    ),
+                ),
+            };
+            rt.block_on(server::run_notice(&listener, redirect, &message));
+            return Ok(());
         }
     };
     let app = Arc::new(app::App::new(eng, token.clone(), unsaved));

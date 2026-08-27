@@ -743,6 +743,40 @@ pub async fn run_unlock(
     }
 }
 
+/// Answer every request on this already-bound listener with one fixed response
+/// for up to `secs` seconds, then return. Used when the browser/native window
+/// was already pointed at this port (the unlock page fired) but the app can no
+/// longer be served here — e.g. another instance won the file between unlock
+/// and open. Without it the waiting tab's reload hits a closed socket
+/// ("connection refused") with no explanation.
+pub async fn run_notice(listener: &tokio::net::TcpListener, redirect_to: Option<String>, message: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return,
+            accepted = listener.accept() => {
+                let Ok((mut stream, _)) = accepted else { return };
+                let redirect = redirect_to.clone();
+                let body = message.to_string();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let head = match &redirect {
+                        Some(url) => format!(
+                            "HTTP/1.1 302 Found\r\nlocation: {url}\r\ncache-control: no-store\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
+                        ),
+                        None => format!(
+                            "HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/html; charset=utf-8\r\ncache-control: no-store\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                            body.len(), body
+                        ),
+                    };
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        }
+    }
+}
+
 /// One unlock connection: GET anything → the password page; POST /unlock →
 /// verify. On success, reply then hand the password to `run_unlock` via `tx`.
 async fn handle_unlock_conn(

@@ -89,7 +89,9 @@ console.log("plan mode");
     ok(!names.includes(w), `${w} withheld in plan mode`);
   }
   // 2) The system prompt announces the mode.
-  ok(String(calls[0].system || "").includes("PLAN MODE"), "system prompt carries PLAN MODE");
+  const sys0 = calls[0].system;
+  const sysText = Array.isArray(sys0) ? sys0.map((b) => b.text).join("") : String(sys0 || "");
+  ok(sysText.includes("PLAN MODE"), "system prompt carries PLAN MODE");
   // 3) The hallucinated write was refused at runtime and nothing changed.
   const toolRows = done.rows.filter((x) => x[4] === "tool");
   const resTxt = JSON.stringify(toolRows.map((x) => x[5]));
