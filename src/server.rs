@@ -1,8 +1,9 @@
 //! HTTP + WebSocket server for one open .uapp — the one router, in two modes.
 //!
 //! Private (the desktop app, `uapp open`): binds 127.0.0.1 with a per-session
-//! token; EVERY route checks it (`authed`), and a request with a non-loopback
-//! Host is refused (DNS rebinding).
+//! token; every route requires it — through the [`Owner`] / [`Visitor`]
+//! extractors, never a handler-local check — and a request with a
+//! non-loopback Host is refused (DNS rebinding).
 //!
 //! Public (`uapp serve`, `App::public` set): the same router faces the world
 //! as a website. Unauthenticated requests get exactly three things — the
@@ -87,16 +88,20 @@ fn hostname_of(hostport: &str) -> &str {
         .unwrap_or_else(|| hostport.split(':').next().unwrap_or(hostport))
 }
 
-fn authed(app: &App, headers: &HeaderMap, q: &HashMap<String, String>) -> bool {
-    // The loopback check guards a 127.0.0.1 bind against DNS rebinding; a
-    // public site is reached through its real hostname (behind a proxy).
+/// Does this request carry the token (`?t=`, the cookie, or `Authorization:
+/// Bearer`)? In private mode a non-loopback Host fails outright (DNS rebinding).
+fn authed(app: &App, headers: &HeaderMap, query: Option<&str>) -> bool {
     if app.public.is_none() && !host_is_local(headers) {
         return false;
     }
     if app.token.is_empty() {
         return false;
     }
-    if q.get("t").map(|t| t == &app.token).unwrap_or(false) {
+    let q_token = query
+        .unwrap_or("")
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("t="));
+    if q_token == Some(app.token.as_str()) {
         return true;
     }
     if headers
@@ -116,6 +121,49 @@ fn authed(app: &App, headers: &HeaderMap, q: &HashMap<String, String>) -> bool {
         .unwrap_or(false)
 }
 
+/// Who is asking — decided ONCE per request, by these two extractors, so no
+/// handler carries its own token check or its own "but in public mode…".
+///
+/// [`Owner`] is for routes that exist only for the token holder (shell, ws,
+/// downloads, upload, scratchpad, publish): without the token the request is
+/// refused with 403, in either mode. [`Visitor`] is for the page routes,
+/// where an anonymous request on a public site is a legitimate reader and gets
+/// the site's page for that URL; in private mode it is again a 403.
+pub struct Owner;
+
+pub enum Visitor {
+    /// Holds the token: the shell, the raw archive, everything.
+    Owner,
+    /// Anonymous reader of a public site.
+    Reader,
+}
+
+#[axum::async_trait]
+impl axum::extract::FromRequestParts<Arc<App>> for Owner {
+    type Rejection = Response;
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, app: &Arc<App>) -> Result<Self, Response> {
+        if authed(app, &parts.headers, parts.uri.query()) {
+            Ok(Owner)
+        } else {
+            Err(deny())
+        }
+    }
+}
+
+#[axum::async_trait]
+impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
+    type Rejection = Response;
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, app: &Arc<App>) -> Result<Self, Response> {
+        if authed(app, &parts.headers, parts.uri.query()) {
+            Ok(Visitor::Owner)
+        } else if app.public.is_some() {
+            Ok(Visitor::Reader)
+        } else {
+            Err(deny())
+        }
+    }
+}
+
 fn deny() -> Response {
     (StatusCode::FORBIDDEN, "uapp: missing or bad token").into_response()
 }
@@ -131,17 +179,10 @@ fn html_escape(s: &str) -> String {
     }).collect()
 }
 
-async fn shell(
-    State(app): State<Arc<App>>,
-    Query(q): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> Response {
-    if !authed(&app, &headers, &q) {
-        // A public site's front page is the site, not the shell.
-        if app.public.is_some() {
-            return public_page(&app, "/", &headers);
-        }
-        return deny();
+async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) -> Response {
+    // A public site's front page is the site, not the shell.
+    if let Visitor::Reader = who {
+        return public_page(&app, "/", &headers);
     }
     // A root-absolute `href="/"` followed INSIDE the app frame means the app's
     // front page, not a second shell nested in the first. WebViews and
@@ -341,17 +382,14 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
 async fn app_file(
     State(app): State<Arc<App>>,
     AxPath(path): AxPath<String>,
-    Query(q): Query<HashMap<String, String>>,
+    who: Visitor,
     headers: HeaderMap,
 ) -> Response {
-    if !authed(&app, &headers, &q) {
-        // The editing chrome's service worker normally answers /app/* from
-        // the visitor's own copy; when it isn't in control, the server's
-        // pages are the right fallback.
-        if app.public.is_some() {
-            return public_page(&app, &format!("/{path}"), &headers);
-        }
-        return deny();
+    // The editing chrome's service worker normally answers /app/* from the
+    // visitor's own copy; when it isn't in control, the server's pages are
+    // the right fallback.
+    if let Visitor::Reader = who {
+        return public_page(&app, &format!("/{path}"), &headers);
     }
     let name = if path.is_empty() { "index.html".to_string() } else { path };
     serve_sqlar(&app, &name, &headers)
@@ -433,7 +471,7 @@ fn percent_decode(s: &str) -> String {
 /// are registered explicitly and always win.
 async fn root_file(
     State(app): State<Arc<App>>,
-    Query(q): Query<HashMap<String, String>>,
+    who: Visitor,
     headers: HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
@@ -459,11 +497,8 @@ async fn root_file(
                 .into_response();
         }
     }
-    if !authed(&app, &headers, &q) {
-        if app.public.is_some() {
-            return public_page(&app, &path, &headers);
-        }
-        return deny();
+    if let Visitor::Reader = who {
+        return public_page(&app, &path, &headers);
     }
     let name = path.trim_start_matches('/');
     if name.is_empty() {
@@ -472,29 +507,20 @@ async fn root_file(
     serve_sqlar(&app, name, &headers)
 }
 
-async fn app_root(
-    state: State<Arc<App>>,
-    q: Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> Response {
-    app_file(state, AxPath(String::new()), q, headers).await
+async fn app_root(state: State<Arc<App>>, who: Visitor, headers: HeaderMap) -> Response {
+    app_file(state, AxPath(String::new()), who, headers).await
 }
 
-async fn health() -> &'static str {
-    "ok"
+/// Liveness probe. The version header lets `uapp open` tell when the server
+/// it is about to reuse for this file is an older build than itself.
+async fn health() -> Response {
+    ([("x-uapp-version", env!("CARGO_PKG_VERSION"))], "ok").into_response()
 }
 
 /// Download this app as a template: app-role files + empty tables, no user
 /// data, no chat, no API key, fresh app_id. Served as an attachment so the
 /// shell button just navigates here.
-async fn template_download(
-    State(app): State<Arc<App>>,
-    Query(q): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> Response {
-    if !authed(&app, &headers, &q) {
-        return deny();
-    }
+async fn template_download(State(app): State<Arc<App>>, _who: Owner) -> Response {
     let result = {
         let eng = app.engine.lock().unwrap();
         let name = crate::store::meta_get(&eng.db, "name")
@@ -526,14 +552,7 @@ async fn template_download(
 
 /// Download the CURRENT app as a complete .uapp (all data included). Used to
 /// save a scratch/unsaved app, but works for any app.
-async fn app_download(
-    State(app): State<Arc<App>>,
-    Query(q): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> Response {
-    if !authed(&app, &headers, &q) {
-        return deny();
-    }
+async fn app_download(State(app): State<Arc<App>>, _who: Owner) -> Response {
     let result = {
         let eng = app.engine.lock().unwrap();
         let name = crate::store::meta_get(&eng.db, "name")
@@ -572,14 +591,7 @@ async fn app_download(
 /// The shell requests this only when a run_js scratchpad call needs it (see
 /// `invoke_eval` and main.js), so it is not fetched at all in a session that
 /// never uses the tool.
-async fn scratch_page(
-    State(app): State<Arc<App>>,
-    Query(q): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> Response {
-    if !authed(&app, &headers, &q) {
-        return deny();
-    }
+async fn scratch_page(_who: Owner) -> Response {
     let mut resp = Html(SCRATCH_HTML).into_response();
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -588,7 +600,7 @@ async fn scratch_page(
 
 async fn ws_route(
     State(app): State<Arc<App>>,
-    Query(q): Query<HashMap<String, String>>,
+    _who: Owner,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -598,9 +610,6 @@ async fn ws_route(
     let ws = ws
         .max_message_size(crate::rpc::MAX_UPLOAD_B64 + 4 * 1024 * 1024)
         .max_frame_size(crate::rpc::MAX_UPLOAD_B64 + 4 * 1024 * 1024);
-    if !authed(&app, &headers, &q) {
-        return deny();
-    }
     // Cross-origin WebSocket connects aren't blocked by the same-origin policy,
     // so reject any Origin that isn't our own loopback (defense in depth on top
     // of the token). A missing Origin is a non-browser client (native webview,
@@ -895,13 +904,10 @@ f.addEventListener('submit',async(e)=>{
 /// the File object straight up, and the base64 the op log needs is built here.
 async fn upload_file(
     State(app): State<Arc<App>>,
+    _who: Owner,
     Query(q): Query<HashMap<String, String>>,
-    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if !authed(&app, &headers, &q) {
-        return deny();
-    }
     let Some(name) = q.get("name").map(|s| s.trim()).filter(|s| !s.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "upload needs ?name=").into_response();
     };
@@ -1218,7 +1224,6 @@ fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
 
 /// When the site's content last changed (unix seconds); a HEAD is enough to
 /// read it. The editing chrome compares it with the copy it downloaded.
-const MODIFIED_HEADER: header::HeaderName = header::HeaderName::from_static("x-uapp-modified");
 
 /// The current `/site.uapp`, rebuilt only when something was written since.
 fn current_archive(app: &App) -> anyhow::Result<Arc<crate::app::PublicArchive>> {
@@ -1232,11 +1237,7 @@ fn current_archive(app: &App) -> anyhow::Result<Arc<crate::app::PublicArchive>> 
     }
     let name = crate::store::meta_get(&eng.db, "name").ok().flatten().unwrap_or_else(|| "site".into());
     let bytes = crate::store::export_public(&eng.db, &name, opts.export_data)?;
-    let modified: i64 = eng
-        .db
-        .query_row("SELECT coalesce(max(mtime), 0) FROM sqlar", [], |r| r.get(0))
-        .unwrap_or(0);
-    let arc = Arc::new(crate::app::PublicArchive { etag: etag_for(&bytes), bytes, modified });
+    let arc = Arc::new(crate::app::PublicArchive { etag: etag_for(&bytes), bytes });
     *cache = Some((eng.writes, arc.clone()));
     Ok(arc)
 }
@@ -1261,7 +1262,7 @@ async fn site_archive(State(app): State<Arc<App>>, headers: HeaderMap) -> Respon
     if if_none_match(&headers, &arc.etag) {
         return (
             StatusCode::NOT_MODIFIED,
-            [(header::ETAG, arc.etag.clone()), (MODIFIED_HEADER, arc.modified.to_string())],
+            [(header::ETAG, arc.etag.clone())],
         )
             .into_response();
     }
@@ -1273,7 +1274,6 @@ async fn site_archive(State(app): State<Arc<App>>, headers: HeaderMap) -> Respon
             // every full load and must see the current copy; a 304 keeps
             // that cheap.
             (header::CACHE_CONTROL, "public, max-age=0, must-revalidate".to_string()),
-            (MODIFIED_HEADER, arc.modified.to_string()),
         ],
         arc.bytes.clone(),
     )
@@ -1288,16 +1288,13 @@ async fn site_archive(State(app): State<Arc<App>>, headers: HeaderMap) -> Respon
 /// then shows "server copy is newer" instead of silently losing that.
 async fn site_publish(
     State(app): State<Arc<App>>,
-    Query(q): Query<HashMap<String, String>>,
+    _who: Owner,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let Some(opts) = app.public else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    if !authed(&app, &headers, &q) {
-        return deny();
-    }
     if body.len() > crate::rpc::MAX_UPLOAD_BYTES {
         return (StatusCode::PAYLOAD_TOO_LARGE, "archive too large").into_response();
     }
@@ -1312,7 +1309,7 @@ async fn site_publish(
             if want.split(',').all(|t| t.trim() != cur.etag && t.trim() != "*") {
                 return Err((
                     StatusCode::CONFLICT,
-                    [(header::ETAG, cur.etag.clone()), (MODIFIED_HEADER, cur.modified.to_string())],
+                    [(header::ETAG, cur.etag.clone())],
                     axum::Json(json!({"error": "the site changed since this copy was downloaded", "etag": cur.etag})),
                 )
                     .into_response());
@@ -1326,14 +1323,13 @@ async fn site_publish(
         let result = crate::rpc::local_op(&app, "publish", json!({"b64": b64, "data": opts.export_data}))
             .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, format!("publish failed: {e:#}")))?;
         let arc = current_archive(&app).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
-        Ok(json!({"ok": true, "result": result, "etag": arc.etag, "modified": arc.modified}))
+        Ok(json!({"ok": true, "result": result, "etag": arc.etag}))
     })
     .await;
     match done {
         Ok(Ok(v)) => {
             let etag = v["etag"].as_str().unwrap_or("").to_string();
-            let modified = v["modified"].to_string();
-            ([(header::ETAG, etag), (MODIFIED_HEADER, modified)], axum::Json(v)).into_response()
+            ([(header::ETAG, etag)], axum::Json(v)).into_response()
         }
         Ok(Err(resp)) => resp,
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("publish failed: {e}")).into_response(),

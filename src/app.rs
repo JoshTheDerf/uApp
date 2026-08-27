@@ -144,8 +144,10 @@ pub struct Chrome {
 /// One built `/site.uapp`: bytes, ETag, newest sqlar mtime (unix seconds).
 pub struct PublicArchive {
     pub bytes: Vec<u8>,
+    /// The one identity of a served site version: what `/site.uapp` returns
+    /// as ETag, what a publish sends back as If-Match, and what the browser
+    /// copy remembers to know whether the server has moved on.
     pub etag: String,
-    pub modified: i64,
 }
 
 /// A dropped template .uapp held between "here's what this would change" and

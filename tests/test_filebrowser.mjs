@@ -39,6 +39,7 @@ class Instance {
       this.proc.on("exit", (c) => { clearTimeout(t); reject(new Error(`${this.device} exited ${c}: ${this.stderr}`)); });
     });
     const info = JSON.parse(line);
+if (info.reused) { console.error("FAIL: a uapp-server from an earlier run still has the test file open (old code!) — pkill -x uapp-server"); process.exit(2); }
     this.port = info.port;
     this.token = new URL(info.url).searchParams.get("t");
     await this.connect();

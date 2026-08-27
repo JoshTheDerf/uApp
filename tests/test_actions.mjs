@@ -62,6 +62,7 @@ const proc = spawn(BIN, ["open", `${DIR}/a.uapp`, "--headless"], {
 });
 const line = await new Promise((res) => { let b = ""; proc.stdout.on("data", (d) => { b += d; const i = b.indexOf("\n"); if (i >= 0) res(b.slice(0, i)); }); });
 const info = JSON.parse(line);
+if (info.reused) { console.error("FAIL: a uapp-server from an earlier run still has the test file open (old code!) — pkill -x uapp-server"); process.exit(2); }
 const token = new URL(info.url).searchParams.get("t");
 
 const shell = await new Client(info.port, token).connect(); // plays the shell

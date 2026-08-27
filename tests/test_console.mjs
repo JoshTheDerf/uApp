@@ -23,6 +23,7 @@ const line = await new Promise((res, rej) => {
   proc.stdout.on("data", (d) => { b += d; const i = b.indexOf("\n"); if (i >= 0) { clearTimeout(t); res(b.slice(0, i)); } });
 });
 const info = JSON.parse(line);
+if (info.reused) { console.error("FAIL: a uapp-server from an earlier run still has the test file open (old code!) — pkill -x uapp-server"); process.exit(2); }
 const TOKEN = new URL(info.url).searchParams.get("t");
 
 function client(context) {

@@ -223,10 +223,10 @@
   // The copy in this tab was downloaded once; the server's may move on (a
   // deploy, an edit from elsewhere). Only THAT case gets a pill — local edits
   // on top of a current server copy are just the reader working, nothing to
-  // nag about. The stamp is the server's x-uapp-modified (newest file in the
-  // archive), read with a HEAD; the baseline is the stamp at download time.
-  let serverBaseline = 0;     // server stamp when this copy was downloaded
-  let serverNow = 0;          // latest stamp seen
+  // nag about. The identity is the /site.uapp ETag (read with a HEAD); the
+  // baseline is the ETag of the download this copy came from.
+  let serverBaseline = "";    // ETag of the copy this tab downloaded
+  let serverNow = "";         // latest ETag seen
   let localEditAt = 0;        // ms; last change made in this tab
   let pill = null;
   let publishing = false;
@@ -273,7 +273,7 @@
       const f = (r && r.result && r.result.files) || {};
       publishNote = "Published (" + (f.written || 0) + " changed, " + (f.removed || 0) + " removed)";
       localEditAt = 0;
-      serverBaseline = serverNow = (r && Number(r.modified)) || serverBaseline;
+      serverBaseline = serverNow = (r && r.etag) || serverBaseline;
       setTimeout(() => { publishNote = ""; renderPill(); }, 6000);
     } catch (e) {
       publishNote = "Publish failed: " + String((e && e.message) || e);
@@ -289,8 +289,8 @@
   async function serverStamp() {
     try {
       const r = await fetch("/site.uapp", { method: "HEAD", cache: "no-store" });
-      return Number(r.headers.get("x-uapp-modified")) || 0;
-    } catch { return 0; }
+      return r.headers.get("etag") || "";
+    } catch { return ""; }
   }
   function ago(ms) {
     const s = Math.max(0, Math.round(ms / 1000));
@@ -306,7 +306,7 @@
   function renderPill() {
     const bar = document.getElementById("topbar");
     if (!bar) return;
-    const stale = serverBaseline && serverNow > serverBaseline;
+    const stale = !!serverBaseline && !!serverNow && serverNow !== serverBaseline;
     const local = localEditAt > 0;
     if (!stale && !local && !publishNote) { if (pill) { pill.remove(); pill = null; } return; }
     if (!pill) {
@@ -337,7 +337,7 @@
     }
     if (stale) {
       const yours = local ? "your edits " + ago(Date.now() - localEditAt) : "your copy has no edits";
-      txt.textContent = "Server copy is newer (updated " + ago(Date.now() - serverNow * 1000) + "; " + yours + ")";
+      txt.textContent = "Server copy is newer (" + yours + ")";
       txt.title = "The site on the server changed after your copy was downloaded. Resetting discards the edits kept in this browser and reloads the server's version.";
       btn.textContent = "Reset to server copy";
       btn.style.cssText = "font:inherit;font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.6);background:rgba(255,255,255,.15);color:#fff;cursor:pointer";
@@ -377,7 +377,7 @@
     // copy's last save time is when "your edits" happened.
     const st = window.__uappSiteState;
     if (st) {
-      serverBaseline = st.baseline || 0;
+      serverBaseline = st.etag || "";
       if (st.hasLocal) localEditAt = st.localSavedAt || Date.now();
     }
     renderPill();

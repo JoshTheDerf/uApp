@@ -2,7 +2,7 @@
  * Provides the platform pieces the Rust core can't have on wasm: wall-clock
  * time, HTTP, event forwarding to the page, AI-run scheduling, and the
  * SharedArrayBuffer bridge that lets the worker ask the main thread for things
- * mid-AI-run (run_js, app actions, approvals, console reads).
+ * mid-AI-run (approvals and questions; page calls ride the RPC inbox).
  *
  * The core's AI loop is synchronous: it blocks this worker for a whole turn.
  * Everything it blocks ON goes through `blockUntil`, which — instead of a bare

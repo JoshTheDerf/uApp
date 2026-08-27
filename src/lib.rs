@@ -83,11 +83,21 @@ pub fn device_id() -> Result<String> {
 fn reusable_server(path: &Path) -> Option<(String, u16)> {
     let (port, token) = registry::read_addr(path)?;
     let url = format!("http://127.0.0.1:{port}/?t={token}");
-    let health = ureq::get(&format!("http://127.0.0.1:{port}/health"))
+    let Ok(resp) = ureq::get(&format!("http://127.0.0.1:{port}/health"))
         .timeout(std::time::Duration::from_millis(1500))
         .call()
-        .is_ok();
-    if !health {
+    else {
+        return None;
+    };
+    // A lingering server from an older build would otherwise be reused
+    // silently — a fresh `uapp open` after an upgrade must run the new code.
+    let theirs = resp.header("x-uapp-version").unwrap_or("");
+    if theirs != env!("CARGO_PKG_VERSION") {
+        eprintln!(
+            "uapp: a server of another version ({}) still has {} open — stop it (or wait for it to exit) so this build can open the file",
+            if theirs.is_empty() { "unknown" } else { theirs },
+            path.display()
+        );
         return None;
     }
     Some((url, port))

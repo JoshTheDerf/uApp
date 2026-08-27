@@ -674,10 +674,10 @@ let currentAppId = null;
 // Hosted-site mode (site-chrome.js): the visitor's edits to the site are kept
 // in this browser across reloads, under ONE stable id per origin — not in the
 // launcher index (that is the demo's app library, a different thing on the
-// same origin). `baseline` is the server's x-uapp-modified stamp of the copy
-// the edits were made on; the chrome compares it with the server's current
-// stamp. Reset = drop the saved copy and reload from the server.
-let siteState = null; // {id, baseline, etag, hasLocal, localSavedAt}
+// same origin). `etag` is the /site.uapp ETag of the copy the edits were made
+// on; the chrome compares it with the server's current one. Reset = drop the
+// saved copy and reload from the server.
+let siteState = null; // {id, etag, hasLocal, localSavedAt}
 const siteKey = (k) => "uapp.site." + k + ":" + siteState.id;
 function kvDel(key) { try { localStorage.removeItem(key); } catch {} memKV.delete(key); }
 window.__uappSiteReset = async () => {
@@ -686,7 +686,6 @@ window.__uappSiteReset = async () => {
   zombie = true; // no save may land after this
   try { await (await blobStore()).remove(siteState.id); } catch {}
   kvDel(siteKey("saved"));
-  kvDel(siteKey("baseline"));
   kvDel(siteKey("etag"));
   location.reload();
 };
@@ -696,7 +695,7 @@ window.__uappSiteReset = async () => {
 // along as If-Match, so a site that moved on since (another publish, a
 // deploy) answers 409 instead of being overwritten; `force` drops that check.
 // On success the server equals this copy, which therefore becomes the new
-// baseline for the sync pill. Resolves to the server's reply.
+// ETag baseline for the sync pill. Resolves to the server's reply.
 window.__uappSitePublish = async (token, { force = false } = {}) => {
   if (!siteState || !window.__uappSiteArchive) throw new Error("not a hosted site");
   await window.__uappFlushSave();
@@ -715,9 +714,7 @@ window.__uappSitePublish = async (token, { force = false } = {}) => {
     throw e;
   }
   siteState.etag = (json && json.etag) || resp.headers.get("etag") || "";
-  siteState.baseline = Number(json && json.modified) || siteState.baseline;
   kvSet(siteKey("etag"), siteState.etag);
-  kvSet(siteKey("baseline"), String(siteState.baseline));
   return json;
 };
 
@@ -1104,21 +1101,18 @@ if (tabChannel) {
       currentAppId = null;
       const site = window.__uappSiteArchive;
       if (site) {
-        siteState = { id: "site-" + location.host.replace(/[^a-z0-9.-]/gi, "_"), baseline: 0, etag: "", hasLocal: false, localSavedAt: 0 };
+        siteState = { id: "site-" + location.host.replace(/[^a-z0-9.-]/gi, "_"), etag: "", hasLocal: false, localSavedAt: 0 };
         const saved = await appRead(siteState.id);
         if (saved) {
           siteState.hasLocal = true;
           siteState.localSavedAt = Number(kvGet(siteKey("saved"))) || 0;
-          siteState.baseline = Number(kvGet(siteKey("baseline"))) || 0;
           siteState.etag = kvGet(siteKey("etag")) || "";
           info = await openApp(saved, window.__uappSiteName || "Site");
         } else {
           splashShow("Opening the editor…", "Downloading this site…");
           const r = await fetch(new URL(site, location.origin), { cache: "no-store" });
           if (!r.ok) throw new Error(`could not fetch this site (HTTP ${r.status})`);
-          siteState.baseline = Number(r.headers.get("x-uapp-modified")) || Math.floor(Date.now() / 1000);
           siteState.etag = r.headers.get("etag") || "";
-          kvSet(siteKey("baseline"), String(siteState.baseline));
           kvSet(siteKey("etag"), siteState.etag);
           info = await openApp(new Uint8Array(await r.arrayBuffer()), window.__uappSiteName || "Site");
         }
