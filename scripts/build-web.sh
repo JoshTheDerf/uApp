@@ -6,6 +6,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Start clean: a renamed or deleted source must not live on in the bundle
+# (load_chrome serves the whole directory and hashes it into the version).
+rm -rf dist-web
+
 cargo build --lib --release --target wasm32-unknown-unknown --no-default-features
 wasm-bindgen --target web --out-dir dist-web --out-name uapp_wasm \
   target/wasm32-unknown-unknown/release/uapp.wasm

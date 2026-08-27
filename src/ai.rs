@@ -284,8 +284,8 @@ Users can export this app as a TEMPLATE (everything under `app/` + empty tables 
 
 STYLE
 - Small-business users: friendly, concise, no jargon. Do the work rather than describing it.
-- After changing app files, call `reload_app` (it returns once the new page has loaded) and briefly say what changed.
-- Actions run the code the live page loaded at its LAST reload. If you edit a script the page uses and then call an app__* action or run_js in the "app" context, the OLD code runs until you reload_app first. Order: edit → reload_app → call the action → (if it wrote pages) reload_app again to show the result. Action tools wait a few seconds for a freshly reloaded page to register them.
+- After changing app files, call `reload_app` and briefly say what changed.
+- Actions run the code the live page loaded at its LAST reload. If you edit a script the page uses and then call an app__* action or run_js in the "app" context, the OLD code runs until you reload_app first. Order: edit → reload_app → call the action → (if it wrote pages) reload_app again to show the result.
 - When you produce or want to show the user a file in the archive, call present_file — it opens in their viewer immediately.
 - When a decision genuinely belongs to the user (destructive changes, ambiguous requirements, taste), call ask_user with concrete options instead of guessing or stalling.
 - For a big, self-contained side quest (research a format, audit every table, build one module) delegate it with agent_run: the sub-agent works in its own conversation and hands you back a report, keeping this conversation small.
@@ -838,20 +838,24 @@ fn trim_tool_results(msgs: &mut [(String, Vec<Value>)]) {
 /// under the cap. Used when compaction can't help (the history is already one
 /// summary plus a huge tail), so a run degrades instead of failing.
 fn hard_trim(msgs: &mut Vec<(String, Vec<Value>)>, cap: usize) {
-    let size = |m: &Vec<(String, Vec<Value>)>| {
-        m.iter().map(|(_, b)| json!(b).to_string().len()).sum::<usize>()
-    };
-    while msgs.len() > 2 && size(msgs) > cap {
+    // Sizes once, then a running total — re-serializing the whole history per
+    // removed message made this quadratic on long conversations.
+    let mut total: usize = msgs.iter().map(|(_, b)| json!(b).to_string().len()).sum();
+    while msgs.len() > 2 && total > cap {
+        total -= json!(msgs[0].1).to_string().len();
         msgs.remove(0);
         // The head must be a user turn with no orphaned tool_results: an
         // assistant-first payload and a tool_result without its tool_use are
         // both provider errors.
         while msgs.len() > 2 {
             if msgs[0].0 != "user" {
+                total -= json!(msgs[0].1).to_string().len();
                 msgs.remove(0);
                 continue;
             }
+            let before = json!(msgs[0].1).to_string().len();
             msgs[0].1.retain(|b| b["type"] != "tool_result");
+            total = total.saturating_sub(before) + json!(msgs[0].1).to_string().len();
             if msgs[0].1.is_empty() {
                 msgs.remove(0);
                 continue;
@@ -910,6 +914,55 @@ fn read_b64(app: &Arc<App>, name: &str) -> Option<String> {
 // ---- provider calls ----------------------------------------------------------
 
 /// Returns assistant blocks in neutral form.
+/// Parse a tool call's argument JSON as the provider sent it. A stream cut
+/// off mid-arguments (or a model emitting junk) must NOT turn into a call with
+/// empty arguments — `write_file {}` is far worse than no call — so the
+/// unparsable text is kept under `_invalid` and the loop reports it instead
+/// of running the tool.
+fn tool_input(raw: &str) -> Value {
+    if raw.trim().is_empty() {
+        return json!({});
+    }
+    match serde_json::from_str::<Value>(raw) {
+        Ok(v) if v.is_object() => v,
+        _ => json!({"_invalid": raw}),
+    }
+}
+
+/// Retry transient provider failures (rate limits, 5xx, dropped
+/// connections) with a short backoff before giving up on the turn; a stop
+/// request ends the wait early.
+fn call_provider_retrying(
+    app: &Arc<App>,
+    ctx: &RunCtx,
+    cfg: &AiConfig,
+    system: &str,
+    msgs: &[(String, Vec<Value>)],
+    tools: &[Value],
+) -> Result<Vec<Value>> {
+    const DELAYS_MS: [u64; 3] = [1_000, 4_000, 12_000];
+    let mut attempt = 0;
+    loop {
+        match call_provider(app, &ctx.session, cfg, system, msgs, tools) {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                let msg = e.to_string();
+                let transient = msg.starts_with("provider request failed")
+                    || ["provider returned 408", "provider returned 429", "provider returned 5"]
+                        .iter()
+                        .any(|p| msg.starts_with(p));
+                if !transient || attempt >= DELAYS_MS.len() || ctx.stopped() {
+                    return Err(e);
+                }
+                app.notify("ai", json!({"state": "retry", "session": ctx.session,
+                    "message": format!("{msg} — retrying in {}s", DELAYS_MS[attempt] / 1000)}));
+                let _ = app.wait_until(DELAYS_MS[attempt], 250, || ctx.stopped());
+                attempt += 1;
+            }
+        }
+    }
+}
+
 fn call_provider(
     app: &Arc<App>,
     session: &str,
@@ -1090,7 +1143,7 @@ fn read_anthropic_sse(
                 let input = if b.json.trim().is_empty() {
                     if b.start_input.is_object() { b.start_input } else { json!({}) }
                 } else {
-                    serde_json::from_str(&b.json).unwrap_or(json!({}))
+                    tool_input(&b.json)
                 };
                 out.push(json!({"type": "tool_use", "id": b.id, "name": b.name, "input": input}));
             }
@@ -1355,8 +1408,7 @@ fn read_openai_sse(
         out.push(json!({"type": "text", "text": text}));
     }
     for (i, c) in calls {
-        let args: Value = serde_json::from_str(if c.args.trim().is_empty() { "{}" } else { &c.args })
-            .unwrap_or(json!({}));
+        let args = tool_input(&c.args);
         // A tool call needs an id for the follow-up tool_result to reference;
         // synthesize a stable one if the server omitted it.
         let id = if c.id.is_empty() { format!("call_{i}") } else { c.id };
@@ -1486,8 +1538,7 @@ fn call_openai_compat(
                 }
             }
             for tc in m["tool_calls"].as_array().cloned().unwrap_or_default() {
-                let args: Value = serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}"))
-                    .unwrap_or(json!({}));
+                let args = tool_input(tc["function"]["arguments"].as_str().unwrap_or(""));
                 out.push(json!({"type": "tool_use", "id": tc["id"],
                     "name": tc["function"]["name"], "input": args}));
             }
@@ -1661,9 +1712,7 @@ fn call_openai_responses(
                 }
             }
             "function_call" => {
-                let args: Value =
-                    serde_json::from_str(item["arguments"].as_str().unwrap_or("{}"))
-                        .unwrap_or(json!({}));
+                let args = tool_input(item["arguments"].as_str().unwrap_or(""));
                 out.push(json!({"type": "tool_use", "id": item["call_id"],
                     "name": item["name"], "input": args}));
             }
@@ -1745,7 +1794,7 @@ fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result<Outcome> {
         if msgs.is_empty() {
             break;
         }
-        let blocks = call_provider(app, &ctx.session, &cfg, &system, &msgs, &tools)?;
+        let blocks = call_provider_retrying(app, ctx, &cfg, &system, &msgs, &tools)?;
         steps += 1;
         let tool_uses: Vec<Value> = blocks
             .iter()
@@ -1809,27 +1858,35 @@ fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result<Outcome> {
                 // anything arriving over the wire, so only this path sets it.
                 input["_user_approved"] = json!(true);
             }
-            let r = run_tool(app, name, &input);
-            let (content, is_error) = match r {
-                Ok(v) => {
-                    let mut s = v.to_string();
-                    if s.len() > TOOL_RESULT_LIMIT {
-                        let was = s.len();
-                        // char-boundary-safe: a plain truncate panics mid-UTF-8
-                        crate::rpc::truncate_utf8(&mut s, TOOL_RESULT_LIMIT);
-                        s.push_str(&format!(
-                            "…(truncated — output was {}KB. Re-run with narrower parameters \
-                             (LIMIT, column lists, byte/row ranges) rather than requesting it all.)",
-                            was.div_ceil(1024)
-                        ));
-                    }
-                    (s, false)
-                }
+            let r = if let Some(bad) = input["_invalid"].as_str() {
+                Err(anyhow!(
+                    "the arguments of this tool call did not arrive as valid JSON (the response was \
+                     probably cut off) — the tool did NOT run. Send the call again. Received: {}",
+                    bad.chars().take(200).collect::<String>()
+                ))
+            } else {
+                run_tool(app, name, &input)
+            };
+            let (mut content, is_error) = match r {
+                Ok(v) => (v.to_string(), false),
                 // A schema-shaped failure (bad/missing params) is fed back WITH
                 // the tool's schema so the model can repair the call itself
                 // instead of guessing the same shape again.
                 Err(e) => (format!("Error: {e}{}", schema_hint(name, &e)), true),
             };
+            // Cap results AND errors: an MCP server's error text can be
+            // arbitrarily large and would otherwise ride along in every later
+            // request of the conversation.
+            if content.len() > TOOL_RESULT_LIMIT {
+                let was = content.len();
+                // char-boundary-safe: a plain truncate panics mid-UTF-8
+                crate::rpc::truncate_utf8(&mut content, TOOL_RESULT_LIMIT);
+                content.push_str(&format!(
+                    "…(truncated — output was {}KB. Re-run with narrower parameters \
+                     (LIMIT, column lists, byte/row ranges) rather than requesting it all.)",
+                    was.div_ceil(1024)
+                ));
+            }
             results.push(json!({"id": tu["id"], "name": tu["name"],
                 "content": content, "is_error": is_error}));
         }
@@ -1876,6 +1933,18 @@ fn has_user_after(app: &Arc<App>, session: &str, seen_id: i64) -> bool {
         &[json!(session), json!(seen_id)],
     )
     .map(|r| r["rows"][0][0].as_i64().unwrap_or(0) > 0)
+    .unwrap_or(false)
+}
+
+/// Is the newest row of this session a user message nobody answered yet?
+pub fn unanswered(app: &Arc<App>, session: &str) -> bool {
+    let eng = app.engine.lock().unwrap();
+    store::query(
+        &eng.db,
+        "SELECT role FROM uapp_chat WHERE COALESCE(session,'main') = ?1 ORDER BY id DESC LIMIT 1",
+        &[json!(session)],
+    )
+    .map(|r| r["rows"][0][0].as_str() == Some("user"))
     .unwrap_or(false)
 }
 

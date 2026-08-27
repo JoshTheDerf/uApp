@@ -138,6 +138,7 @@
   // what we added.
   function abandon(why) {
     console.warn("uapp: editor did not start — leaving the plain page" + (why ? ": " + why : ""));
+    if (window.__uappStandDown) window.__uappStandDown(); // the engine must not keep serving the plain page
     for (const el of document.querySelectorAll("[data-uapp]")) el.remove();
     const root = document.getElementById(ROOT_ID);
     if (root) root.remove();
@@ -378,7 +379,7 @@
     const st = window.__uappSiteState;
     if (st) {
       serverBaseline = st.etag || "";
-      if (st.hasLocal) localEditAt = st.localSavedAt || Date.now();
+      if (st.hasLocal && st.localSavedAt) localEditAt = st.localSavedAt;
     }
     renderPill();
     const bar = document.getElementById("topbar");

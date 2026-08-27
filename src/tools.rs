@@ -96,7 +96,7 @@ pub fn registry() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "write_file",
-            description: "Create or overwrite a text file in the app archive (e.g. index.html, js/app.js — those land under app/; user data goes under data/). Previous version is kept in history. The live app page does NOT reload by itself — call reload_app once the whole change is written. read_file always returns what you just wrote.",
+            description: "Create or overwrite a text file in the app archive (e.g. index.html, js/app.js — those land under app/; user data goes under data/). Previous version is kept in history. read_file always returns what you just wrote.",
             gated: true,
             schema: || obj(json!({"name": {"type": "string"}, "content": {"type": "string"}}),
                            &["name", "content"]),
@@ -105,7 +105,7 @@ pub fn registry() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "edit_file",
-            description: "Edit a text file in the archive by exact string replacement — PREFER this over write_file for any change to an existing file (write_file resends the whole file). old_string must match the file byte-for-byte, whitespace included, and appear exactly once — include enough surrounding lines to make it unique — or set replace_all to change every occurrence. Previous version is kept in history. The live app page does NOT reload by itself — call reload_app once the whole change is written.",
+            description: "Edit a text file in the archive by exact string replacement — PREFER this over write_file for any change to an existing file (write_file resends the whole file). old_string must match the file byte-for-byte, whitespace included, and appear exactly once — include enough surrounding lines to make it unique — or set replace_all to change every occurrence. Previous version is kept in history.",
             gated: true,
             schema: || obj(json!({
                 "name": {"type": "string"},
@@ -160,10 +160,10 @@ pub fn registry() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reload_app",
-            description: "Reload the live app page and wait until the new document has finished loading, so a run_js (context \"app\") or read_console right after it sees the NEW code. Files you write are NOT shown automatically: finish the whole change (all files), then call this once — and follow with read_console to check the reload didn't throw. `loaded: false` in the result means the page didn't finish within 10s. Also required BEFORE calling an app__* action or app-context run_js after editing a script the page uses — actions run the code the page loaded at its last reload, so without this the old code runs.",
+            description: "Reload the live app page and wait (up to 10s) until the new document has finished loading, so a run_js (context \"app\") or read_console right after it sees the NEW code. Files you write are NOT shown or run automatically: finish the whole change (all files), then call this once — also BEFORE calling an app__* action or app-context run_js after editing a script the page uses, since actions run the code the page loaded at its last reload. Follow with read_console to check the reload didn't throw. Errors if no app page is connected; `loaded: false` means the page didn't finish loading within 10s (slow, or throwing on load).",
             gated: false,
             schema: || obj(json!({}), &[]),
-            run: |app, _input| Ok(app.invoke_reload()),
+            run: |app, _input| app.invoke_reload(),
         },
         ToolDef {
             name: "read_console",
@@ -193,7 +193,7 @@ pub fn registry() -> Vec<ToolDef> {
         // prompts — a second prompt for the delegation itself buys nothing.
         ToolDef {
             name: "agent_run",
-            description: "Delegate a big, self-contained task to an autonomous sub-agent. It works in its own conversation with the same tools you have, then hands back a written report — so a long research/audit/build job doesn't fill up this conversation. Give it a fully self-contained prompt: it cannot ask questions. mode \"fresh\" (default) starts clean; \"fork\" prefixes a digest of this conversation. Returns {session, steps, report}.",
+            description: "Delegate a big, self-contained task to an autonomous sub-agent. It works in its own conversation with the same tools you have (except delegating further), then hands back a written report — so a long research/audit/build job doesn't fill up this conversation. Give it a fully self-contained prompt: it cannot ask questions. mode \"fresh\" (default) starts clean; \"fork\" prefixes a digest of this conversation. Returns {session, steps, report}.",
             gated: false,
             schema: || obj(json!({
                 "description": {"type": "string", "description": "short label, e.g. 'audit invoice tables'"},

@@ -9,7 +9,7 @@
  *
  * At runtime this file is also: the router between app iframes (uapp.js over
  * postMessage) and the worker; the responder for service-worker archive
- * fetches; the main-thread end of the SAB bridge (run_js, app actions,
+ * fetches; the main-thread end of the SAB bridge (approval and question
  * approvals, console); and the auto-saver.
  */
 
@@ -134,8 +134,9 @@ function wake() {
 }
 // Resolved once the worker has an app open — every archive fetch and iframe
 // RPC waits on it, so nothing races the open (or a document switch).
-let appReadyResolve;
-const appReady = new Promise((r) => { appReadyResolve = r; });
+let appReadyResolve, appReadyReject;
+const appReady = new Promise((res, rej) => { appReadyResolve = res; appReadyReject = rej; });
+appReady.catch(() => {}); // rejected only when boot fails; dependents get their own rejection
 // True when another tab took over the demo (see the BroadcastChannel below):
 // this tab stops answering service-worker fetches and stops saving.
 let zombie = false;
@@ -215,11 +216,13 @@ function sendRpc(method, params = {}) {
     const id = "b" + workerSeq++;
     workerPending.set(id, { resolve, reject });
     const msg = { type: "rpc", id, method, params };
-    // A worker blocked inside an AI run (provider call, run_js, a prompt)
-    // can't read its message queue — but its wait loop drains the shared
-    // inbox, so deliver through that and the RPC is served mid-run. The
-    // {kick} covers the race where it unblocked between our check and write.
-    if (inbox && Atomics.load(new Int32Array(sab), BLOCKED) === 1) {
+    // ONE path whenever shared memory exists: the inbox. A worker blocked in
+    // an AI run drains it from its wait loop; an idle worker drains it on the
+    // {kick}; a worker that is running synchronously (between two waits)
+    // finds it at its next wait or kick. Sampling "is it blocked right now"
+    // and using postMessage otherwise stranded replies behind the whole run
+    // and could reorder messages between the two paths.
+    if (inbox) {
       inboxQueue.push(msg);
       flushInbox();
       return;
@@ -227,6 +230,23 @@ function sendRpc(method, params = {}) {
     worker.postMessage(msg);
   });
 }
+
+// Engine gone (dormant tab, editor stood down, fatal): fail every waiting
+// caller now instead of leaving promises that can never settle.
+function failWorkerPending(why) {
+  for (const [, p] of workerPending) { try { p.reject(new Error(why)); } catch {} }
+  workerPending.clear();
+}
+// Hosted-site chrome that gave up (site-chrome.js abandon): stop the engine
+// so the service worker no longer answers the plain page's requests from the
+// in-browser copy, and stop saving.
+window.__uappStandDown = () => {
+  if (zombie) return;
+  zombie = true;
+  clearTimeout(saveTimer);
+  try { worker && worker.terminate(); } catch {}
+  failWorkerPending("the editor was closed");
+};
 
 const inboxQueue = [];
 function flushInbox() {
@@ -461,7 +481,12 @@ async function handleSwRequest(m) {
       try { r = await sendRpc("files.read", { name: cand }); name = cand; break; }
       catch (e) { lastErr = e; }
     }
-    if (!r) throw lastErr || new Error("not found: " + name);
+    if (!r) {
+      // A definite miss, as opposed to "nobody answered": the SW treats the
+      // two differently (see archiveResponse in sw.js).
+      reply({ error: (lastErr && lastErr.message) || ("not found: " + name), status: 404, notFound: true });
+      return;
+    }
     const ctype = contentTypeFor(r.name || name);
     let bodyB64 = r.b64;
     if (ctype.startsWith("text/html")) {
@@ -501,6 +526,11 @@ window.addEventListener("message", (ev) => {
     // gone, and with it its actions and contexts.
     const old = connOfWin.get(win);
     if (old) { connOfWin.delete(win); winOfConn.delete(old); sendRpc("conn.close", { conn: old }).catch(() => {}); }
+  }
+  if (m.method === "conn.bye") {
+    const id = connOfWin.get(win);
+    if (id) { connOfWin.delete(win); winOfConn.delete(id); sendRpc("conn.close", { conn: id }).catch(() => {}); }
+    return;
   }
   if (CONN_METHODS.has(m.method)) { connMessage(win, m, replyTo); return; }
   if (m.method.startsWith("host.")) {
@@ -715,6 +745,9 @@ window.__uappSitePublish = async (token, { force = false } = {}) => {
   }
   siteState.etag = (json && json.etag) || resp.headers.get("etag") || "";
   kvSet(siteKey("etag"), siteState.etag);
+  // The saved copy now equals the server: no local edits are pending.
+  siteState.localSavedAt = 0;
+  kvDel(siteKey("saved"));
   return json;
 };
 
@@ -723,7 +756,8 @@ window.__uappSitePublish = async (token, { force = false } = {}) => {
 // index in memory for the life of the tab instead.
 const memKV = new Map();
 function kvGet(key) {
-  try { return localStorage.getItem(key); } catch { return memKV.has(key) ? memKV.get(key) : null; }
+  if (memKV.has(key)) return memKV.get(key); // a write that localStorage refused (quota) lives here
+  try { return localStorage.getItem(key); } catch { return null; }
 }
 function kvSet(key, val) {
   try { localStorage.setItem(key, val); } catch { memKV.set(key, val); }
@@ -875,8 +909,17 @@ function storageNotice() {
   document.body.appendChild(el);
 }
 
+// null = no stored app with that id. Any OTHER failure (a locked store, a
+// private-window quirk) is thrown: callers must not mistake it for "new app"
+// and save an empty document over the real one.
 async function appRead(id) {
-  try { return await (await blobStore()).read(id); } catch { return null; }
+  try {
+    const bytes = await (await blobStore()).read(id);
+    return bytes || null;
+  } catch (e) {
+    if (e && e.name === "NotFoundError") return null;
+    throw new Error("could not read the stored app: " + ((e && e.message) || e));
+  }
 }
 async function appWrite(id, bytes) {
   return (await blobStore()).write(id, bytes);
@@ -965,6 +1008,7 @@ function goDormant() {
   zombie = true;
   clearTimeout(saveTimer);
   try { worker && worker.terminate(); } catch {}
+  failWorkerPending("this tab went dormant (the demo moved to another tab)");
   const div = document.createElement("div");
   div.style.cssText = "position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:#23293acc;backdrop-filter:blur(3px);color:#f2f4f8;font:15px/1.5 system-ui,sans-serif";
   div.innerHTML = `<div style="background:#2b3145;border:1px solid #3a4260;border-radius:14px;padding:26px;max-width:360px;text-align:center">
@@ -1086,7 +1130,9 @@ if (tabChannel) {
     ssDel("uapp-open-name");
     if (wantId) {
       splashShow("Opening " + wantName + "…", "Opening the document…");
-      const bytes = await appRead(wantId); // null = brand-new app (host.create)
+      let bytes;
+      try { bytes = await appRead(wantId); } // null = brand-new app (host.create)
+      catch (e) { fatal(String(e.message || e)); return; }
       try {
         info = await openApp(bytes, wantName);
         currentAppId = wantId;
@@ -1181,6 +1227,7 @@ if (tabChannel) {
     splashHide();
   } catch (e) {
     console.error(e);
+    appReadyReject(e instanceof Error ? e : new Error(String(e)));
     fatal(String((e && e.message) || e));
   }
 })();

@@ -119,7 +119,8 @@ pub struct PublicOpts {
 
 impl Default for PublicOpts {
     fn default() -> Self {
-        Self { coi: false, archive: true, export_data: false, asset_max_age: 3600 }
+        // 0 = always revalidate (see server.rs public_page).
+        Self { coi: false, archive: true, export_data: false, asset_max_age: 0 }
     }
 }
 
@@ -640,10 +641,10 @@ impl App {
             return Ok(find().unwrap());
         }
         anyhow::bail!(
-            "no app action named '{name}' is registered. If you just called reload_app the \
-             page may still be initialising — wait a moment and retry; otherwise the app does \
-             not register that action (check its uapp.action(...) calls and read_console for \
-             load errors)"
+            "no app action named '{name}' is registered (waited {}s for the page to register it). \
+             Either the app never calls uapp.action(\"{name}\", …), or the page failed while \
+             loading — read_console will show that; after fixing, reload_app and call again",
+            ACTION_REGISTER_WAIT_MS / 1000
         )
     }
 
@@ -747,7 +748,7 @@ impl App {
     /// connected app page there is nothing to wait for; a page that never
     /// finishes (throws on load, very slow) returns `loaded: false` after
     /// [`RELOAD_WAIT_MS`] instead of hanging the turn.
-    pub fn invoke_reload(&self) -> Value {
+    pub fn invoke_reload(&self) -> anyhow::Result<Value> {
         let app_conns = || -> std::collections::HashSet<u64> {
             let ctxs = self.contexts.lock().unwrap();
             let conns = self.conns.lock().unwrap();
@@ -757,23 +758,22 @@ impl App {
                 .collect()
         };
         let before = app_conns();
-        self.notify("reload", json!({}));
         if before.is_empty() {
-            return json!({"ok": true, "loaded": false,
-                "note": "no app page is connected, so there was nothing to wait for"});
+            anyhow::bail!("no app page is connected, so there is nothing to reload (is the app open in a shell?)");
         }
+        self.notify("reload", json!({}));
         let start = crate::store::now_ms();
         let loaded = self.wait_until(RELOAD_WAIT_MS, 50, || {
             let fresh = app_conns();
             let loaded = self.ctx_loaded.lock().unwrap();
             fresh.iter().any(|id| !before.contains(id) && loaded.contains(id))
-        });
-        match loaded {
-            Ok(true) => json!({"ok": true, "loaded": true, "ms": crate::store::now_ms() - start}),
-            Ok(false) => json!({"ok": true, "loaded": false,
-                "note": format!("the app page did not finish reloading within {}s — it may be slow or throwing on load; read_console will tell", RELOAD_WAIT_MS / 1000)}),
-            Err(e) => json!({"ok": true, "loaded": false, "note": format!("could not confirm the reload: {e}")}),
-        }
+        })?;
+        Ok(if loaded {
+            json!({"ok": true, "loaded": true, "ms": crate::store::now_ms() - start})
+        } else {
+            json!({"ok": true, "loaded": false,
+                "note": format!("the app page did not finish reloading within {}s — it may be slow or throwing on load; read_console will tell", RELOAD_WAIT_MS / 1000)})
+        })
     }
 }
 

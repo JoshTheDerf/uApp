@@ -48,12 +48,12 @@ function client({ context = null, loadDelayMs = 0, onReload = null } = {}) {
   return { ws, rpc, open, close: () => ws.close() };
 }
 
-console.log("[1] no app page connected: returns at once, loaded:false");
+console.log("[1] no app page connected: fails at once with a clear error");
 {
   const shell = client(); await shell.open;
   const t0 = Date.now();
-  const r = await shell.rpc("tools.call", { name: "reload_app", input: {} });
-  ok(r.ok === true && r.loaded === false, "ok:true loaded:false", JSON.stringify(r));
+  const r = await shell.rpc("tools.call", { name: "reload_app", input: {} }).catch((e) => e.message);
+  ok(/no app page is connected/.test(String(r)), "error names the cause", JSON.stringify(r));
   ok(Date.now() - t0 < 2000, "did not wait", `${Date.now() - t0}ms`);
   shell.close();
 }
@@ -87,13 +87,16 @@ console.log("\n[2] app page reloads on the event: the tool returns after the NEW
   page.close(); shell.close();
 }
 
-console.log("\n[3] plain app.reload RPC (topbar button) stays fire-and-forget");
+console.log("\n[3] app.reload RPC (topbar button) gives the same answer as the tool");
 {
   const shell = client(); await shell.open;
-  const t0 = Date.now();
+  const e = await shell.rpc("app.reload", {}).catch((e) => e.message);
+  ok(/no app page is connected/.test(String(e)), "no page: clear error", String(e));
+  let page = client({ context: "app", onReload: () => { page.close(); setTimeout(() => { page = client({ context: "app", loadDelayMs: 100 }); }, 50); } });
+  await page.open; await sleep(200);
   const r = await shell.rpc("app.reload", {});
-  ok(r.ok === true && Date.now() - t0 < 500, "returns immediately", JSON.stringify(r));
-  shell.close();
+  ok(r.ok === true && r.loaded === true, "with a page: waits for the new load", JSON.stringify(r));
+  page.close(); shell.close();
 }
 
 console.log("\n[4] app__ action called before the page has registered it: waits, then runs");

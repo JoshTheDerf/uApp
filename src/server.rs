@@ -37,30 +37,12 @@ pub use crate::app::{AppAction, ConsoleEntry, PendingApproval, PendingQuestion, 
 
 const SHELL_HTML: &str = include_str!("shell/index.html");
 const SHELL_CSS: &str = include_str!("shell/shell.css");
-/// The shell's ES modules (one Web Component or shared module per file),
-/// served under /shell/<name>. Adding a file here is all it takes.
-const SHELL_MODULES: &[(&str, &str)] = &[
-    ("main.js", include_str!("shell/js/main.js")),
-    ("core.js", include_str!("shell/js/core.js")),
-    ("ui.js", include_str!("shell/js/ui.js")),
-    ("markdown.js", include_str!("shell/js/markdown.js")),
-    ("topbar.js", include_str!("shell/js/topbar.js")),
-    ("chat-panel.js", include_str!("shell/js/chat-panel.js")),
-    ("sql-panel.js", include_str!("shell/js/sql-panel.js")),
-    ("files-panel.js", include_str!("shell/js/files-panel.js")),
-    ("viewer.js", include_str!("shell/js/viewer.js")),
-    ("export.js", include_str!("shell/js/export.js")),
-    ("settings-panel.js", include_str!("shell/js/settings-panel.js")),
-    ("tools-panel.js", include_str!("shell/js/tools-panel.js")),
-    ("mirror.js", include_str!("shell/js/mirror.js")),
-    ("template-update.js", include_str!("shell/js/template-update.js")),
-    ("strings.js", include_str!("shell/js/strings.js")),
-    ("lang/en.js", include_str!("shell/js/lang/en.js")),
-    ("lang/fr.js", include_str!("shell/js/lang/fr.js")),
-    ("lang/es.js", include_str!("shell/js/lang/es.js")),
-    ("lang/de.js", include_str!("shell/js/lang/de.js")),
-    ("lang/zh-Hans.js", include_str!("shell/js/lang/zh-Hans.js")),
-];
+// The shell's ES modules (one Web Component or shared module per file),
+// served under /shell/<name>. The list is generated at build time from
+// src/shell/js/**.js (see build.rs) — drop a file in and it is served, with
+// no hand-kept inventory to forget.
+include!(concat!(env!("OUT_DIR"), "/shell_modules.rs"));
+
 const UAPP_JS: &str = include_str!("shell/uapp.js");
 const ICONS_JS: &str = include_str!("shell/icons.js");
 const SCRATCH_HTML: &str = include_str!("shell/scratch.html");
@@ -196,7 +178,15 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
     // Refresh the cookie so the iframe + ws can auth without the token in URL.
     resp.headers_mut().insert(
         header::SET_COOKIE,
-        format!("{}={}; Path=/; SameSite=Strict", cookie_name(&app), app.token)
+        // HttpOnly: app pages run arbitrary (AI-written) JS on this origin and
+        // must not be able to read the token — on a public site it is the
+        // publish secret. Secure there too: never over plain HTTP.
+        format!(
+            "{}={}; Path=/; SameSite=Strict; HttpOnly{}",
+            cookie_name(&app),
+            app.token,
+            if app.public.is_some() { "; Secure" } else { "" }
+        )
             .parse()
             .unwrap(),
     );
@@ -513,8 +503,11 @@ async fn app_root(state: State<Arc<App>>, who: Visitor, headers: HeaderMap) -> R
 
 /// Liveness probe. The version header lets `uapp open` tell when the server
 /// it is about to reuse for this file is an older build than itself.
-async fn health() -> Response {
-    ([("x-uapp-version", env!("CARGO_PKG_VERSION"))], "ok").into_response()
+async fn health(State(app): State<Arc<App>>) -> Response {
+    // The key names WHICH file this server has open: a stale registry entry
+    // whose port was recycled by another uapp must not be mistaken for ours.
+    let key = crate::registry::key(&app.engine.lock().unwrap().path);
+    ([("x-uapp-version", env!("CARGO_PKG_VERSION").to_string()), ("x-uapp-key", key)], "ok").into_response()
 }
 
 /// Download this app as a template: app-role files + empty tables, no user
@@ -523,29 +516,11 @@ async fn health() -> Response {
 async fn template_download(State(app): State<Arc<App>>, _who: Owner) -> Response {
     let result = {
         let eng = app.engine.lock().unwrap();
-        let name = crate::store::meta_get(&eng.db, "name")
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "app".into());
+        let name = app_display_name(&eng);
         crate::store::export_template(&eng.db, &name).map(|b| (b, name))
     };
     match result {
-        Ok((bytes, name)) => {
-            let safe: String = name
-                .chars()
-                .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' { c } else { '_' })
-                .collect();
-            let fname = format!("{} template.uapp", safe.trim());
-            (
-                [
-                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                    (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{fname}\"")),
-                    (header::CACHE_CONTROL, "no-store".to_string()),
-                ],
-                bytes,
-            )
-                .into_response()
-        }
+        Ok((bytes, name)) => attachment(bytes, &format!("{name} template")),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("template export failed: {e}")).into_response(),
     }
 }
@@ -555,32 +530,50 @@ async fn template_download(State(app): State<Arc<App>>, _who: Owner) -> Response
 async fn app_download(State(app): State<Arc<App>>, _who: Owner) -> Response {
     let result = {
         let eng = app.engine.lock().unwrap();
-        let name = crate::store::meta_get(&eng.db, "name")
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "app".into());
+        let name = app_display_name(&eng);
         crate::store::export_full(&eng.db, eng.crypt.as_ref().map(|k| k.passphrase.as_str()))
             .map(|b| (b, name))
     };
     match result {
-        Ok((bytes, name)) => {
-            let safe: String = name
-                .chars()
-                .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' { c } else { '_' })
-                .collect();
-            let fname = format!("{}.uapp", safe.trim());
-            (
-                [
-                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                    (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{fname}\"")),
-                    (header::CACHE_CONTROL, "no-store".to_string()),
-                ],
-                bytes,
-            )
-                .into_response()
-        }
+        Ok((bytes, name)) => attachment(bytes, &name),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("download failed: {e}")).into_response(),
     }
+}
+
+fn app_display_name(eng: &crate::engine::Engine) -> String {
+    crate::store::meta_get(&eng.db, "name").ok().flatten().unwrap_or_else(|| "app".into())
+}
+
+/// A `.uapp` download named after the app. The filename must be a valid
+/// header value: non-ASCII characters are dropped (a name like "予算" used to
+/// turn the whole download into a 500), and the empty result falls back to
+/// "app". The full name travels in RFC 5987 `filename*` for browsers that
+/// read it.
+fn attachment(bytes: Vec<u8>, stem: &str) -> Response {
+    let ascii: String = stem
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+        .collect();
+    let ascii = ascii.trim();
+    let ascii = if ascii.is_empty() { "app" } else { ascii };
+    let utf8: String = stem
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') { (b as char).to_string() } else { format!("%{b:02X}") }
+        })
+        .collect();
+    (
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{ascii}.uapp\"; filename*=UTF-8''{utf8}.uapp"),
+            ),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 /// The hidden scratchpad page the shell embeds: an empty document with only
@@ -705,20 +698,12 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
             }
             continue;
         }
-        // Server-internal markers: `_user_approved` is set by the AI loop after
-        // the user's permission prompt, `_assistant` by builtin tools that act
-        // on the model's behalf. Never trusted from the wire.
-        let mut params = params;
-        if let Some(o) = params.as_object_mut() {
-            o.remove("_user_approved");
-            o.remove("_assistant");
-        }
         let app2 = app.clone();
         let out = out_tx.clone();
         // Each request handled on the blocking pool (SQLite is sync).
         tokio::spawn(async move {
             let result =
-                tokio::task::spawn_blocking(move || crate::rpc::dispatch(&app2, &method, params))
+                tokio::task::spawn_blocking(move || crate::rpc::dispatch_untrusted(&app2, &method, params))
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("task panic: {e}")));
             let resp = match result {
@@ -930,7 +915,7 @@ async fn upload_file(
         let name = name.clone();
         tokio::task::spawn_blocking(move || {
             let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body);
-            crate::rpc::dispatch(&app, "files.write", json!({"name": name, "b64": b64}))
+            crate::rpc::dispatch_untrusted(&app, "files.write", json!({"name": name, "b64": b64}))
         })
         .await
     };
@@ -1203,7 +1188,16 @@ fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
         // Always revalidate: a reload must get the server's authoritative copy.
         "public, max-age=0, must-revalidate".to_string()
     } else {
-        format!("public, max-age={}", opts.asset_max_age)
+        // Site files are served under their archive names (nothing is
+        // content-hashed), so after a publish a cached asset would run
+        // against new HTML for its whole max-age. Default: always
+        // revalidate — the ETag makes that a cheap 304. Operators whose
+        // build fingerprints assets can raise it with --asset-max-age.
+        if opts.asset_max_age == 0 {
+            "public, max-age=0, must-revalidate".to_string()
+        } else {
+            format!("public, max-age={}", opts.asset_max_age)
+        }
     };
     let etag = etag_for(&bytes);
     if !is_404 && if_none_match(headers, &etag) {

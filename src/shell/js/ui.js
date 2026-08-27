@@ -45,8 +45,9 @@ export function downloadUrl(href) {
   // through the SW) and save the blob.
   if (window.__uappBase && href.startsWith("/")) {
     (async () => {
-      const r = await fetch(window.__uappBase + href.slice(1));
-      if (!r.ok) { alert("Download failed (HTTP " + r.status + ")"); return; }
+      let r;
+      try { r = await fetch(window.__uappBase + href.slice(1)); } catch (e) { dlgAlert(S.ui.downloadFailed(String(e.message || e))); return; }
+      if (!r.ok) { dlgAlert(S.ui.downloadFailed("HTTP " + r.status)); return; }
       const dispo = r.headers.get("content-disposition") || "";
       const name = (dispo.match(/filename="([^"]+)"/) || [])[1] ||
         href.split("/").pop().replace(/\?.*$/, "");

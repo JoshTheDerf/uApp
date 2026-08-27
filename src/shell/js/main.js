@@ -21,7 +21,8 @@ function isInternalUrl(url) {
 
 async function openExternalUrl(url) {
   if (isInternalUrl(url)) return false; // Let internal URLs navigate normally
-  try { await rpc("browser.open", { url }); } catch {}
+  // The click was already prevented; a swallowed failure would be a dead link.
+  try { await rpc("browser.open", { url }); } catch (e) { dlgAlert("Could not open " + url + ": " + (e.message || e)); }
   return true; // Handled by system browser
 }
 

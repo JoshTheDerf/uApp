@@ -75,12 +75,15 @@ async function askShell(req, frameType) {
 function netFetch(req, url, bust) {
   let u = url ? new URL(url) : new URL(req.url);
   if (bust) u.searchParams.set("_", Date.now().toString(36));
-  return fetch(u, { method: req.method === "HEAD" ? "HEAD" : "GET", cache: "no-store", headers: req.headers, credentials: req.credentials });
+  return fetch(u, { method: req.method === "HEAD" ? "HEAD" : "GET", cache: bust ? "no-store" : "no-cache", headers: req.headers, credentials: req.credentials });
 }
 
-function withCoi(resp) {
+// `cacheable`: the shell's own versioned bundle may be kept and revalidated
+// (the server ETags it, so a warm load is a run of 304s instead of ~1.5 MB of
+// wasm again); everything archive-served stays no-store.
+function withCoi(resp, cacheable = false) {
   const h = new Headers(resp.headers);
-  h.set("Cache-Control", "no-store");
+  h.set("Cache-Control", cacheable ? "no-cache" : "no-store");
   // credentialless (not require-corp): plain <script src="https://cdn..."> in
   // generated apps keeps working. Browsers without credentialless just don't
   // become isolated — everything still runs, minus the run_js bridge.
@@ -101,12 +104,14 @@ function b64FromBuffer(buf) {
 }
 
 // Shell bundle files: never looked up in an archive.
-const BUNDLE = new Set(["/boot.js", "/sw.js", "/worker.js", "/uapp.js", "/uapp_glue.js", "/icons.js", "/shell.css",
+const BUNDLE = new Set(["/boot.js", "/sw.js", "/worker.js", "/uapp.js", "/uapp_glue.js", "/icons.js", "/shell.css", "/scratch.html",
   "/chrome.js", "/site-chrome.js", "/uapp_wasm.js", "/uapp_wasm_bg.wasm", "/index.html", "/launcher.uapp", "/site.uapp", "/health"]);
 
-// `probe`: return null (instead of a 404/passthrough response) when the
-// archive has no such file or no engine answered, so the caller can try the
-// network next.
+// `probe`: instead of a 404/passthrough response, return null when the
+// archive definitely has no such file (or the shell says passthrough) so the
+// caller can try the network — and `undefined` when NO shell answered at
+// all, which is not a miss: the caller must not conclude the page doesn't
+// exist from a busy or reloading tab.
 async function archiveResponse(req, url, clientId, probe) {
   const frameType = await frameTypeOf(clientId);
   let bodyB64 = null;
@@ -118,7 +123,8 @@ async function archiveResponse(req, url, clientId, probe) {
   }, frameType);
   // Nobody answered a top document, or the page declined (engine not up yet):
   // either way it is the server's own resource, fetch it from there.
-  if (probe && (!r || r.passthrough || r.error)) return null;
+  if (probe && !r) return undefined;
+  if (probe && (r.passthrough || r.notFound)) return null;
   if ((!r && req.method === "GET") || (r && r.passthrough)) {
     try { return withCoi(await netFetch(req, null, !BUNDLE.has(url.pathname))); }
     catch (e) { return new Response("offline: " + e, { status: 503 }); }
@@ -156,14 +162,16 @@ const SCOPE = new URL(self.registration.scope).pathname; // e.g. "/uapp/demo/"
 self.addEventListener("fetch", (ev) => {
   const url = new URL(ev.request.url);
   if (url.origin !== location.origin) return; // cross-origin: browser handles it
-  // Writes to the server (PUT /site.uapp — publishing the local copy) are the
-  // server's business alone; netFetch would rewrite the method anyway.
-  if (!["GET", "HEAD", "POST"].includes(ev.request.method)) return;
   // Root-form path relative to the scope: "/uapp/demo/app/x" and "/app/x"
   // both become "/app/x".
   const p = url.pathname.startsWith(SCOPE)
     ? "/" + url.pathname.slice(SCOPE.length)
     : url.pathname;
+  // Only the archive's own POST target (/upload) is ours. Every other write
+  // (PUT /site.uapp publishing the local copy, an app's own POST to some
+  // server API) goes to the network untouched — netFetch would turn it into
+  // a bodiless GET.
+  if (ev.request.method !== "GET" && ev.request.method !== "HEAD" && !ARCHIVE_EXACT.has(p)) return;
   // A navigation INSIDE the app frame ("/", "/admin", "/posts/x/" — apps and
   // generated sites link root-absolute) stays in the archive: the frame is
   // the in-browser copy, not the server's site. Top-level navigations are
@@ -175,6 +183,10 @@ self.addEventListener("fetch", (ev) => {
     ev.respondWith((async () => {
       const r = await archiveResponse(ev.request, u, ev.clientId, true);
       if (r) return r;
+      // Nobody answered (the shell is busy or mid-reload): that is not "no
+      // such page" — say try again rather than throwing the reader out of
+      // the editor.
+      if (r === undefined) return withCoi(new Response("uapp: the editor did not answer in time — reload to retry", { status: 503, headers: { "retry-after": "1" } }));
       // Not a page of this site's archive: same host, but something else
       // lives there (another service behind the same reverse proxy, a path
       // the site never built). Leave the editor and let the server route it
@@ -210,7 +222,8 @@ self.addEventListener("fetch", (ev) => {
         if (r) return r;
       }
       const staticUrl = new URL(SCOPE.slice(1) + p.slice(1) + url.search, url.origin);
-      const bust = p !== "/" && !p.startsWith("/shell/") && !BUNDLE.has(p);
+      const isBundle = p.startsWith("/shell/") || BUNDLE.has(p);
+      const bust = p !== "/" && !isBundle;
       const resp = await netFetch(ev.request, p === "/" ? null : staticUrl, bust);
       // (Never for a top-level navigation: that must stay the server's page —
       // its 404 page carries the chrome, which then shows the local copy's
@@ -220,7 +233,7 @@ self.addEventListener("fetch", (ev) => {
         u.pathname = p;
         return archiveResponse(ev.request, u, ev.clientId);
       }
-      return withCoi(resp);
+      return withCoi(resp, isBundle);
     } catch (e) {
       return new Response("offline: " + e, { status: 503 });
     }

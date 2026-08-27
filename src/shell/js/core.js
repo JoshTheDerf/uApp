@@ -26,6 +26,7 @@ let reconnectTimer = null;
 // shell loads; when present it replaces the WebSocket entirely.
 const wasmT = () => window.__uappTransport;
 export function connect() {
+  if (state.shuttingDown) return; // a reconnect timer that outlived closeSocket
   if (wasmT()) {
     wasmT().onMessage((m) => {
       if (m.method === "event") return handleEvent(m.params);
@@ -76,21 +77,31 @@ document.addEventListener("visibilitychange", () => {
   try { ws.send(JSON.stringify({ id, method: "ping" })); } catch { connect(); return; }
   setTimeout(() => { if (!alive && ws && ws.readyState === 1) { try { ws.close(); } catch {} } }, 3000);
 });
+// Same contract as uapp.js: no call pends forever. A lost reply becomes a
+// typed error naming the call, so a panel never sits on a dead spinner.
+const RPC_TIMEOUT_MS = 60000;
 export function rpc(method, params = {}) {
   return new Promise((resolve, reject) => {
     const id = nextId++;
-    if (wasmT()) {
-      pending.set(id, { resolve, reject });
-      wasmT().send({ id, method, params });
-      return;
-    }
-    if (!ws || ws.readyState !== 1) return reject(new Error("not connected"));
-    pending.set(id, { resolve, reject });
-    ws.send(JSON.stringify({ id, method, params }));
+    if (!wasmT() && (!ws || ws.readyState !== 1)) return reject(new Error("not connected"));
+    const timer = setTimeout(() => {
+      if (!pending.has(id)) return;
+      pending.delete(id);
+      const e = new Error(`${method} (call #${id}) got no reply within ${RPC_TIMEOUT_MS / 1000}s`);
+      e.name = "UappTimeout";
+      reject(e);
+    }, RPC_TIMEOUT_MS);
+    pending.set(id, {
+      resolve: (v) => { clearTimeout(timer); resolve(v); },
+      reject: (e) => { clearTimeout(timer); reject(e); },
+    });
+    if (wasmT()) wasmT().send({ id, method, params });
+    else ws.send(JSON.stringify({ id, method, params }));
   });
 }
 export function closeSocket() {
   state.shuttingDown = true;
+  clearTimeout(reconnectTimer);
   if (wasmT()) return;
   try { ws.close(); } catch {}
 }

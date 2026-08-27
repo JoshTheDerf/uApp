@@ -206,6 +206,9 @@
       rawSend({ method, params: { id, error: "the page unloaded (a navigation or reload) before this finished — if the code navigated on purpose that is expected; inspect the new page with a fresh run_js" } });
     }
     inflight.clear();
+    // Browser build: tell the host this document is gone, so the core forgets
+    // its actions/contexts now instead of finding out on the next call.
+    if (wasmMode) rawSend({ method: "conn.bye" });
   });
   function replyOnce(method, id) {
     inflight.set(id, method);
@@ -398,7 +401,15 @@
     else window.addEventListener("load", send, { once: true });
   }
   function connect() {
-    if (hostedTop) { openp = new Promise(() => {}); return; }
+    if (hostedTop) {
+      // The server's plain page (no editor around it): there is no host to
+      // talk to, so every call fails at once — never a silent forever-pending.
+      const e = new Error("uapp: this page is not running inside the uapp editor/shell, so uapp.* calls are unavailable here");
+      e.name = "UappNoHost";
+      openp = Promise.reject(e);
+      openp.catch(() => {});
+      return;
+    }
     if (wasmMode) {
       window.addEventListener("message", (ev) => {
         const d = ev.data;

@@ -817,6 +817,8 @@ async function send() {
   try {
     await rpc("chat.send", { text, attachments: atts, refs: r, mode: state.mode, session });
   } catch (e) {
+    // Give the message and its attachments back: a failed send must not eat them.
+    input.value = text; staged = atts; refs = r; renderStaged();
     dlgAlert(S.chat.sendFailed(e.message));
   }
 }

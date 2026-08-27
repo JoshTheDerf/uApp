@@ -10,6 +10,19 @@ use std::sync::Arc;
 use crate::app::App;
 use crate::store;
 
+/// Entry point for anything that arrived over a transport (WebSocket, the
+/// browser worker's postMessage, an HTTP upload): strips the server-internal
+/// trust markers (`_user_approved` is set by the AI loop after the user's
+/// permission prompt, `_assistant` by builtin tools acting for the model)
+/// before dispatching. Internal callers use [`dispatch`] directly.
+pub fn dispatch_untrusted(app: &Arc<App>, method: &str, mut p: Value) -> Result<Value> {
+    if let Some(o) = p.as_object_mut() {
+        o.remove("_user_approved");
+        o.remove("_assistant");
+    }
+    dispatch(app, method, p)
+}
+
 pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
     match method {
         "app.info" => {
@@ -155,10 +168,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // Ask every shell to reload its app frame. Writes no longer do this
         // implicitly (see shell/main.js), so this is how a finished edit is
         // shown — the AI's `reload_app` tool, or any client.
-        "app.reload" => {
-            app.notify("reload", json!({}));
-            Ok(json!({"ok": true}))
-        }
+        "app.reload" => app.invoke_reload(),
         "files.fetch" => files_fetch(app, p),
         // Native-window file drops (see native.rs): the page passes back the id
         // it was notified with, never a path.
@@ -169,7 +179,10 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "template.inspect" => template_inspect(app, p),
         "template.apply" => template_apply(app, p),
         "template.discard" => {
-            app.templates.lock().unwrap().remove(need_str(&p, "token")?);
+            let token = need_str(&p, "token")?;
+            if app.templates.lock().unwrap().remove(token).is_none() {
+                bail!("no staged template with that token (already applied or discarded?)");
+            }
             Ok(json!({"ok": true}))
         }
         // Fabricate one, so the drop path can be tested without a desktop
@@ -298,9 +311,13 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             Ok(json!({"ok": true, "id": id}))
         }
         "ai.stop" => {
-            // No session = stop everything (what the old wire shape meant).
-            let session = p["session"].as_str().map(|s| s.to_string());
-            app.ai_stop(session.as_deref());
+            // `session` defaults to "main" like every other chat method;
+            // `{"all": true}` stops every session's run.
+            if p["all"].as_bool() == Some(true) {
+                app.ai_stop(None);
+            } else {
+                app.ai_stop(Some(&session_arg(&p)?));
+            }
             Ok(json!({"ok": true}))
         }
         "ai.pending" => Ok(app.pending_list()),
@@ -435,17 +452,22 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "mcp.add" => mcp_add(app, p),
         "mcp.remove" => {
             let name = need_str(&p, "name")?.to_string();
-            mcp_mutate(app, |servers| servers.retain(|s| s["name"].as_str() != Some(&name)))
+            mcp_mutate(app, &name, |servers| {
+                let before = servers.len();
+                servers.retain(|s| s["name"].as_str() != Some(&name));
+                before - servers.len()
+            })
         }
         "mcp.toggle" => {
             let name = need_str(&p, "name")?.to_string();
             let enabled = p["enabled"].as_bool().unwrap_or(true);
-            mcp_mutate(app, |servers| {
-                for s in servers.iter_mut() {
-                    if s["name"].as_str() == Some(&name) {
-                        s["enabled"] = json!(enabled);
-                    }
+            mcp_mutate(app, &name, |servers| {
+                let mut n = 0;
+                for s in servers.iter_mut().filter(|s| s["name"].as_str() == Some(&name)) {
+                    s["enabled"] = json!(enabled);
+                    n += 1;
                 }
+                n
             })
         }
         "eval.run" => {
@@ -843,11 +865,11 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
     // Permission mode for this turn: "auto" (default), "manual" (gated tools
     // ask first), or "plan" (read-only toolset — investigate and propose).
     if let Some(mode) = p["mode"].as_str() {
-        *app.ai_mode.lock().unwrap() = match mode {
-            "manual" => "manual".into(),
-            "plan" => "plan".into(),
-            _ => "auto".into(),
-        };
+        // A typo must not silently land on the most permissive setting.
+        if !matches!(mode, "auto" | "manual" | "plan") {
+            bail!("mode must be auto, manual or plan (got '{mode}')");
+        }
+        *app.ai_mode.lock().unwrap() = mode.to_string();
     }
     let attachments = p["attachments"].as_array().cloned().unwrap_or_default();
     let mut stored = Vec::new();
@@ -887,6 +909,34 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
     Ok(json!({"ok": true, "mid": mid, "session": session}))
 }
 
+/// Bookkeeping when a session's run ends, on both builds: unregister it,
+/// tell the shells, surface an error in chat — and, if a user message landed
+/// after the loop had decided it was done (chat.send saw the run as live and
+/// did not start another), start the next run now so it is not left
+/// unanswered. Not after a stop: the user asked for silence.
+pub fn finish_run(app: &Arc<App>, session: &str, result: Result<()>, stopped: bool) {
+    app.ai_runs.lock().unwrap().remove(session);
+    match result {
+        Ok(_) => {
+            app.notify("ai", json!({"state": "idle", "session": session}));
+            if !stopped && crate::ai::unanswered(app, session) {
+                spawn_ai(app.clone(), session.to_string());
+            }
+        }
+        Err(e) => {
+            app.notify("ai", json!({"state": "error", "message": e.to_string(), "session": session}));
+            // Also surface it in chat so it syncs to everyone.
+            let _ = local_op(
+                app,
+                "chat",
+                json!({"mid": format!("err-{}-{}", crate::store::now_ms(), fastrand::u32(..)),
+                       "role": "system", "session": session,
+                       "content": {"text": format!("AI error: {e}")}}),
+            );
+        }
+    }
+}
+
 /// Start (or join) the assistant run for one chat session. Sessions run
 /// independently: a second send on the SAME session is picked up by that
 /// session's live loop, while another session starts its own thread.
@@ -921,22 +971,7 @@ pub fn spawn_ai(app: Arc<App>, session: String) {
             crate::ai::run(&app, &ctx)
         }))
         .unwrap_or_else(|_| Err(anyhow!("the assistant crashed (internal error) — please try again")));
-        app.ai_runs.lock().unwrap().remove(&session);
-        match result {
-            Ok(_) => app.notify("ai", json!({"state": "idle", "session": session})),
-            Err(e) => {
-                app.notify("ai", json!({"state": "error", "message": e.to_string(),
-                                        "session": session}));
-                // Also surface it in chat so it syncs to everyone.
-                let _ = local_op(
-                    &app,
-                    "chat",
-                    json!({"mid": format!("err-{}-{}", crate::store::now_ms(), fastrand::u32(..)),
-                           "role": "system", "session": session,
-                           "content": {"text": format!("AI error: {e}")}}),
-                );
-            }
-        }
+        finish_run(&app, &session, result, ctx.stop.load(std::sync::atomic::Ordering::Relaxed));
     });
 }
 
@@ -1303,9 +1338,14 @@ fn web_fetch(p: Value) -> Result<Value> {
 
 // ---- MCP server management --------------------------------------------------
 
-fn mcp_mutate(app: &Arc<App>, f: impl FnOnce(&mut Vec<Value>)) -> Result<Value> {
+/// Change the MCP server list; `f` returns how many entries it touched, and
+/// touching none is an error — "removed" must mean gone (same rule as
+/// files.delete).
+fn mcp_mutate(app: &Arc<App>, name: &str, f: impl FnOnce(&mut Vec<Value>) -> usize) -> Result<Value> {
     let mut servers = mcp_servers(app);
-    f(&mut servers);
+    if f(&mut servers) == 0 {
+        bail!("no MCP server named '{name}' (mcp.status lists them)");
+    }
     local_op(app, "config_set", json!({"key": "mcp", "value": servers}))?;
     Ok(json!({"ok": true}))
 }
@@ -1338,9 +1378,10 @@ fn mcp_add(app: &Arc<App>, p: Value) -> Result<Value> {
         bail!("could not list tools from {url} — check the URL/token (server not saved)");
     }
     let n = tools.len();
-    mcp_mutate(app, |servers| {
+    mcp_mutate(app, &name, |servers| {
         servers.retain(|s| s["name"].as_str() != Some(&name));
         servers.push(entry);
+        1
     })?;
     Ok(json!({"ok": true, "name": name, "toolCount": n,
               "tools": tools.iter().map(|t| t["name"].clone()).collect::<Vec<_>>()}))

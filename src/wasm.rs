@@ -141,13 +141,6 @@ pub fn rpc_dispatch(method: String, params_json: String) -> String {
     let out = (|| -> Result<Value> {
         let app = app()?;
         let params: Value = serde_json::from_str(&params_json).unwrap_or(json!({}));
-        // Same trust rule as the native transport: these markers are only
-        // ever set server-side.
-        let mut params = params;
-        if let Some(o) = params.as_object_mut() {
-            o.remove("_user_approved");
-            o.remove("_assistant");
-        }
         // Page-connection bookkeeping (server.rs does the same before its
         // dispatch): boot.js wraps each iframe's transport messages with the
         // connection id it assigned to that document.
@@ -171,7 +164,7 @@ pub fn rpc_dispatch(method: String, params_json: String) -> String {
             }
             _ => {}
         }
-        crate::rpc::dispatch(&app, &method, params)
+        crate::rpc::dispatch_untrusted(&app, &method, params)
     })();
     match out {
         Ok(v) => json!({"result": v}).to_string(),
@@ -195,21 +188,7 @@ pub fn ai_tick(session: String) {
             None => return, // stopped/removed before we got scheduled
         }
     };
-    let ctx = crate::ai::RunCtx::root(session.clone(), stop);
+    let ctx = crate::ai::RunCtx::root(session.clone(), stop.clone());
     let result = crate::ai::run(&app, &ctx);
-    app.ai_runs.lock().unwrap().remove(&session);
-    match result {
-        Ok(_) => app.notify("ai", json!({"state": "idle", "session": session})),
-        Err(e) => {
-            app.notify("ai", json!({"state": "error", "message": e.to_string(),
-                                    "session": session}));
-            let _ = crate::rpc::local_op(
-                &app,
-                "chat",
-                json!({"mid": format!("err-{}-{}", crate::store::now_ms(), fastrand::u32(..)),
-                       "role": "system", "session": session,
-                       "content": {"text": format!("AI error: {e}")}}),
-            );
-        }
-    }
+    crate::rpc::finish_run(&app, &session, result, stop.load(std::sync::atomic::Ordering::Relaxed));
 }

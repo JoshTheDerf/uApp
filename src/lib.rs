@@ -91,6 +91,11 @@ fn reusable_server(path: &Path) -> Option<(String, u16)> {
     };
     // A lingering server from an older build would otherwise be reused
     // silently — a fresh `uapp open` after an upgrade must run the new code.
+    // …and a server that has a DIFFERENT file open (a crashed server's .addr
+    // outlived it and the port was recycled) is not ours either.
+    if resp.header("x-uapp-key").map(|k| k != registry::key(path)).unwrap_or(true) {
+        return None;
+    }
     let theirs = resp.header("x-uapp-version").unwrap_or("");
     if theirs != env!("CARGO_PKG_VERSION") {
         eprintln!(
