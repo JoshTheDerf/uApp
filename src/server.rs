@@ -507,7 +507,11 @@ async fn health(State(app): State<Arc<App>>) -> Response {
     // The key names WHICH file this server has open: a stale registry entry
     // whose port was recycled by another uapp must not be mistaken for ours.
     let key = crate::registry::key(&app.engine.lock().unwrap().path);
-    ([("x-uapp-version", env!("CARGO_PKG_VERSION").to_string()), ("x-uapp-key", key)], "ok").into_response()
+    // Android's chat keep-alive service polls this to know when it can stop
+    // holding the process out of the cached-apps freezer.
+    let busy = if app.ai_busy_any() { "1" } else { "0" };
+    ([("x-uapp-version", env!("CARGO_PKG_VERSION").to_string()), ("x-uapp-key", key),
+      ("x-uapp-ai-busy", busy.to_string())], "ok").into_response()
 }
 
 /// Download this app as a template: app-role files + empty tables, no user

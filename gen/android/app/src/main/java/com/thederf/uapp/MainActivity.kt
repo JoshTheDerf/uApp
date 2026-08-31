@@ -437,6 +437,40 @@ class MainActivity : TauriActivity() {
       }
     }
 
+    // ---- background chat keep-alive (see ChatWorkService) ----
+
+    // The shell calls this with true when an AI run starts and false when the
+    // last one ends. While active, a dataSync foreground service keeps the
+    // process out of the cached-apps freezer so the run's server thread (and
+    // its provider socket) survive the user switching apps. The "false" call
+    // can arrive late (the page freezes with the process) — the service also
+    // watches /health and stops itself once no run is live.
+    @JavascriptInterface
+    fun chatKeepalive(active: Boolean) {
+      runOnUiThread {
+        try {
+          if (active) {
+            // The health URL comes from the page itself: it is the only place
+            // that knows which port this process's server bound.
+            val origin = findWebView(findViewById(android.R.id.content))?.url
+              ?.let { Uri.parse(it) }
+              ?.takeIf { it.scheme != null && it.host != null }
+              ?.let { u -> "${u.scheme}://${u.host}${if (u.port > 0) ":${u.port}" else ""}" }
+            val i = Intent(this@MainActivity, ChatWorkService::class.java)
+            origin?.let { i.putExtra(ChatWorkService.EXTRA_HEALTH_URL, "$it/health") }
+            if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(i)
+            else startService(i)
+          } else {
+            stopService(Intent(this@MainActivity, ChatWorkService::class.java))
+          }
+        } catch (e: Exception) {
+          // Never let bookkeeping break the chat itself (e.g. FGS start
+          // restrictions on some OEM builds) — the retry path still applies.
+          Log.w(TAG, "chat keep-alive toggle failed: ${e.message}")
+        }
+      }
+    }
+
     // ---- original-file write-back (see the mirror helpers on the activity) ----
 
     @JavascriptInterface

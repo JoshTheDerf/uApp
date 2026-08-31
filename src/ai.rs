@@ -947,7 +947,12 @@ fn call_provider_retrying(
             Ok(v) => return Ok(v),
             Err(e) => {
                 let msg = e.to_string();
+                // "stream read failed" is the response socket dying mid-SSE —
+                // seen on every mobile background/resume cycle (the OS freezes
+                // the process and kills its sockets) and on wifi↔cell handoffs.
+                // The request is re-sent from scratch, so it retries cleanly.
                 let transient = msg.starts_with("provider request failed")
+                    || msg.starts_with("stream read failed")
                     || ["provider returned 408", "provider returned 429", "provider returned 5"]
                         .iter()
                         .any(|p| msg.starts_with(p));

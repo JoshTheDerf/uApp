@@ -67,6 +67,7 @@ import "./viewer.js";
 import "./settings-panel.js";
 import "./tools-panel.js";
 import "./mirror.js";
+import "./keepalive.js";
 import { addRefs } from "./chat-panel.js";
 import { fbCwd, loadFiles, pickDest } from "./files-panel.js";
 import { isUappFile, updateFromDrop, updateFromFile } from "./template-update.js";

@@ -29,6 +29,11 @@
     <uses-feature android:name="android.hardware.location" android:required="false" />
     <!-- Android 13+ requires this to post a notification at all. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Keep an in-flight AI chat run alive when the user switches apps:
+         ChatWorkService holds the process out of the cached-apps freezer for
+         the duration of the run (see the service class for the full story). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- OPTIONAL: never requested at install/run time — the app is fully
          functional without it. If the user flips "All files access" in
          system Settings (offered in-app under Settings → Original file),
@@ -132,6 +137,13 @@
             
             <!-- tauri-file-associations. AUTO-GENERATED. DO NOT REMOVE. -->
         </activity>
+
+        <!-- Foreground service that keeps a running chat turn alive while the
+             app is backgrounded (started by ShellBridge.chatKeepalive). -->
+        <service
+            android:name=".ChatWorkService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <provider
           android:name="androidx.core.content.FileProvider"
