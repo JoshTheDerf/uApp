@@ -92,13 +92,29 @@ async function askShell(req, frameType) {
 function netFetch(req, url, bust) {
   let u = url ? new URL(url) : new URL(req.url);
   if (bust) u.searchParams.set("_", Date.now().toString(36));
-  return fetch(u, { method: req.method === "HEAD" ? "HEAD" : "GET", cache: bust ? "no-store" : "no-cache", headers: req.headers, credentials: req.credentials });
+  const init = { method: req.method === "HEAD" ? "HEAD" : "GET", cache: bust ? "no-store" : "no-cache", headers: req.headers, credentials: req.credentials };
+  // Keep the request's own mode. This used to default to "cors" for
+  // everything, which silently upgraded a no-cors subresource and then FAILED
+  // it the moment a same-origin path redirected off-origin — CORS is enforced
+  // across a redirect, and thederf.com/keenet is a 301 to keenet.thederf.com,
+  // which sends no Access-Control-Allow-Origin. A navigation cannot carry its
+  // mode into fetch() at all, so it gets redirect:"manual": a 3xx comes back
+  // as an opaque redirect that the BROWSER performs, which is the only way a
+  // cross-origin redirect survives being re-issued here.
+  if (req.mode === "navigate") init.redirect = "manual";
+  else if (req.mode) init.mode = req.mode;
+  return fetch(u, init);
 }
 
 // `cacheable`: the shell's own versioned bundle may be kept and revalidated
 // (the server ETags it, so a warm load is a run of 304s instead of ~1.5 MB of
 // wasm again); everything archive-served stays no-store.
 function withCoi(resp, cacheable = false) {
+  // An opaque redirect (a navigation with redirect:"manual") has status 0 and
+  // a null body: it cannot be rebuilt, and it has to reach the browser intact
+  // so the browser follows the redirect itself. Same for an opaque no-cors
+  // response. Rebuilding either throws.
+  if (resp.type === "opaqueredirect" || resp.type === "opaque" || resp.status === 0) return resp;
   const h = new Headers(resp.headers);
   h.set("Cache-Control", cacheable ? "no-cache" : "no-store");
   // credentialless (not require-corp): plain <script src="https://cdn..."> in
@@ -275,8 +291,18 @@ self.addEventListener("fetch", (ev) => {
       // with #noedit and no shell at all) lands here too: the server holds
       // the published copy of every real page, which beats the 503 "the
       // editor did not answer" stub that an embedded app used to show.
-      try { return withCoi(await netFetch(ev.request, url, true)); }
-      catch (e) { return new Response("offline: " + e, { status: 503 }); }
+      //
+      // Forwarded as the navigation it IS (`fetch(ev.request)`), not rebuilt
+      // by netFetch: a navigation request carries redirect:"manual", so a 3xx
+      // comes back as an opaque redirect that the browser performs itself.
+      // Rebuilding it as a plain cors fetch is what made `<iframe
+      // src="/keenet">` fail with "blocked by CORS policy ... No
+      // 'Access-Control-Allow-Origin'" and then a 503 — the 301 to
+      // keenet.thederf.com cannot be followed by fetch.
+      try {
+        const resp = await fetch(ev.request);
+        return resp.type === "opaqueredirect" || resp.status === 0 ? resp : withCoi(resp);
+      } catch (e) { return new Response("offline: " + e, { status: 503 }); }
     })());
     return;
   }

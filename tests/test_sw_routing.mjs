@@ -20,6 +20,7 @@ const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (fail
 // ---- a minimal ServiceWorkerGlobalScope ----------------------------------
 function load(scope = "/") {
   const handlers = {};
+  const calls = [];
   const clients = new Map(); // id -> {id, url, frameType}
   const self_ = {
     addEventListener: (t, f) => { (handlers[t] ||= []).push(f); },
@@ -37,11 +38,17 @@ function load(scope = "/") {
     self: self_, location: { origin: "https://thederf.com" },
     URL, Response, Headers, Request, setTimeout, clearTimeout, console, Map, Set, Promise,
     btoa, atob, Uint8Array, Date, isNaN, parseInt, JSON, String,
-    fetch: async (u) => new Response("net:" + u, { status: 200, headers: { "content-type": "text/plain" } }),
+    fetch: async (u, init) => {
+      const url = typeof u === "string" ? u : (u && u.url) || String(u);
+      // fetch(request) vs fetch(url, init): the first preserves the request's
+      // own mode and redirect mode, which is the whole point for navigations.
+      calls.push({ url, init: init || null, fromRequest: typeof u !== "string" });
+      return new Response("net:" + url, { status: 200, headers: { "content-type": "text/plain" } });
+    },
   };
   vm.createContext(ctx);
   vm.runInContext(readFileSync(new URL("../web/sw.js", import.meta.url), "utf8"), ctx);
-  return { handlers, clients, self_ };
+  return { handlers, clients, self_, calls };
 }
 
 // Dispatch a synthetic fetch event; report whether the worker CLAIMED it.
@@ -147,7 +154,40 @@ console.log("\niframe navigation that misses the archive:");
   // used to take the whole tab with it.
 }
 
-// ---- 6. cross-origin is never touched -----------------------------------
+// ---- 6. how the worker re-issues a request to the network ---------------
+//
+// netFetch used to build a fresh fetch() with no mode and the default
+// redirect:"follow". Both are wrong the moment a same-origin path redirects
+// off-origin: CORS is enforced across a redirect, and thederf.com/keenet is a
+// 301 to keenet.thederf.com with no Access-Control-Allow-Origin. That is the
+// "blocked by CORS policy ... Response to preflight request doesn't pass
+// access control check" the console filled up with, followed by a 503.
+console.log("\nre-issuing to the network:");
+{
+  const sw = load();
+  // An iframe navigation that misses: forwarded as the request itself, so the
+  // browser follows the 3xx (an opaque redirect) rather than fetch() failing.
+  const a = load();
+  await dispatch(a, { path: "/keenet", mode: "navigate", destination: "iframe" }).promise;
+  const c = a.calls[a.calls.length - 1];
+  ok(c && c.fromRequest, "an iframe miss forwards the request object itself");
+  ok(c && !c.url.includes("?_="), "and does not rebuild the URL with a cache-buster", c && c.url);
+
+  // A top-level navigation the worker does claim (its own root).
+  await dispatch(sw, nav("/")).promise;
+  const navCall = sw.calls.find((x) => x.init && x.init.redirect);
+  ok(!!navCall && navCall.init.redirect === "manual",
+     "a claimed navigation uses redirect:\"manual\"", navCall ? JSON.stringify(navCall.init.redirect) : "none");
+
+  // A no-cors subresource must not be silently upgraded to cors.
+  const b = load();
+  await dispatch(b, { path: "/shell/main.js", mode: "no-cors", destination: "script", clientId: "" }).promise;
+  const sub = b.calls[b.calls.length - 1];
+  ok(sub && sub.init && sub.init.mode === "no-cors", "a no-cors subresource keeps mode no-cors",
+     sub && sub.init ? String(sub.init.mode) : "none");
+}
+
+// ---- 7. cross-origin is never touched -----------------------------------
 console.log("\ncross-origin:");
 {
   const sw = load();
