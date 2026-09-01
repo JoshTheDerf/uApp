@@ -428,7 +428,18 @@ async function handleSwRequest(m) {
   // Ours: say so now, so the SW waits for the body instead of giving up.
   reply({ swAck: true });
   try {
-    await appReady;
+    // ...but an ack buys the worker a 30 s reply window, so never hold a
+    // request open on an engine that may not arrive. Until now this was a bare
+    // `await appReady`: if the archive was still downloading, or the engine
+    // was wedged, or this page got frozen right after acking, every request
+    // the worker asked about sat PENDING for the full 30 s — which looks
+    // exactly like "site.uapp is loading and nothing happens". Hand it to the
+    // network instead; the server has the published copy of every real page.
+    const ready = await Promise.race([
+      appReady.then(() => true, () => false),
+      new Promise((r) => setTimeout(() => r(false), 8000)),
+    ]);
+    if (!ready) { reply({ passthrough: true }); return; }
     const url = new URL(m.path, location.origin);
     const p = url.pathname;
     if (p === "/download.uapp") {
