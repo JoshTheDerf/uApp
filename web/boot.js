@@ -1080,6 +1080,22 @@ if (tabChannel) {
       if (ev.data && ev.data.swRequest) handleSwRequest(ev.data);
     });
 
+    // Tell the worker this client is the shell. On a hosted site the shell's
+    // pages live at the site's own arbitrary paths (thederf.com/, /admin,
+    // /posts/x), which no path rule in sw.js can recognise — and it treats a
+    // client it does not recognise as somebody else's page and keeps its
+    // hands off it entirely. Re-announced whenever a new worker takes over,
+    // since the set does not survive a worker restart.
+    {
+      const announce = () => {
+        const sw = navigator.serviceWorker.controller
+          || (navigator.serviceWorker.__uappReg && navigator.serviceWorker.__uappReg.active);
+        if (sw) sw.postMessage({ shellClient: true });
+      };
+      announce();
+      navigator.serviceWorker.addEventListener("controllerchange", announce);
+    }
+
     sab = crossOriginIsolated ? new SharedArrayBuffer(4 * 1024 * 1024) : null;
     if (!sab) console.warn("uapp: not cross-origin isolated — run_js/app-action tools are disabled");
     inbox = sab ? new SharedArrayBuffer(4 * 1024 * 1024) : null;

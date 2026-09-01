@@ -1,10 +1,16 @@
 /* uapp browser build — service worker.
- * Two jobs:
+ * Three jobs:
  *  1. Serve archive-backed URLs (/app/*, /data/*, vendored libs, downloads,
  *     uploads) by asking the shell page, which asks the wasm worker — so app
  *     iframes get REAL same-origin URLs and relative references just work.
- *  2. Stamp COOP/COEP on every response so the page is cross-origin isolated
- *     and SharedArrayBuffer (the run_js/actions bridge) is available.
+ *  2. Stamp COOP/COEP on the shell's own responses so the page is cross-origin
+ *     isolated and SharedArrayBuffer (the run_js/actions bridge) is available.
+ *  3. Stay COMPLETELY out of the way of everything else on the origin. The
+ *     scope has to be "/" (that is the only place /sw.js can control /app/*
+ *     from), but the origin is usually NOT all ours: thederf.com also serves
+ *     /winston/, /photobooth/, /keenet, ... from other backends behind the
+ *     same proxy. For those, not responding at all is the only correct
+ *     behaviour — see shellPath / clientIsShell below.
  */
 
 self.addEventListener("install", () => self.skipWaiting());
@@ -27,6 +33,17 @@ self.addEventListener("message", (ev) => {
   if (!m) return;
   if (m.release) { releaseAll(); return; }
   if (m.skipWaiting) { self.skipWaiting(); return; }
+  // boot.js announcing "this client is the shell". The only way to recognise
+  // a hosted site's own pages: they live at arbitrary paths (thederf.com/,
+  // /admin, /posts/x are all shell pages), so no path rule can spot them.
+  if (m.shellClient) { if (ev.source && ev.source.id) { shellClients.add(ev.source.id); clientKind.delete(ev.source.id); } return; }
+  // Any reply at all proves the sender is the shell — free re-registration
+  // after a worker restart, which loses shellClients (boot.js only re-announces
+  // on controllerchange, and a restart does not fire one).
+  if ((m.swAck || m.swReply) && ev.source && ev.source.id && !shellClients.has(ev.source.id)) {
+    shellClients.add(ev.source.id);
+    clientKind.delete(ev.source.id);
+  }
   if (m.swAck && acks.has(m.id)) { acks.get(m.id)(); acks.delete(m.id); return; }
   if (m.swReply && waiting.has(m.id)) {
     waiting.get(m.id)(m);
@@ -158,16 +175,6 @@ async function archiveResponse(req, url, clientId, probe) {
   return withCoi(new Response(bytes, { status: r.status || 200, headers }));
 }
 
-// A frame navigation that must leave the frame: a stub that sends the TOP
-// window to the URL. `top.location` needs no same-origin access to assign.
-function breakOut(url) {
-  const href = JSON.stringify(url.href);
-  const html = "<!doctype html><meta charset=utf-8><title>Leaving the editor…</title>"
-    + "<script>try{top.location.replace(" + href + ")}catch(e){location.replace(" + href + ")}</script>"
-    + "<p style='font:14px system-ui;color:#666;margin:2em'>Opening <a href=" + href + " target=_top>" + url.href.replace(/[<&]/g, "") + "</a>…</p>";
-  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
-}
-
 const ARCHIVE_PREFIX = /^\/(app|data|vendor|scratch)(\/|$)/;
 const ARCHIVE_EXACT = new Set(["/download.uapp", "/template.uapp", "/upload"]);
 
@@ -177,14 +184,66 @@ const ARCHIVE_EXACT = new Set(["/download.uapp", "/template.uapp", "/upload"]);
 // relative to the registration scope and serve from there.
 const SCOPE = new URL(self.registration.scope).pathname; // e.g. "/uapp/demo/"
 
+// Root-form path relative to the scope: "/uapp/demo/app/x" and "/app/x" both
+// become "/app/x". A path OUTSIDE the scope is null — not ours at all. (A
+// worker sees every same-origin request its clients make, scope or not: scope
+// decides which CLIENTS it controls, not which URLs it is asked about. With
+// scope "/" nothing is outside it and paths are judged by shellPath alone.)
+const scopeRelative = (pathname) =>
+  pathname.startsWith(SCOPE) ? "/" + pathname.slice(SCOPE.length) : null;
+
+// The paths the shell actually owns: its own documents, its bundle, and the
+// archive routes. Everything else on this origin is somebody else's.
+function shellPath(p) {
+  return p === "/" || BUNDLE.has(p) || ARCHIVE_EXACT.has(p) || ARCHIVE_PREFIX.test(p) || p.startsWith("/shell/");
+}
+
+// Is the client making this request one of the shell's own pages?
+//
+// Getting this wrong is expensive: a page we do not own has no in-browser
+// archive behind it, so probing for one costs it the full askShell timeout on
+// EVERY request — measured at ~1.6 s per subresource on thederf.com/photobooth/
+// against a shell that is not even loaded — and withCoi would stamp our
+// COOP/COEP onto its responses.
+//
+// Three sources, cheapest first: the shell announces itself ({shellClient}
+// from boot.js); a navigation we passed through records the client it creates
+// as foreign, so its subresources are known SYNCHRONOUSLY and can be left
+// entirely alone; otherwise clients.get() (a local lookup, not a message
+// round-trip) and the path rule. Service workers are restarted freely and
+// this state is not durable, hence the fallback.
+const shellClients = new Set();
+const clientKind = new Map(); // client id -> true (shell) | false (someone else's page)
+
+function rememberClient(id, isShell) {
+  if (!id) return;
+  clientKind.set(id, isShell);
+  if (clientKind.size > 128) clientKind.delete(clientKind.keys().next().value);
+}
+
+async function clientIsShell(clientId) {
+  if (!clientId) return true;                       // nothing to attribute it to: behave as before
+  if (shellClients.has(clientId)) return true;
+  const known = clientKind.get(clientId);
+  if (known !== undefined) return known;
+  let ours = true;                                  // conservative: if we cannot tell, act as before
+  try {
+    const c = await self.clients.get(clientId);
+    if (c) { const rel = scopeRelative(new URL(c.url).pathname); ours = rel !== null && shellPath(rel); }
+  } catch { /* keep the default */ }
+  rememberClient(clientId, ours);
+  return ours;
+}
+
 self.addEventListener("fetch", (ev) => {
   const url = new URL(ev.request.url);
   if (url.origin !== location.origin) return; // cross-origin: browser handles it
-  // Root-form path relative to the scope: "/uapp/demo/app/x" and "/app/x"
-  // both become "/app/x".
-  const p = url.pathname.startsWith(SCOPE)
-    ? "/" + url.pathname.slice(SCOPE.length)
-    : url.pathname;
+  const p = scopeRelative(url.pathname);
+  if (p === null) return; // outside our scope: whatever else is hosted here
+  // A client we already know is not ours: no respondWith at all, so the
+  // browser fetches exactly as it would with no worker installed. This is the
+  // synchronous fast path — the only one that can hand a request back.
+  if (ev.clientId && clientKind.get(ev.clientId) === false && !shellClients.has(ev.clientId)) return;
   // Only the archive's own POST target (/upload) is ours. Every other write
   // (PUT /site.uapp publishing the local copy, an app's own POST to some
   // server API) goes to the network untouched — netFetch would turn it into
@@ -201,23 +260,55 @@ self.addEventListener("fetch", (ev) => {
     ev.respondWith((async () => {
       const r = await archiveResponse(ev.request, u, ev.clientId, true);
       if (r) return r;
-      // Nobody answered (the shell is busy or mid-reload): that is not "no
-      // such page" — say try again rather than throwing the reader out of
-      // the editor.
-      if (r === undefined) return withCoi(new Response("uapp: the editor did not answer in time — reload to retry", { status: 503, headers: { "retry-after": "1" } }));
       // Not a page of this site's archive: same host, but something else
-      // lives there (another service behind the same reverse proxy, a path
-      // the site never built). Leave the editor and let the server route it
-      // at the top level — which also gives real missing pages the site's
-      // own 404 page instead of the archive's.
-      return withCoi(breakOut(url));
+      // lives there — one of the other apps behind the same Caddy
+      // (/winston/, /photobooth/, /sqlite-rls/), or a path the site never
+      // built. Serve it from the network IN PLACE.
+      //
+      // This used to answer with a stub that sent the TOP window to the URL.
+      // That made embedding any of those apps impossible: putting /winston/
+      // in an <iframe> navigated the whole tab away instead of filling the
+      // frame. A link that means to leave the editor still says so with
+      // target="_top", which the shell honours (see shell/main.js).
+      //
+      // `r === undefined` (no shell answered — busy, mid-reload, or a reader
+      // with #noedit and no shell at all) lands here too: the server holds
+      // the published copy of every real page, which beats the 503 "the
+      // editor did not answer" stub that an embedded app used to show.
+      try { return withCoi(await netFetch(ev.request, url, true)); }
+      catch (e) { return new Response("offline: " + e, { status: 503 }); }
     })());
     return;
   }
+  // A navigation to a path the shell does not own — the reader leaving for
+  // another app on the same host (/keenet, /winston/, /photobooth/). Return
+  // without responding: only the browser's own navigation pipeline gets this
+  // right. Re-issuing it through fetch() cannot, because fetch enforces CORS
+  // across a redirect — thederf.com/keenet is a 301 to keenet.thederf.com,
+  // which sends no Access-Control-Allow-Origin, so the fetch threw and the
+  // reader got our "offline: TypeError: Failed to fetch" 503 instead of the
+  // page. Same-origin redirects "worked" but left the address bar on the
+  // pre-redirect URL (/winston, not /winston/), and withCoi put our
+  // COOP/COEP on an unrelated app's document.
+  //
+  // The shell's own document still goes through the branches below, so a
+  // deployment serving no COI headers of its own is still isolated by us.
+  if (ev.request.mode === "navigate" && !shellPath(p)) {
+    // Its subresources are ours to ignore too, and now we can say so without
+    // an async lookup.
+    rememberClient(ev.resultingClientId, false);
+    return;
+  }
+  if (ev.request.mode === "navigate") rememberClient(ev.resultingClientId, true);
   if (ARCHIVE_PREFIX.test(p) || ARCHIVE_EXACT.has(p)) {
     const u = new URL(url);
     u.pathname = p;
-    ev.respondWith(archiveResponse(ev.request, u, ev.clientId));
+    ev.respondWith((async () => {
+      // Another app on this origin that happens to use one of our prefixes
+      // (its own /vendor/... say): it has no archive behind it.
+      if (!(await clientIsShell(ev.clientId))) return netFetch(ev.request, u, false);
+      return archiveResponse(ev.request, u, ev.clientId);
+    })());
     return;
   }
   // Everything else: the ARCHIVE first (once an app is open), the static
@@ -230,6 +321,12 @@ self.addEventListener("fetch", (ev) => {
   // passes straight through (see handleSwRequest in boot.js).
   ev.respondWith((async () => {
     try {
+      // A page that is not ours, whose navigation this worker never saw (it
+      // was loaded before we installed, or we were restarted since). Be the
+      // network and nothing else: no archive probe, no COI stamp. The answer
+      // is cached, so every later request from it takes the synchronous
+      // hand-back at the top of this handler instead.
+      if (!(await clientIsShell(ev.clientId))) return netFetch(ev.request, null, false);
       // Never for a navigation: a top document is the SERVER's page (with
       // its injected chrome) — the shell being navigated away from is still
       // a client here and would hand over the raw archive copy instead.

@@ -1172,7 +1172,7 @@ fn inject_chrome(bytes: Vec<u8>, chrome: Option<&str>) -> Vec<u8> {
         inject.push_str(META);
     }
     if let Some(v) = chrome {
-        if !lower.contains("/chrome.js") {
+        if !loads_chrome_entry(&lower) {
             inject.push('\n');
             inject.push_str(&format!(r#"<script src="/chrome.js?v={v}" defer></script>"#));
         }
@@ -1187,6 +1187,25 @@ fn inject_chrome(bytes: Vec<u8>, chrome: Option<&str>) -> Vec<u8> {
         }
     }
     format!("{inject}\n{text}").into_bytes()
+}
+
+/// Does the document already load the injected `/chrome.js` entry point?
+///
+/// Has to be an exact path match, not a substring: a site may ship a file of
+/// its own whose name merely *ends* in `chrome.js` (thederf.com's pages load
+/// `/js/chrome.js`, its window chrome), and a substring test treats that as
+/// the tag already being present — so nothing is injected and the editor
+/// never starts on any page of the site.
+fn loads_chrome_entry(lower: &str) -> bool {
+    const NAME: &str = "/chrome.js";
+    let b = lower.as_bytes();
+    lower.match_indices(NAME).any(|(i, _)| {
+        // The path must start right after an attribute's quote (or `=`, for an
+        // unquoted src) and end at the quote, a `?query` or whitespace.
+        let opens = i > 0 && matches!(b[i - 1], b'"' | b'\'' | b'=' | b' ');
+        let ends = matches!(b.get(i + NAME.len()), None | Some(b'"' | b'\'' | b'?' | b' ' | b'>'));
+        opens && ends
+    })
 }
 
 fn strip_wasm_marker(text: &str) -> String {
@@ -1365,5 +1384,54 @@ async fn site_publish(
         }
         Ok(Err(resp)) => resp,
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("publish failed: {e}")).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn injected(html: &str) -> String {
+        String::from_utf8(inject_chrome(html.as_bytes().to_vec(), Some("abc123"))).unwrap()
+    }
+
+    #[test]
+    fn a_site_file_named_chrome_js_does_not_suppress_the_entry_point() {
+        // thederf.com's generated pages load their own `/js/chrome.js` (the
+        // window chrome). A substring test on "/chrome.js" matched it and the
+        // tag stopped being injected site-wide: the editor never mounted.
+        let page = r#"<html><head><title>t</title></head><body>
+          <script>var srcs = ["/uapp.js", "/js/chrome.js?v=1", "/js/build.js?v=1"];</script>
+        </body></html>"#;
+        let out = injected(page);
+        assert!(out.contains(r#"<script src="/chrome.js?v=abc123" defer></script>"#), "{out}");
+        // ...and the site's own reference is left alone.
+        assert!(out.contains(r#""/js/chrome.js?v=1""#), "{out}");
+    }
+
+    #[test]
+    fn the_entry_point_is_never_injected_twice() {
+        for tag in [
+            r#"<script src="/chrome.js?v=old" defer></script>"#,
+            r#"<script src="/chrome.js" defer></script>"#,
+            r#"<script src='/chrome.js?v=old'></script>"#,
+            r#"<script src=/chrome.js defer></script>"#,
+        ] {
+            let out = injected(&format!("<html><head>{tag}</head><body></body></html>"));
+            assert_eq!(out.matches("/chrome.js").count(), 1, "duplicated for {tag}: {out}");
+        }
+    }
+
+    #[test]
+    fn injection_lands_inside_head_and_adds_the_viewport_once() {
+        let out = injected("<html><head><title>t</title></head><body>x</body></html>");
+        let head = out.find("</head>").unwrap();
+        assert!(out.find("/chrome.js").unwrap() < head, "{out}");
+        assert_eq!(out.matches("name=\"viewport\"").count(), 1, "{out}");
+        // A page with its own viewport keeps just the one.
+        let own = injected(
+            r#"<html><head><meta name="viewport" content="width=device-width"></head><body></body></html>"#,
+        );
+        assert_eq!(own.matches("name=\"viewport\"").count(), 1, "{own}");
     }
 }
