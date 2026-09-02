@@ -112,6 +112,17 @@ export const S = {
   },
 
   settings: {
+    toolbarSection: "Werkzeugleiste",
+    toolbarHint: "Die Leiste um die App: Name, Dateien, Datenbank, Werkzeuge, Einstellungen und Chat. Ausgeblendet füllt die App das Fenster allein. Wird mit der App gespeichert und öffnet überall so.",
+    toolbarOpenWith: "Beim Öffnen der App",
+    toolbarShown: "Werkzeugleiste anzeigen",
+    toolbarHidden: "Werkzeugleiste ausblenden",
+    toolbarShortcut: "Tastenkürzel",
+    toolbarShortcutNone: "Keines",
+    toolbarShortcutHint: "Zeigt und verbirgt die Werkzeugleiste, egal wo Sie in der App sind. Leer lassen, um es zu entfernen — die Schaltfläche in der Ecke holt die Leiste immer zurück.",
+    toolbarNeedsModifier: "Halten Sie zusätzlich Strg, Alt oder Umschalt, oder nehmen Sie eine F-Taste: allein würde sie beim Tippen in der App auslösen.",
+    toolbarRecord: "Aufnehmen",
+    toolbarRecording: "Tasten drücken…",
     title: "Einstellungen",
     downloadSection: "Herunterladen",
     downloadHint: "Speichern Sie eine Kopie dieser App oder laden Sie eine leere Vorlage herunter (nur App-Dateien, keine Daten oder Verlauf).",
@@ -248,6 +259,12 @@ export const S = {
     restoreConfirm: (name, time) => `${name} auf die Version von ${time} zurücksetzen? Dies wird eine neue Version für alle.`,
     listView: "Listenansicht",
     gridView: "Rasteransicht",
+  },
+
+  toolbar: {
+    hideTitle: "Werkzeugleiste ausblenden",
+    showTitle: "Werkzeugleiste anzeigen",
+    menuHide: "Leiste ausblenden",
   },
 
   topbar: {

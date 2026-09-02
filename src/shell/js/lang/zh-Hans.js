@@ -112,6 +112,17 @@ export const S = {
   },
 
   settings: {
+    toolbarSection: "工具栏",
+    toolbarHint: "应用周围的这条栏：应用名称、文件、数据库、工具、设置和聊天。隐藏后，应用将独占整个窗口。该设置随应用一起保存，因此在任何地方打开都是这样。",
+    toolbarOpenWith: "打开应用时",
+    toolbarShown: "显示工具栏",
+    toolbarHidden: "隐藏工具栏",
+    toolbarShortcut: "键盘快捷键",
+    toolbarShortcutNone: "无",
+    toolbarShortcutHint: "在应用中的任何位置都可显示或隐藏工具栏。留空即可移除快捷键——角落里的按钮仍能把工具栏找回来。",
+    toolbarNeedsModifier: "请同时按住 Ctrl、Alt 或 Shift，或改用 F 键：单独使用会在应用中打字时触发。",
+    toolbarRecord: "录制",
+    toolbarRecording: "请按下按键…",
     title: "设置",
     downloadSection: "下载",
     downloadHint: "保存此应用的副本，或下载空白模板（仅含应用文件，不含数据或历史记录）。",
@@ -248,6 +259,12 @@ export const S = {
     restoreConfirm: (name, time) => `将 ${name} 恢复到 ${time} 的版本？这将成为所有人的新版本。`,
     listView: "列表视图",
     gridView: "网格视图",
+  },
+
+  toolbar: {
+    hideTitle: "隐藏工具栏",
+    showTitle: "显示工具栏",
+    menuHide: "隐藏工具栏",
   },
 
   topbar: {

@@ -150,7 +150,7 @@ fn deny() -> Response {
     (StatusCode::FORBIDDEN, "uapp: missing or bad token").into_response()
 }
 
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     s.chars().map(|c| match c {
         '&' => "&amp;".to_string(),
         '<' => "&lt;".to_string(),
@@ -172,9 +172,27 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
     if headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("iframe") {
         return serve_sqlar(&app, "index.html", &headers);
     }
+    // Open with the toolbar this app saved for itself (see toolbar.rs). Set in
+    // the HTML rather than by the shell after its first RPC: a class that
+    // arrives a round trip late means the bar paints and then vanishes, which
+    // reads as a glitch every single time the app is opened.
+    let topbar_class = {
+        let eng = app.engine.lock().unwrap();
+        let saved = crate::store::config_get(&eng.db, "toolbar").ok().flatten();
+        if crate::toolbar::settings(saved.as_ref())["hidden"] == json!(true) {
+            " class=\"hidden\""
+        } else {
+            ""
+        }
+    };
     // The name comes from the shared .uapp file — escape it, or a hostile
     // file gets stored XSS in the (privileged) shell origin.
-    let mut resp = Html(SHELL_HTML.replace("{{APP_NAME}}", &html_escape(&app.name))).into_response();
+    let mut resp = Html(
+        SHELL_HTML
+            .replace("{{APP_NAME}}", &html_escape(&app.name))
+            .replace("{{TOPBAR_CLASS}}", topbar_class),
+    )
+    .into_response();
     // Refresh the cookie so the iframe + ws can auth without the token in URL.
     resp.headers_mut().insert(
         header::SET_COOKIE,
@@ -437,7 +455,7 @@ fn inject_viewport(bytes: Vec<u8>) -> Vec<u8> {
     format!("{inject}\n{text}").into_bytes()
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -1051,17 +1069,23 @@ async fn security_headers(State(app): State<Arc<App>>, mut resp: Response) -> Re
 /// chrome. Without it a site still serves perfectly well — it just has no
 /// editor.
 pub fn load_chrome(dir: &std::path::Path) -> anyhow::Result<crate::app::Chrome> {
+    load_bundle(dir, false)
+}
+
+/// Read the browser build into memory. `standalone` keeps the pieces that make
+/// the bundle a page of its own — `index.html` (the shell's entry document)
+/// and `launcher.uapp` — for the archive-less host mode
+/// ([`crate::webhost`]); a site's editing chrome drops them, since the site's
+/// own index.html must win at `/`. Build leftovers never ship either way.
+pub fn load_bundle(dir: &std::path::Path, standalone: bool) -> anyhow::Result<crate::app::Chrome> {
     use anyhow::Context as _;
     use std::hash::{Hash, Hasher};
-    // The demo's own launcher and landing page (index.html would shadow the
-    // site's), plus build leftovers, must not be served.
-    fn skip(rel: &str) -> bool {
-        rel == "index.html"
-            || rel == "launcher.uapp"
+    let skip = |rel: &str| -> bool {
+        (!standalone && (rel == "index.html" || rel == "launcher.uapp"))
             || rel.starts_with("examples/")
             || rel.ends_with(".d.ts")
             || rel.ends_with(".map")
-    }
+    };
     let mut bundle = HashMap::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -1101,14 +1125,14 @@ pub fn load_chrome(dir: &std::path::Path) -> anyhow::Result<crate::app::Chrome> 
 
 /// A strong-form validator over the served bytes. Only a cache validator, so
 /// a non-cryptographic hash is fine.
-fn etag_for(bytes: &[u8]) -> String {
+pub(crate) fn etag_for(bytes: &[u8]) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
     format!("\"{:x}\"", h.finish())
 }
 
-fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+pub(crate) fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
     headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())

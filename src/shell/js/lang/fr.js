@@ -112,6 +112,17 @@ export const S = {
   },
 
   settings: {
+    toolbarSection: "Barre d'outils",
+    toolbarHint: "La barre autour de l'application : son nom, Fichiers, Base de données, Outils, Réglages et le chat. Masquée, l'application occupe seule la fenêtre. Enregistré avec l'application : elle s'ouvrira ainsi partout.",
+    toolbarOpenWith: "À l'ouverture de l'application",
+    toolbarShown: "Afficher la barre d'outils",
+    toolbarHidden: "Masquer la barre d'outils",
+    toolbarShortcut: "Raccourci clavier",
+    toolbarShortcutNone: "Aucun",
+    toolbarShortcutHint: "Affiche et masque la barre d'outils, où que vous soyez dans l'application. Laissez vide pour le supprimer — le bouton dans le coin ramène toujours la barre.",
+    toolbarNeedsModifier: "Ajoutez Ctrl, Alt ou Maj, ou utilisez une touche F : seule, elle se déclencherait pendant la saisie dans l'application.",
+    toolbarRecord: "Enregistrer",
+    toolbarRecording: "Appuyez sur les touches…",
     title: "Paramètres",
     downloadSection: "Téléchargement",
     downloadHint: "Enregistrez une copie de cette appli ou téléchargez un modèle vierge (fichiers appli uniquement, sans données ni historique).",
@@ -248,6 +259,12 @@ export const S = {
     restoreConfirm: (name, time) => `Restaurer ${name} à la version du ${time} ? Cela crée une nouvelle version pour tout le monde.`,
     listView: "Vue liste",
     gridView: "Vue grille",
+  },
+
+  toolbar: {
+    hideTitle: "Masquer la barre d'outils",
+    showTitle: "Afficher la barre d'outils",
+    menuHide: "Masquer la barre",
   },
 
   topbar: {

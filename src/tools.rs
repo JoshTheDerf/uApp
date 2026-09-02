@@ -188,6 +188,37 @@ pub fn registry() -> Vec<ToolDef> {
             run: |app, input| rpc::dispatch(app, "files.present",
                 json!({"name": input["name"], "mode": input["mode"], "_assistant": true})),
         },
+        ToolDef {
+            name: "show_toolbar",
+            description: "Show or hide the uApp toolbar — the bar around the app with its name, Files, Database, Tools, Settings and chat. Hide it to hand the user the app on its own, filling the window (a demo, a screenshot, using rather than building it); show it to bring the controls back. This session only: it does NOT change how the app opens next time — set_toolbar_default does that. Hiding never traps anyone; a small reveal button appears in the corner and the keyboard shortcut keeps working.",
+            gated: false,
+            schema: || obj(json!({
+                "visible": {"type": "boolean", "description": "true shows the toolbar, false hides it"}
+            }), &["visible"]),
+            run: |app, input| rpc::dispatch(app, "toolbar.set", json!({"visible": input["visible"]})),
+        },
+        ToolDef {
+            name: "set_toolbar_default",
+            description: "Change how this app OPENS: whether the uApp toolbar starts hidden, and which keystroke toggles it. Saved in the .uapp file, so it travels with the app to everyone who opens it. Use this when the user wants it to stick (\"always open this without the bar\"), and show_toolbar when they just mean now. Pass either field or both.",
+            gated: true,
+            schema: || obj(json!({
+                "hidden": {"type": "boolean", "description": "true = the toolbar starts hidden every time this app is opened"},
+                "shortcut": {"type": "string", "description": "keystroke that toggles it, e.g. \"F9\" or \"Mod+Alt+B\" (Mod = Cmd on macOS, Ctrl elsewhere). Comma-separate alternatives. \"\" removes it, leaving only the on-screen buttons."}
+            }), &[]),
+            run: |app, input| rpc::dispatch(app, "toolbar.setDefault", input.clone()),
+        },
+        ToolDef {
+            name: "show_panel",
+            description: "Open or close one of the uApp panels beside the app: \"chat\" (this conversation), \"files\" (the file browser), \"database\" (browse tables and run SQL), \"settings\", \"tools\" (tools & integrations). Use it to put the user where the answer is instead of describing where to click — open \"database\" after building a table, \"files\" after writing files they should look through. Opening one closes whichever was open (they share the same edge) and reveals the toolbar if it was hidden. Display only, this session: nothing about the app changes.",
+            gated: false,
+            schema: || obj(json!({
+                "panel": {"type": "string", "enum": crate::toolbar::PANELS,
+                          "description": "which panel"},
+                "open": {"type": "boolean", "description": "true opens it, false closes it"}
+            }), &["panel", "open"]),
+            run: |app, input| rpc::dispatch(app, "panel.set",
+                json!({"panel": input["panel"], "open": input["open"]})),
+        },
         // Sub-agents: ungated. The inner loop runs every tool through the same
         // approval_gate with the parent's mode, so gated work inside still
         // prompts — a second prompt for the delegation itself buys nothing.

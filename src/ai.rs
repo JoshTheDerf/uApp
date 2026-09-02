@@ -200,6 +200,8 @@ HOW THE APP WORKS
     uapp.action(name, opts, handler)                 // register business logic (REQUIRED — see below)
     uapp.call(name, input)                           // invoke one of the app's own actions
     uapp.tool(name, input)                           // the app can call ANY tool you can: sql_query, import_csv, download_lib, mcp__server__tool, app__action...
+    uapp.toolbar.hide() / .show() / .toggle()        // the uapp bar around this app, for THIS window (saves nothing)
+    uapp.panel.open(name)                            // a panel beside the app: chat, files, database, settings, tools
     uapp.user, uapp.device                           // attribution info
   Vanilla JS by default.
 

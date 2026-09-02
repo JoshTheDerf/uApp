@@ -166,6 +166,12 @@ async function closeViewer() {
   $("viewerdlg").close();
 }
 /// Line-numbered, highlighted read-only view.
+function looksBinary(buf) {
+  const b = new Uint8Array(buf, 0, Math.min(buf.byteLength, 8192));
+  for (let i = 0; i < b.length; i++) if (b[i] === 0) return true;
+  return false;
+}
+
 function codeView(text, lang) {
   const n = text.split("\n").length;
   const nums = Array.from({ length: n }, (_, i) => i + 1).join("\n");
@@ -225,7 +231,15 @@ async function renderViewer() {
     try {
       const r = await fetch(url, { cache: "no-store" });
       if (!r.ok) throw new Error("HTTP " + r.status);
-      text = await r.text();
+      const buf = await r.arrayBuffer();
+      // An unknown extension is text by default (fileKind); a file that is
+      // really binary shows up here as NUL bytes in its first KBs. Never put
+      // that in a textarea: a save would write back mangled bytes.
+      if (looksBinary(buf)) {
+        if (vw.name !== name) return;
+        return viewerFallback(S.viewer.noPreview);
+      }
+      text = new TextDecoder().decode(buf);
     } catch (e) {
       if (vw.name !== name) return; // a present/open raced us
       return viewerFallback(S.viewer.loadFailed(e.message));

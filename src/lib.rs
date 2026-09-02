@@ -12,6 +12,8 @@ pub mod engine;
 pub mod gui;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod install;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod library;
 pub mod mcp;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod permissions;
@@ -27,7 +29,10 @@ pub mod server;
 pub mod shortcut;
 pub mod store;
 pub mod template;
+pub mod toolbar;
 pub mod tools;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod webhost;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
@@ -423,6 +428,33 @@ pub fn serve_public(
                 let _ = tokio::signal::ctrl_c().await;
                 shutdown_app.graceful_cleanup();
             })
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    })
+}
+
+/// Serve the browser build with NO archive (`uapp serve --chrome <dir>` and
+/// no file): the shell's own page, opening whatever its URL names — see
+/// [`webhost`]. No engine, no token, no state. Blocks until interrupted.
+pub fn serve_web(bind: &str, port: u16, chrome_dir: &std::path::Path, coi: bool, open: Option<String>) -> Result<()> {
+    let chrome = server::load_bundle(chrome_dir, true)?;
+    anyhow::ensure!(
+        chrome.bundle.contains_key("/index.html"),
+        "{} has no index.html — run scripts/build-web.sh",
+        chrome_dir.display()
+    );
+    let host = Arc::new(webhost::WebHost { chrome, coi, open: open.clone() });
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let listener = tokio::net::TcpListener::bind((bind, port)).await?;
+        let addr = listener.local_addr()?;
+        eprintln!("uapp: serving the browser build ({}) at http://{}/", chrome_dir.display(), addr);
+        match &open {
+            Some(u) => eprintln!("uapp: a bare visit opens {u}; ?open=<url> and ?app=<id> override it"),
+            None => eprintln!("uapp: a bare visit opens the launcher; ?open=<url> opens an archive from a URL"),
+        }
+        axum::serve(listener, webhost::router(host))
+            .with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; })
             .await?;
         Ok::<_, anyhow::Error>(())
     })

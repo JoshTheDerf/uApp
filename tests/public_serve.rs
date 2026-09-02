@@ -76,6 +76,10 @@ fn put(url: &str, token: Option<&str>, if_match: Option<&str>, body: &[u8]) -> (
         Err(e) => panic!("PUT {url} failed: {e}"),
     }
 }
+fn live_config(path: &std::path::Path, key: &str) -> Option<String> {
+    let c = rusqlite::Connection::open(path).unwrap();
+    c.query_row("SELECT value FROM uapp_config WHERE key=?1", [key], |r| r.get(0)).ok()
+}
 fn tmp(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("uapp-public-{}", fastrand::u32(..)));
     std::fs::create_dir_all(&dir).unwrap();
@@ -256,6 +260,7 @@ fn publish_replaces_content_and_keeps_secrets() {
              CREATE TABLE tags(name TEXT);
              INSERT INTO tags VALUES('rust');
              INSERT OR REPLACE INTO uapp_config(key,value) VALUES('ai','{\"api_key\":\"sk-FROM-BROWSER\"}');
+             INSERT OR REPLACE INTO uapp_config(key,value) VALUES('toolbar','{\"hidden\":true}');
              INSERT INTO uapp_chat(mid,ts,ctr,device,user,role,content,session)
                VALUES('m9',1,1,'d','u','user','browser chat','s9');",
         )
@@ -291,6 +296,10 @@ fn publish_replaces_content_and_keeps_secrets() {
     let ai: String = body(&format!("{base}/download.uapp?t={TOKEN}"));
     assert!(ai.contains("sk-LEAKED"), "server's own api key must survive a publish");
     assert!(!ai.contains("sk-FROM-BROWSER"), "a copy must not be able to set config");
+    // …except the toolbar default, which is the site's own look and travels.
+    let tb: Option<String> = live_config(&path, "toolbar");
+    assert_eq!(tb.as_deref(), Some("{\"hidden\":true}"), "the toolbar default is published with the copy");
+    assert!(String::from_utf8_lossy(&fresh).contains("\"hidden\":true"), "and the served archive carries it to visitors");
     assert!(ai.contains("private chat") && !ai.contains("browser chat"), "chat is the server's");
     assert!(ai.contains("ssn,salary"), "server data/ must be kept when data isn't published");
     assert!(!ai.contains("planted"), "data/ from the copy must be ignored without --publish-data");

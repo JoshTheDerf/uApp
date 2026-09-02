@@ -120,6 +120,11 @@ function handleEvent(p) {
     emit("present", p);
   } else if (p.type === "reload") {
     emit("reload", p); // app.reload RPC / the AI's reload_app tool
+  } else if (p.type === "toolbar") {
+    // show_toolbar / set_toolbar_default (see toolbar-visibility.js).
+    emit("toolbar", p);
+  } else if (p.type === "panel") {
+    emit("panel", p); // show_panel
   } else if (p.type === "drop_hover" || p.type === "drop_leave" || p.type === "drop_files") {
     emit("native-drop", p);
   } else if (p.type === "renamed") {

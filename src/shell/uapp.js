@@ -21,6 +21,12 @@
  *   await uapp.tool("import_csv", { file: "data/x.csv" });
  *   await uapp.tool("mcp__crm__lookup", { q: "..." });
  *
+ * TOOLBAR — the bar uapp wraps around this app (name, Files, Database, chat):
+ *   uapp.toolbar.hide();                       // this window, right now
+ *   uapp.toolbar.setDefault({ hidden: true }); // how the app OPENS, saved
+ *   uapp.panel.open("database");               // a panel beside the app
+ *
+
  * Writes commit straight into the .uapp file, one transaction each.
  * Never use datetime('now')/random() in exec/batch SQL — compute values in JS
  * and pass them as params.
@@ -494,6 +500,40 @@
     return r;
   }
 
+  // ---- the toolbar around this app ---------------------------------------
+  // postMessage, not an RPC: the .uapp is shared, so going through the engine
+  // would hide the toolbar in every other window that has this app open — on
+  // someone else's device, mid-task. This reaches exactly the shell hosting
+  // this page, at whatever frame depth it sits: in the browser build the
+  // nearest ancestor flagged as the wasm host (the shell may itself be a
+  // frame in someone's desktop, so `top` would be the wrong window); in the
+  // native window the shell is the top document.
+  const shellWindow = () => {
+    if (wasmHost) return wasmHost;
+    try { return window.top !== window ? window.top : null; } catch { return null; } // cross-origin top: not our shell
+  };
+  function toolbarMsg(action, extra) {
+    const w = shellWindow();
+    if (!w) return false; // no shell around this page (opened on its own)
+    try { w.postMessage({ __uappToolbar: { action, ...extra } }, location.origin); return true; } catch { return false; }
+  }
+  function toolbarState() {
+    const w = shellWindow();
+    if (!w) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const id = "t" + Math.random().toString(36).slice(2);
+      const done = (v) => { window.removeEventListener("message", onMsg); clearTimeout(timer); resolve(v); };
+      const onMsg = (e) => {
+        if (e.origin !== location.origin) return;
+        const st = e.data && e.data.__uappToolbarState;
+        if (st && st.id === id) done(st.state);
+      };
+      window.addEventListener("message", onMsg);
+      const timer = setTimeout(() => done(null), 2000); // an older shell never answers
+      try { w.postMessage({ __uappToolbar: { action: "state", id } }, location.origin); } catch { done(null); }
+    });
+  }
+
   const api = {
     rpc,
     query: async (sql, params = []) => shapeRows(await rpc("sql.query", { sql, params })),
@@ -549,6 +589,41 @@
     presentFile: (name, mode) => rpc("files.present", { name, mode }),
     /// Observe presents — an app can react instead of leaving it to the shell.
     onPresent: (cb) => presentCbs.push(cb),
+    /// The toolbar uapp wraps around this app: the bar with the app's name,
+    /// Files, Database, Tools, Settings and chat. Hidden, this page fills the
+    /// window.
+    ///
+    /// show/hide/toggle change THIS window, right now, and save nothing — the
+    /// app still opens the way its setting says, and the person using it can
+    /// always bring the bar back (its shortcut, or the corner handle that
+    /// appears while it is hidden). Use them for a presentation mode, a
+    /// full-bleed canvas, a kiosk screen.
+    ///
+    /// setDefault({hidden, shortcut}) is that setting: saved in the .uapp, so
+    /// it travels with the app to everyone who opens it. shortcut is a
+    /// keystroke like "F9" or "Mod+Alt+B" (Mod = Cmd on macOS, Ctrl
+    /// elsewhere); "" removes it.
+    toolbar: {
+      show: () => toolbarMsg("show"),
+      hide: () => toolbarMsg("hide"),
+      toggle: () => toolbarMsg("toggle"),
+      /// {visible, hidden, shortcut, panel}, or null when no shell is hosting
+      /// this page. `panel` is the open panel's name, or null.
+      state: () => toolbarState(),
+      setDefault: (opts = {}) => rpc("toolbar.setDefault", opts),
+    },
+    /// The panels beside the app: "chat", "files", "database", "settings",
+    /// "tools". Opening one closes whichever was open (they share an edge) and
+    /// reveals the toolbar if it was hidden. Session-only, like the toolbar
+    /// itself — which panel someone has open is not the app's business to
+    /// remember for them.
+    panel: {
+      open: (name) => toolbarMsg("panel", { panel: name, open: true }),
+      close: (name) => toolbarMsg("panel", { panel: name, open: false }),
+      toggle: (name) => toolbarMsg("panel", { panel: name }),
+      /// The open panel's name, or null.
+      state: async () => ((await toolbarState()) || {}).panel ?? null,
+    },
     user: null,
     device: null,
     ready: (async () => {

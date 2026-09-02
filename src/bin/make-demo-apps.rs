@@ -89,6 +89,10 @@ fn build_launcher(outdir: &str, samples: &[Sample], html: &str) -> std::io::Resu
         "app/index.html", 420i32, STABLE_MS / 1000, html.len() as i64, html.as_bytes()
     ]).unwrap();
 
+    // Where the launcher fetches samples from: next to itself by default
+    // (the static demo's examples/), or a uapp-library shelf — e.g.
+    // UAPP_SAMPLES_BASE=/uapp/apps/ when the launcher is served from one.
+    let samples_base = env::var("UAPP_SAMPLES_BASE").unwrap_or_else(|_| "examples/".into());
     let mut stmt = conn
         .prepare("INSERT INTO samples(name,url,emoji,description,website,size,kind) VALUES(?,?,?,?,?,?,?)")
         .unwrap();
@@ -101,7 +105,7 @@ fn build_launcher(outdir: &str, samples: &[Sample], html: &str) -> std::io::Resu
             .unwrap_or(0);
         stmt.execute(params![
             &sample.name,
-            &format!("examples/{}", sample.file),
+            &format!("{}{}", samples_base, sample.file),
             &sample.emoji,
             &sample.description,
             &sample.website,

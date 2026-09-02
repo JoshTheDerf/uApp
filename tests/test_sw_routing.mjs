@@ -198,5 +198,89 @@ console.log("\ncross-origin:");
   ok(!claimed, "hands back another origin entirely");
 }
 
+// ---- 8. several shells on one origin: instance routing -------------------
+// A desktop page with two apps open in two frames (or two tabs of the demo)
+// shares one worker. boot.js puts its instance id into every frame URL
+// ("<scope>i/<inst>/app/..."); the worker strips it and asks exactly that
+// shell — never both, since the faster (wrong) app would otherwise win.
+console.log("\ninstance routing:");
+{
+  const sw = load("/uapp/demo/");
+  const posted = [];
+  const mkClient = (id, url, frameType) => ({ id, url, frameType, postMessage: (m) => posted.push({ to: id, m }) });
+  // matchAll spreads clients and swaps in a no-op postMessage; give the
+  // broadcast path a recorder too.
+  sw.self_.clients.matchAll = async () => [...sw.clients.values()].map((c) => ({ ...c, postMessage: (m) => posted.push({ to: c.id, m }) }));
+  sw.clients.set("shell-a", mkClient("shell-a", "https://thederf.com/uapp/demo/?open=/uapp/apps/a.uapp", "nested"));
+  sw.clients.set("shell-b", mkClient("shell-b", "https://thederf.com/uapp/demo/?open=/uapp/apps/b.uapp", "nested"));
+  sw.clients.set("frame-a", mkClient("frame-a", "https://thederf.com/uapp/demo/i/aaaa/app/index.html", "nested"));
+  sw.clients.set("frame-b", mkClient("frame-b", "https://thederf.com/uapp/demo/i/bbbb/app/index.html", "nested"));
+  for (const f of sw.handlers.message) f({ data: { shellClient: true, inst: "aaaa" }, source: sw.clients.get("shell-a") });
+  for (const f of sw.handlers.message) f({ data: { shellClient: true, inst: "bbbb" }, source: sw.clients.get("shell-b") });
+
+  // The instance segment is stripped, and the ask goes to that shell alone.
+  let r = dispatch(sw, { path: "/uapp/demo/i/aaaa/app/js/app.js", clientId: "frame-a" });
+  ok(r.claimed, "claims a frame's archive fetch under its instance prefix");
+  await new Promise((res) => setTimeout(res, 20));
+  let asks = posted.filter((p) => p.m.swRequest);
+  ok(asks.length === 1 && asks[0].to === "shell-a", "asked shell A only", JSON.stringify(asks.map((a) => a.to)));
+  ok(asks[0].m.path === "/app/js/app.js", "the shell sees the plain archive path", asks[0].m.path);
+  ok(asks[0].m.inst === "aaaa", "the ask names the instance", asks[0].m.inst);
+  posted.length = 0;
+
+  r = dispatch(sw, { path: "/uapp/demo/i/bbbb/download.uapp", clientId: "shell-b" });
+  ok(r.claimed, "claims a download under the other instance");
+  await new Promise((res) => setTimeout(res, 20));
+  asks = posted.filter((p) => p.m.swRequest);
+  ok(asks.length === 1 && asks[0].to === "shell-b", "asked shell B only", JSON.stringify(asks.map((a) => a.to)));
+  posted.length = 0;
+
+  // A page's root-absolute reference carries no segment: attributed through
+  // the client that made it (its frame was created under /i/bbbb/).
+  dispatch(sw, nav("/uapp/demo/i/bbbb/app/index.html", { destination: "iframe", clientId: "shell-b", resultingClientId: "frame-b2" }));
+  await new Promise((res) => setTimeout(res, 20));
+  posted.length = 0;
+  sw.clients.set("frame-b2", mkClient("frame-b2", "https://thederf.com/uapp/demo/i/bbbb/app/index.html", "nested"));
+  r = dispatch(sw, { path: "/uapp/demo/vendor/lib.js", clientId: "frame-b2" });
+  ok(r.claimed, "claims a segment-less archive path from a known frame");
+  await new Promise((res) => setTimeout(res, 20));
+  asks = posted.filter((p) => p.m.swRequest);
+  ok(asks.length === 1 && asks[0].to === "shell-b", "routed by the requesting frame's instance", JSON.stringify(asks.map((a) => a.to)));
+  posted.length = 0;
+
+  // An instance nobody announced (a restarted worker): everyone is asked, and
+  // the ask still names the instance so the shells can filter themselves.
+  r = dispatch(sw, { path: "/uapp/demo/i/zzzz/app/x.css", clientId: "" });
+  await new Promise((res) => setTimeout(res, 20));
+  asks = posted.filter((p) => p.m.swRequest);
+  ok(asks.length === sw.clients.size && asks.every((a) => a.m.inst === "zzzz"), "unknown instance: broadcast, tagged", `${asks.length} asks`);
+  posted.length = 0;
+
+  // Shell pages themselves: a client at /i/<inst>/app/ is recognised as ours.
+  r = dispatch(sw, { path: "/uapp/demo/i/aaaa/app/style.css", clientId: "frame-a" });
+  ok(r.claimed, "a frame under an instance prefix is a shell page");
+  // Outside the scope entirely is still not ours.
+  ok(!dispatch(sw, { path: "/i/aaaa/app/x.js", clientId: "frame-a" }).claimed, "an instance path outside the scope is not ours");
+
+  // Root-absolute references from OUR frames: "/uapp.js" and "/js/app.js" in
+  // an app page mean the bundle and the archive, as at a root deployment —
+  // not the origin's root, which under a subpath is somebody else's server.
+  // frame-b2 was created by a navigation this worker saw; frame-a was not
+  // (a worker restart) and an unknown client stays untouched.
+  r = dispatch(sw, { path: "/uapp.js", clientId: "frame-b2" });
+  ok(r.claimed, "claims a root-absolute bundle reference from a known frame");
+  await new Promise((res) => setTimeout(res, 20));
+  const bundleFetch = sw.calls.at(-1);
+  ok(bundleFetch && bundleFetch.url === "https://thederf.com/uapp/demo/uapp.js", "and fetches the bundle file under the scope", bundleFetch && bundleFetch.url);
+  posted.length = 0;
+  r = dispatch(sw, { path: "/js/app.js", clientId: "frame-b2" });
+  ok(r.claimed, "claims a root-absolute archive reference from a known frame");
+  await new Promise((res) => setTimeout(res, 20));
+  asks = posted.filter((p) => p.m.swRequest);
+  ok(asks.length === 1 && asks[0].to === "shell-b" && asks[0].m.path === "/js/app.js", "asks that frame's shell for it", JSON.stringify(asks.map((a) => [a.to, a.m.path])));
+  ok(!dispatch(sw, { path: "/js/app.js", clientId: "stranger" }).claimed, "a root-absolute path from an unknown client is not ours");
+  ok(!dispatch(sw, nav("/keenet", { destination: "iframe", clientId: "frame-b2" })).claimed, "a navigation out of the scope from our frame is still a link out");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

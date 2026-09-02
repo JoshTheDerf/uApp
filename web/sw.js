@@ -36,13 +36,17 @@ self.addEventListener("message", (ev) => {
   // boot.js announcing "this client is the shell". The only way to recognise
   // a hosted site's own pages: they live at arbitrary paths (thederf.com/,
   // /admin, /posts/x are all shell pages), so no path rule can spot them.
-  if (m.shellClient) { if (ev.source && ev.source.id) { shellClients.add(ev.source.id); clientKind.delete(ev.source.id); } return; }
+  if (m.shellClient) {
+    if (ev.source && ev.source.id) { shellClients.add(ev.source.id); clientKind.delete(ev.source.id); learnInst(ev.source.id, m.inst); }
+    return;
+  }
   // Any reply at all proves the sender is the shell — free re-registration
   // after a worker restart, which loses shellClients (boot.js only re-announces
-  // on controllerchange, and a restart does not fire one).
-  if ((m.swAck || m.swReply) && ev.source && ev.source.id && !shellClients.has(ev.source.id)) {
-    shellClients.add(ev.source.id);
-    clientKind.delete(ev.source.id);
+  // on controllerchange, and a restart does not fire one). Replies carry the
+  // shell's instance id for the same reason.
+  if ((m.swAck || m.swReply) && ev.source && ev.source.id) {
+    if (!shellClients.has(ev.source.id)) { shellClients.add(ev.source.id); clientKind.delete(ev.source.id); }
+    learnInst(ev.source.id, m.inst);
   }
   if (m.swAck && acks.has(m.id)) { acks.get(m.id)(); acks.delete(m.id); return; }
   if (m.swReply && waiting.has(m.id)) {
@@ -68,9 +72,19 @@ async function frameTypeOf(clientId) {
 // network. Deliberately not keyed on the client's frameType: a document that
 // is still being parsed may not resolve through clients.get() yet.
 const acks = new Map();
-async function askShell(req, frameType) {
-  const cs = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  req = { ...req, frameType };
+// `inst` names WHICH shell should answer when several share this worker
+// (see "instances" below). The shell it maps to gets the ask alone; when the
+// map does not know it (a restarted worker, a shell that has not spoken yet)
+// every window is asked and the shells filter by the id themselves — a shell
+// never answers for another instance, so the wrong app's files cannot win.
+async function askShell(req, frameType, inst) {
+  let cs = null;
+  if (inst) {
+    const id = shellByInst.get(inst);
+    try { const c = id && await self.clients.get(id); if (c) cs = [c]; } catch { /* broadcast */ }
+  }
+  if (!cs) cs = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  req = { ...req, frameType, inst: inst || null };
   const id = seq++;
   const p = new Promise((res) => {
     waiting.set(id, res);
@@ -138,14 +152,14 @@ function b64FromBuffer(buf) {
 
 // Shell bundle files: never looked up in an archive.
 const BUNDLE = new Set(["/boot.js", "/sw.js", "/worker.js", "/uapp.js", "/uapp_glue.js", "/icons.js", "/shell.css", "/scratch.html",
-  "/chrome.js", "/site-chrome.js", "/uapp_wasm.js", "/uapp_wasm_bg.wasm", "/index.html", "/launcher.uapp", "/site.uapp", "/health"]);
+  "/chrome.js", "/site-chrome.js", "/sync-pill.js", "/uapp_wasm.js", "/uapp_wasm_bg.wasm", "/index.html", "/launcher.uapp", "/site.uapp", "/health"]);
 
 // `probe`: instead of a 404/passthrough response, return null when the
 // archive definitely has no such file (or the shell says passthrough) so the
 // caller can try the network — and `undefined` when NO shell answered at
 // all, which is not a miss: the caller must not conclude the page doesn't
 // exist from a busy or reloading tab.
-async function archiveResponse(req, url, clientId, probe) {
+async function archiveResponse(req, url, clientId, probe, inst) {
   const frameType = await frameTypeOf(clientId);
   let bodyB64 = null;
   if (req.method === "POST") bodyB64 = b64FromBuffer(await req.arrayBuffer());
@@ -153,7 +167,7 @@ async function archiveResponse(req, url, clientId, probe) {
     path: url.pathname + url.search,
     method: req.method,
     bodyB64,
-  }, frameType);
+  }, frameType, inst || instOfClient.get(clientId) || null);
   // Nobody answered a top document, or the page declined (engine not up yet):
   // either way it is the server's own resource, fetch it from there.
   if (probe && !r) return undefined;
@@ -208,6 +222,29 @@ const SCOPE = new URL(self.registration.scope).pathname; // e.g. "/uapp/demo/"
 const scopeRelative = (pathname) =>
   pathname.startsWith(SCOPE) ? "/" + pathname.slice(SCOPE.length) : null;
 
+// ---- instances ---------------------------------------------------------------
+// Several shells can share one worker: a desktop page with two apps open in
+// two frames, or two tabs of the demo. The worker cannot see which shell an
+// app frame belongs to, so the shell puts its instance id INTO the frame's
+// URL — boot.js sets window.__uappBase to "<scope>i/<inst>/", and every URL
+// the shell builds (/app/…, /scratch/, downloads) carries it. Here the segment
+// is split off again: "/i/abc/app/x" is the archive path "/app/x" of shell
+// "abc". Requests without the segment (a page's root-absolute "/js/x", a frame
+// navigated to "/admin") are attributed through the client that made them.
+const INST_RE = /^\/i\/([A-Za-z0-9_-]{1,32})(\/.*)?$/;
+function splitInst(p) {
+  const m = INST_RE.exec(p);
+  return m ? { p: m[2] || "/", inst: m[1] } : { p, inst: null };
+}
+const shellByInst = new Map();  // inst -> shell client id
+const instOfClient = new Map(); // client id (shell or one of its frames) -> inst
+function learnInst(clientId, inst) {
+  if (!clientId || !inst) return;
+  shellByInst.set(inst, clientId);
+  instOfClient.set(clientId, inst);
+  if (instOfClient.size > 256) instOfClient.delete(instOfClient.keys().next().value);
+}
+
 // The paths the shell actually owns: its own documents, its bundle, and the
 // archive routes. Everything else on this origin is somebody else's.
 function shellPath(p) {
@@ -245,7 +282,7 @@ async function clientIsShell(clientId) {
   let ours = true;                                  // conservative: if we cannot tell, act as before
   try {
     const c = await self.clients.get(clientId);
-    if (c) { const rel = scopeRelative(new URL(c.url).pathname); ours = rel !== null && shellPath(rel); }
+    if (c) { const rel = scopeRelative(new URL(c.url).pathname); ours = rel !== null && shellPath(splitInst(rel).p); }
   } catch { /* keep the default */ }
   rememberClient(clientId, ours);
   return ours;
@@ -254,8 +291,27 @@ async function clientIsShell(clientId) {
 self.addEventListener("fetch", (ev) => {
   const url = new URL(ev.request.url);
   if (url.origin !== location.origin) return; // cross-origin: browser handles it
-  const p = scopeRelative(url.pathname);
-  if (p === null) return; // outside our scope: whatever else is hosted here
+  let rel = scopeRelative(url.pathname);
+  // Outside our scope: whatever else is hosted here — EXCEPT a root-absolute
+  // reference from a page in one of our own frames. Apps and generated sites
+  // link "/uapp.js", "/js/app.js", "/vendor/x.js" as they would at a root
+  // deployment, and hosted under a subpath those must still mean the bundle
+  // and the archive, not the origin's root (somebody else's server). Only
+  // for frames we saw being created (instOfClient), and never for a
+  // navigation: a link out to another app on the origin stays a link out.
+  let outside = false;
+  if (rel === null) {
+    if (ev.request.mode === "navigate" || !instOfClient.has(ev.clientId)) return;
+    rel = url.pathname;
+    outside = true;
+  }
+  const { p, inst } = splitInst(rel);
+  // A document this navigation creates belongs to the instance named in its
+  // URL, or failing that to the instance of the document that navigated it.
+  const noteNav = () => {
+    const i = inst || instOfClient.get(ev.clientId);
+    if (i && ev.resultingClientId) { instOfClient.set(ev.resultingClientId, i); if (instOfClient.size > 256) instOfClient.delete(instOfClient.keys().next().value); }
+  };
   // A client we already know is not ours: no respondWith at all, so the
   // browser fetches exactly as it would with no worker installed. This is the
   // synchronous fast path — the only one that can hand a request back.
@@ -273,8 +329,9 @@ self.addEventListener("fetch", (ev) => {
       && !ARCHIVE_PREFIX.test(p) && !ARCHIVE_EXACT.has(p) && !p.startsWith("/shell/") && !BUNDLE.has(p)) {
     const u = new URL(url);
     u.pathname = "/app" + (p === "/" ? "/" : p);
+    noteNav();
     ev.respondWith((async () => {
-      const r = await archiveResponse(ev.request, u, ev.clientId, true);
+      const r = await archiveResponse(ev.request, u, ev.clientId, true, inst);
       if (r) return r;
       // Not a page of this site's archive: same host, but something else
       // lives there — one of the other apps behind the same Caddy
@@ -325,7 +382,7 @@ self.addEventListener("fetch", (ev) => {
     rememberClient(ev.resultingClientId, false);
     return;
   }
-  if (ev.request.mode === "navigate") rememberClient(ev.resultingClientId, true);
+  if (ev.request.mode === "navigate") { rememberClient(ev.resultingClientId, true); noteNav(); }
   if (ARCHIVE_PREFIX.test(p) || ARCHIVE_EXACT.has(p)) {
     const u = new URL(url);
     u.pathname = p;
@@ -333,7 +390,7 @@ self.addEventListener("fetch", (ev) => {
       // Another app on this origin that happens to use one of our prefixes
       // (its own /vendor/... say): it has no archive behind it.
       if (!(await clientIsShell(ev.clientId))) return netFetch(ev.request, u, false);
-      return archiveResponse(ev.request, u, ev.clientId);
+      return archiveResponse(ev.request, u, ev.clientId, false, inst);
     })());
     return;
   }
@@ -359,20 +416,23 @@ self.addEventListener("fetch", (ev) => {
       if (ev.request.method === "GET" && ev.request.mode !== "navigate" && p !== "/" && !p.startsWith("/shell/") && !BUNDLE.has(p)) {
         const u = new URL(url);
         u.pathname = p;
-        const r = await archiveResponse(ev.request, u, ev.clientId, true);
+        const r = await archiveResponse(ev.request, u, ev.clientId, true, inst);
         if (r) return r;
       }
       const staticUrl = new URL(SCOPE.slice(1) + p.slice(1) + url.search, url.origin);
       const isBundle = p.startsWith("/shell/") || BUNDLE.has(p);
       const bust = p !== "/" && !isBundle;
-      const resp = await netFetch(ev.request, p === "/" ? null : staticUrl, bust);
+      // A root-absolute reference from our frame that the archive lacks and
+      // that is not the bundle's: the origin root is where it said, so ask
+      // exactly there (the request as made), not under our scope.
+      const resp = await netFetch(ev.request, p === "/" || (outside && !isBundle) ? null : staticUrl, bust);
       // (Never for a top-level navigation: that must stay the server's page —
       // its 404 page carries the chrome, which then shows the local copy's
       // version of the page in the frame.)
       if (resp.status === 404 && ev.request.method === "GET" && ev.request.mode !== "navigate" && p !== "/" && !p.startsWith("/shell/")) {
         const u = new URL(url);
         u.pathname = p;
-        return archiveResponse(ev.request, u, ev.clientId);
+        return archiveResponse(ev.request, u, ev.clientId, false, inst);
       }
       return withCoi(resp, isBundle);
     } catch (e) {

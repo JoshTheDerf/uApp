@@ -40,6 +40,24 @@ You can toggle between modes in the chat header.
 | `run_js` | Yes | Execute JavaScript in the browser. Context `scratchpad` (default): a hidden empty page with the full uapp API and a `loadScript(url)` helper — globals persist between calls. Context `app`: runs inside the LIVE app page with its DOM and globals. |
 | `read_console` | No | Read recent console output and uncaught errors (with stack traces) from the LIVE app page. Use this to debug after edits or UI-driving `run_js` calls. |
 
+### The app window
+
+| Tool | Gated | Description |
+|------|-------|-------------|
+| `show_toolbar` | No | Show or hide the uApp toolbar — the bar around the app with its name, Files, Database, Tools, Settings and chat. Hidden, the app fills the window on its own. This session only. |
+| `set_toolbar_default` | Yes | Change how the app *opens*: whether the toolbar starts hidden, and the keystroke that toggles it. Saved in the .uapp, so it travels with the app. |
+| `show_panel` | No | Open or close one panel beside the app: `chat`, `files`, `database`, `settings`, `tools`. Put the user where the answer is instead of describing where to click. |
+
+`show_toolbar` deliberately saves nothing: someone who reveals a hidden
+toolbar to change one thing has not decided the app should look different from
+then on. `set_toolbar_default` is the decision. Hiding it never traps anyone —
+a reveal handle appears in the corner (the only way back on a phone) and the
+shortcut keeps working, including while focus is inside the app.
+
+The panels share one edge of the window, so `show_panel` opening one closes
+whichever was open, and it reveals the toolbar if it was hidden (the panels
+hang off it). `sql` is accepted for `database`, `ai` for `chat`.
+
 ### Delegation & user interaction
 
 | Tool | Gated | Description |

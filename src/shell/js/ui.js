@@ -238,12 +238,17 @@ export const KIND_ICON = {
   image: "image", video: "film", audio: "music", pdf: "file-type",
   md: "file-text", code: "file-code", text: "file-text", bin: "file-question",
 };
+// Known binary containers: never offered as text.
+const BIN_EXT = ["zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "tar", "uapp", "sqlite", "db", "sqlite3",
+  "wasm", "exe", "dll", "so", "dylib", "bin", "dat", "woff", "woff2", "ttf", "otf", "eot", "class", "jar", "iso", "img"];
 export function fileKind(name) {
   const e = extOf(name);
   for (const k of Object.keys(KIND_EXT)) if (KIND_EXT[k].includes(e)) return k;
   if (HL_BY_EXT[e]) return "code";
-  if (["", "txt", "text", "log", "csv", "tsv", "diff", "patch", "lock"].includes(e)) return "text";
-  return "bin";
+  if (BIN_EXT.includes(e)) return "bin";
+  // Anything else (.desktop, .conf, .ini, an unknown extension) is text
+  // until proven otherwise: the viewer sniffs the bytes before editing.
+  return "text";
 }
 
 // ---------- tool metadata (chat tool cards + the tools dialog) ----------
@@ -492,6 +497,12 @@ export function closePanel(id) {
   $(panels[id].btn).classList.remove("active");
 }
 export const togglePanel = (id) => (panelOpen(id) ? closePanel(id) : openPanel(id));
+/// Close whatever is open. Used when the toolbar is hidden: every panel was
+/// opened from a button on it, so leaving one on screen with nothing to close
+/// it from would be a dead end.
+export function closePanels() {
+  for (const id in panels) closePanel(id);
+}
 // Esc closes the open panel — unless a menu, a dialog, or an inner editor
 // (cell edit, rename, search) already handled the key.
 document.addEventListener("keydown", (e) => {

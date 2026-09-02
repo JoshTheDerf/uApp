@@ -27,6 +27,12 @@ required-features = ["gui"]
 name = "uapp-server"
 path = "src/main.rs"
 
+# A directory of .uapp files over HTTP (fetch, publish); see src/library.rs.
+# Built with `--bin uapp-library --no-default-features`.
+[[bin]]
+name = "uapp-library"
+path = "src/bin/uapp-library.rs"
+
 # Demo apps builder — builds example .uapp files and the launcher.
 # Run with: cargo run --bin make-demo-apps -- <launcher-out-dir> [examples-dir]
 [[bin]]

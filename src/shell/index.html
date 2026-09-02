@@ -11,7 +11,11 @@
 <!-- The shell is a set of Web Components; each bundles its template, style
      and behavior in src/shell/js/<name>.js. shell.css carries the design
      tokens and shared primitives (buttons, dialogs, menus, panels). -->
-<shell-topbar id="topbar"></shell-topbar>
+<!-- {{TOPBAR_CLASS}} is class="hidden" when this app saved "toolbar hidden"
+     as its default (see toolbar.rs): the bar is what a user calls "the
+     toolbar", and an app can ship without it. Applied in the HTML so it never
+     paints and then disappears; toolbar-visibility.js owns it from there. -->
+<shell-topbar id="topbar"{{TOPBAR_CLASS}}></shell-topbar>
 
 <main id="main">
   <!-- allow= is the Permissions-Policy delegation, not a grant: it only lets

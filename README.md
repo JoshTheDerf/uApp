@@ -104,6 +104,26 @@ uapp.action("add_employee", {
 });
 ```
 
+### The toolbar
+
+The bar around the app — name, file browser, SQL browser, tools, settings, chat
+— is the app's *editing* surface, and an app being used rather than built does
+not want it. Each `.uapp` stores whether it opens with the toolbar shown or
+hidden, and the keystroke that toggles it (`F9` by default), so an app can be
+handed to someone as a plain-looking app.
+
+Showing or hiding it is never saved: revealing a hidden toolbar to change one
+thing is not a decision about how the app opens, so every open starts from the
+stored setting again. Apps can drive it themselves
+(`uapp.toolbar.hide()`), and so can the AI chat (`show_toolbar`). Hidden, a
+small reveal handle sits in the corner — on a phone there is no keyboard, so
+there is always a way back.
+
+The panels the toolbar opens — chat, files, database, settings, tools — work
+the same way, from a click, `uapp.panel.open("database")`, or the chat's
+`show_panel`, so the assistant can put you in front of what it just built
+rather than telling you where to click.
+
 ### "Installation" of uApps.
 
 The `install` button in the top bar provides a launcher entry for a given `.uapp` in the applications menu/Start Menu/Android Home Screen. It's possible to set custom app icons for this purpose.
@@ -113,6 +133,30 @@ The `install` button in the top bar provides a launcher entry for a given `.uapp
 - **Windows**: A Start Menu + Desktop shortcut
 - **macOS** (untested): a `.app` bundle in `~/Applications`
 - **Android**: A launcher shortcut using `ShortcutManagerCompat.requestPinShortcut`
+
+## Hosting .uapp files on a server
+
+Two small binaries, built with `--no-default-features` (no Tauri):
+
+* **`uapp-server serve <file.uapp> --chrome dist-web`** serves ONE .uapp as a
+  website: its `app/` pages at real URLs for everyone, plus an in-browser
+  editor on a local copy. `PUT /site.uapp` with the token publishes an edited
+  copy back.
+* **`uapp-server serve --chrome dist-web [--open <url>]`** — no file — hosts
+  the browser build alone. What the page opens is in its URL:
+  `?open=<url>` fetches any .uapp on the origin (or a CORS-enabled one) and
+  keeps your edits in the browser, `?app=<id>` opens one of the visitor's own
+  stored apps, and a bare visit opens `--open` (or the launcher). Edits can be
+  published back to the URL they came from. Put such a page in an `<iframe>`
+  and you have a window that runs one .uapp; several on one page each get
+  their own engine.
+* **`uapp-library <dir>`** serves a directory of .uapp files: `GET /` lists
+  them as JSON, `GET /<name>.uapp` fetches one (ETag), `PUT` and `DELETE`
+  (token) publish and remove. Every stored file is sanitized like `/site.uapp`
+  is — app files and user tables travel, chat, history and API keys never do.
+
+`dist-web` is `scripts/build-web.sh` output. `Dockerfile.serve` builds both
+binaries into one image; mount `dist-web` at `/opt/uapp-web`.
 
 ## Known limitations
 

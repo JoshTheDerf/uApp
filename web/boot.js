@@ -3,8 +3,11 @@
  * Order of operations:
  *   1. Register the service worker (archive URLs + COOP/COEP for isolation).
  *   2. Start the wasm worker, hand it the SharedArrayBuffer bridge.
- *   3. Open the requested stored app, or the launcher — itself a .uapp with
- *      a grid of the OPFS app library and the samples (host.* API).
+ *   3. Open what the URL says (see OPEN below): a stored app (?app=<id>), an
+ *      archive fetched from a URL (?open=<url>, or the page's default), a
+ *      hosted site's own /site.uapp (site-chrome.js), or else the launcher —
+ *      itself a .uapp with a grid of the OPFS app library and the samples
+ *      (host.* API).
  *   4. Install window.__uappTransport and load the normal shell.
  *
  * At runtime this file is also: the router between app iframes (uapp.js over
@@ -26,22 +29,40 @@ const LEGACY_FILE = "app.uapp";
 // The demo can be hosted under a subpath (e.g. /uapp/demo/) — everything we
 // load or register is relative to where boot.js itself lives.
 const BASE = new URL("./", import.meta.url);
-window.__uappBase = BASE.pathname;
+// This shell's instance id. Several shells can share one origin and one
+// service worker — a desktop page with two apps open in two frames, two tabs
+// of the demo — and the worker has to know which shell an app frame's fetch
+// belongs to. So every URL the shell builds for its frames goes under
+// "<base>i/<inst>/" (the shell modules read window.__uappBase), the worker
+// splits the segment off again (sw.js splitInst) and asks exactly this page.
+const INST = Math.random().toString(36).slice(2, 10);
+// A hosted site's editing chrome (site-chrome.js) is the one shell on its
+// page and its frame URLs are the SITE's URLs (/app/<page> mirrors to
+// /<page> in the address bar, links resolve relative to them): no segment
+// there. Everywhere else — the standalone page, a frame in someone's desktop
+// — the shell may have siblings and takes one.
+window.__uappBase = BASE.pathname + (window.__uappChrome ? "" : "i/" + INST + "/");
 
-// sessionStorage throws (not returns null) when the browser blocks site data,
-// and it is load-bearing here: it carries which app to open across the reload
-// that switches documents, and guards the one-time cross-origin-isolation
-// reload. Probe it once; ssOk === false means "don't count on a reload
-// remembering anything".
-const memSS = new Map();
-let ssOk = true;
-try {
-  sessionStorage.setItem("uapp.probe", "1");
-  sessionStorage.removeItem("uapp.probe");
-} catch { ssOk = false; }
-function ssGet(k) { try { return ssOk ? sessionStorage.getItem(k) : (memSS.has(k) ? memSS.get(k) : null); } catch { return null; } }
-function ssSet(k, v) { try { ssOk ? sessionStorage.setItem(k, v) : memSS.set(k, v); } catch {} }
-function ssDel(k) { try { ssOk ? sessionStorage.removeItem(k) : memSS.delete(k); } catch {} }
+// What this page opens — decided by the URL, so that switching documents is a
+// navigation of THIS window (a frame in someone's desktop stays a frame) and
+// nothing has to survive in tab-wide storage:
+//   site      an archive fetched from a URL: a hosted site's own /site.uapp
+//             (site-chrome.js sets __uappSiteArchive before importing us),
+//             ?open=<url>, or the page's default (<meta name="uapp-open">,
+//             which `uapp serve --open` injects). Persisted in this browser
+//             from the first edit on, publishable back to the URL.
+//   app       ?app=<id>: a document of the OPFS app library.
+//   launcher  nothing named: the launcher.uapp next to boot.js, ephemeral.
+const OPEN = (() => {
+  if (window.__uappSiteArchive) return { kind: "site", url: new URL(window.__uappSiteArchive, location.href).href };
+  const q = new URL(location.href).searchParams;
+  if (q.get("app")) return { kind: "app", id: q.get("app") };
+  const meta = document.querySelector('meta[name="uapp-open"]');
+  const o = q.get("open") || (meta && meta.getAttribute("content")) || "";
+  if (o) { try { return { kind: "site", url: new URL(o, location.href).href }; } catch {} }
+  return { kind: "launcher" };
+})();
+if (OPEN.kind === "site") window.__uappSiteArchive = OPEN.url;
 
 // ---- boot splash ------------------------------------------------------------
 // index.html paints it on every load; we keep it up until the app frame is
@@ -92,12 +113,6 @@ function splashHide() {
   setTimeout(() => { if (splashHidden) splashEl.style.display = "none"; }, 300);
 }
 
-// A document switch is a reload, so name the app we are heading for instead of
-// showing a generic "Starting" (the boot below consumes these keys).
-{
-  const pendingName = ssGet("uapp-open-name");
-  if (pendingName) splashStatus.textContent = "Opening " + pendingName + "…";
-}
 
 // Download with a real progress bar when the server gives us a length.
 async function fetchWithProgress(url, what) {
@@ -195,7 +210,9 @@ function injectHtml(text) {
   const hasUapp = lower.includes("uapp.js");
   let inject = "";
   if (!hasVp) inject += '\n<meta name="viewport" content="width=device-width, initial-scale=1">';
-  if (!hasUapp) inject += '\n<script src="/uapp.js"></script>';
+  // Relative to the bundle, not "/uapp.js": hosted under a subpath the origin
+  // root is somebody else's server.
+  if (!hasUapp) inject += `\n<script src="${BASE.pathname}uapp.js"></script>`;
   if (!inject) return text;
   const pos = lower.indexOf("<head");
   if (pos >= 0) {
@@ -405,6 +422,9 @@ async function handleBridge(kind, payloadJson) {
 let appIsReady = false;
 async function handleSwRequest(m) {
   if (zombie) return; // another tab owns the demo — let it answer
+  // Addressed to another shell on this page/origin: not ours to answer, not
+  // even with a passthrough — silence lets the right shell's ack win.
+  if (m.inst && m.inst !== INST) return;
   // controller is null until the SW claims us; registration.active is set as
   // soon as it activates, so this works on the very first load too (there is
   // no longer a reload to guarantee a controller — see the boot sequence).
@@ -414,8 +434,8 @@ async function handleSwRequest(m) {
     if (sw) sw.postMessage(msg);
   };
   const reply = (data) => data.swAck
-    ? swPost({ swAck: true, id: m.id })
-    : swPost({ swReply: true, id: m.id, ...data });
+    ? swPost({ swAck: true, id: m.id, inst: INST })
+    : swPost({ swReply: true, id: m.id, inst: INST, ...data });
   // Until an app is open, anything the TOP document asks for is the server's
   // own resource — in hosted-site mode that is the page the reader is looking
   // at, still loading its scripts. Waiting on appReady here would stall them
@@ -563,16 +583,29 @@ window.addEventListener("message", (ev) => {
 // Lets an app manage the OPFS app library and switch documents. It's a demo:
 // every app gets it (there is no cross-user data to protect here).
 
+// Where the browser build's own page lives on this origin: a hosted site's
+// chrome runs at the site root, but its apps open in the DEMO page (the
+// archive-less shell), which a site declares with <meta name="uapp-demo">;
+// else the page we were loaded from.
+function demoBase() {
+  const meta = document.querySelector('meta[name="uapp-demo"]');
+  return (meta && meta.getAttribute("content")) || BASE.pathname;
+}
+
 async function handleHostRpc(m) {
   const p = m.params || {};
   switch (m.method) {
     case "host.apps":
-      return { current: currentAppId, apps: appsIndex().sort((a, b) => b.updated - a.updated) };
+      // `url` opens the app in the browser build wherever it is hosted (a
+      // desktop puts it in a frame window); the library is per origin, so a
+      // site and the demo on one host see the same apps.
+      return { current: currentAppId, apps: appsIndex().sort((a, b) => b.updated - a.updated)
+        .map((a) => ({ ...a, url: demoBase() + "?app=" + encodeURIComponent(a.id) })) };
     case "host.open": {
       const e = appsIndex().find((a) => a.id === p.id);
       if (!e) throw new Error("no stored app with that id");
       splashShow("Opening " + e.name + "…");
-      setTimeout(() => switchTo(e.id, e.name), 50); // reply first, then reload
+      setTimeout(() => switchTo(e.id), 50); // reply first, then navigate
       return { ok: true };
     }
     case "host.create": {
@@ -580,7 +613,7 @@ async function handleHostRpc(m) {
       const name = (p.name || "New App").slice(0, 80);
       splashShow("Creating " + name + "…");
       indexTouch(id, name);
-      setTimeout(() => switchTo(id, p.name), 50);
+      setTimeout(() => switchTo(id), 50);
       return { ok: true, id };
     }
     case "host.import": {
@@ -589,14 +622,17 @@ async function handleHostRpc(m) {
         throw new Error("not a plain .uapp file (encrypted apps can't be opened in the browser demo)");
       }
       const name = (p.name || "Imported app").replace(/\.uapp$/i, "").slice(0, 80);
-      splashShow("Opening " + name + "…", "Saving…");
+      // open:false — store it in this browser's app library and stay where we
+      // are (a desktop dropping a .uapp onto itself); the default opens it.
+      const open = p.open !== false;
+      if (open) splashShow("Opening " + name + "…", "Saving…");
       const id = genId();
       // A failed write (storage blocked) must not leave the splash covering
       // the launcher the error message is about.
       try { await appWrite(id, bytes); } catch (e) { splashHide(); throw e; }
       indexTouch(id, name);
-      setTimeout(() => switchTo(id, p.name), 50);
-      return { ok: true, id };
+      if (open) setTimeout(() => switchTo(id), 50);
+      return { ok: true, id, name, url: demoBase() + "?app=" + encodeURIComponent(id) };
     }
     case "host.sample": {
       const name = (p.name || "Sample").slice(0, 80);
@@ -605,8 +641,9 @@ async function handleHostRpc(m) {
       splashShow("Opening " + name + "…", "Downloading…");
       let bytes;
       try {
-        bytes = await fetchWithProgress(
-          new URL(String(p.url || "").replace(/^\//, ""), BASE), "the sample");
+        // Relative to the bundle ("examples/x.uapp"), or anywhere on the
+        // origin ("/uapp/apps/x.uapp" — a uapp-library shelf).
+        bytes = await fetchWithProgress(new URL(String(p.url || ""), BASE), "the sample");
       } catch (e) {
         splashHide();
         throw e;
@@ -617,7 +654,7 @@ async function handleHostRpc(m) {
       // the launcher the error message is about.
       try { await appWrite(id, bytes); } catch (e) { splashHide(); throw e; }
       indexTouch(id, name);
-      setTimeout(() => switchTo(id, p.name), 50);
+      setTimeout(() => switchTo(id), 50);
       return { ok: true, id };
     }
     case "host.delete":
@@ -720,6 +757,22 @@ let currentAppId = null;
 // saved copy and reload from the server.
 let siteState = null; // {id, etag, hasLocal, localSavedAt}
 const siteKey = (k) => "uapp.site." + k + ":" + siteState.id;
+// One stored copy per archive URL. A hosted site's own /site.uapp keeps the
+// key it always had (per host), so nobody's pending edits vanish.
+function siteIdFor(archive) {
+  const u = new URL(archive, location.href);
+  const clean = (s) => s.replace(/[^a-z0-9.-]/gi, "_");
+  if (u.origin === location.origin && u.pathname === "/site.uapp") return "site-" + clean(location.host);
+  return "site-" + clean(u.host + u.pathname);
+}
+// "…/uapp/apps/kanban-board.uapp" -> "kanban-board": the name to open an
+// archive under when nothing better is known.
+function archiveStem(archive) {
+  try {
+    const last = decodeURIComponent(new URL(archive, location.href).pathname.split("/").filter(Boolean).pop() || "");
+    return last.replace(/\.uapp$/i, "").slice(0, 80) || "Site";
+  } catch { return "Site"; }
+}
 function kvDel(key) { try { localStorage.removeItem(key); } catch {} memKV.delete(key); }
 window.__uappSiteReset = async () => {
   if (!siteState) { location.reload(); return; }
@@ -743,7 +796,7 @@ window.__uappSitePublish = async (token, { force = false } = {}) => {
   const r = await sendRpc("app.export");
   const headers = { authorization: "Bearer " + token, "content-type": "application/octet-stream" };
   if (siteState.etag && !force) headers["if-match"] = siteState.etag;
-  const resp = await fetch(new URL(window.__uappSiteArchive, location.origin), {
+  const resp = await fetch(new URL(window.__uappSiteArchive, location.href), {
     method: "PUT", headers, body: bytesFromB64(r.b64), cache: "no-store",
   });
   const text = await resp.text();
@@ -956,18 +1009,19 @@ async function migrateLegacy() {
   } catch {}
 }
 
-// Switch documents by reloading the page — the cleanest reset of the worker,
-// iframes and shell state. sessionStorage carries what to open next.
-function switchTo(id, name) {
-  if (id) {
-    ssSet("uapp-open-app", id);
-    if (name) ssSet("uapp-open-name", name);
-  } else {
-    ssDel("uapp-open-app");
-    ssDel("uapp-open-name");
-    splashShow("Returning to your apps…"); // covers the reload gap
-  }
-  location.reload();
+// Switch documents by navigating THIS window to the URL that names the next
+// one (?app=<id>; nothing = the page's default, usually the launcher) — the
+// cleanest reset of the worker, iframes and shell state, and it stays inside
+// whatever frame the shell is in: a desktop that put the shell in a window
+// sees the window change, not its own page. `replace`, so the switch is not a
+// history entry (a reload never was one either).
+function switchTo(id) {
+  const u = new URL(location.href);
+  u.searchParams.delete("app");
+  u.searchParams.delete("open");
+  if (id) u.searchParams.set("app", id);
+  else splashShow("Returning to your apps…"); // covers the navigation gap
+  location.replace(u.href);
 }
 
 function openApp(bytes, name) {
@@ -997,13 +1051,17 @@ function fatal(msg) {
   document.body.style.background = "#23293a";
 }
 
-// ---- single active tab -------------------------------------------------------
-// The service worker broadcasts archive fetches to every window of the demo;
-// with two tabs open, both would answer and the faster (possibly WRONG) app
-// would win — files from one app, scripts from another. So the demo is
-// single-tab: the newest boot broadcasts a takeover and older tabs go dormant.
+// ---- one window per document -----------------------------------------------
+// Two shells with the SAME stored document open would both auto-save it and
+// clobber each other (one process owns the file, like the desktop app). So a
+// boot announces what it opened, and an older shell on the same document
+// goes dormant. Different documents coexist — a desktop with several apps in
+// several frames — since the service worker routes each shell's fetches by
+// instance (see INST) and never needs a single answerer. The ephemeral
+// launcher is never saved, so it is not guarded at all.
 
 const BOOT_ID = Date.now() + "-" + Math.random().toString(36).slice(2);
+const TAB_KEY = OPEN.kind === "app" ? "app:" + OPEN.id : OPEN.kind === "site" ? "site:" + OPEN.url : null;
 // Constructing it throws where the browser blocks site data for the origin,
 // and this is module top level: an unhandled throw here leaves the page on the
 // splash forever, so the takeover check simply goes away instead.
@@ -1033,7 +1091,8 @@ function goDormant() {
 
 if (tabChannel) {
   tabChannel.onmessage = (ev) => {
-    if (ev.data && ev.data.takeover && ev.data.bootId !== BOOT_ID) goDormant();
+    const d = ev.data;
+    if (d && d.takeover && d.bootId !== BOOT_ID && TAB_KEY && d.key === TAB_KEY) goDormant();
   };
 }
 
@@ -1041,7 +1100,13 @@ if (tabChannel) {
 
 (async () => {
   try {
-    if (tabChannel) tabChannel.postMessage({ takeover: true, bootId: BOOT_ID });
+    if (tabChannel && TAB_KEY) tabChannel.postMessage({ takeover: true, bootId: BOOT_ID, key: TAB_KEY });
+    // A document switch is a navigation, so name the app we are heading for
+    // instead of showing a generic "Starting".
+    if (splashEl && OPEN.kind === "app") {
+      const e = appsIndex().find((a) => a.id === OPEN.id);
+      if (e) splashStatus.textContent = "Opening " + e.name + "…";
+    }
     if (!("serviceWorker" in navigator)) {
       fatal("This browser has no service-worker support (or the page is not served over HTTPS/localhost).");
       return;
@@ -1101,7 +1166,7 @@ if (tabChannel) {
       const announce = () => {
         const sw = navigator.serviceWorker.controller
           || (navigator.serviceWorker.__uappReg && navigator.serviceWorker.__uappReg.active);
-        if (sw) sw.postMessage({ shellClient: true });
+        if (sw) sw.postMessage({ shellClient: true, inst: INST });
       };
       announce();
       navigator.serviceWorker.addEventListener("controllerchange", announce);
@@ -1149,20 +1214,18 @@ if (tabChannel) {
 
     await migrateLegacy();
 
-    // Open the requested stored app, or the launcher (itself a .uapp).
+    // Open what the URL names (OPEN), or the launcher (itself a .uapp).
     let info = null;
-    const wantId = ssGet("uapp-open-app");
-    const wantName = ssGet("uapp-open-name") || "App";
-    ssDel("uapp-open-app");
-    ssDel("uapp-open-name");
-    if (wantId) {
+    if (OPEN.kind === "app") {
+      const entry = appsIndex().find((a) => a.id === OPEN.id);
+      const wantName = (entry && entry.name) || "App";
       splashShow("Opening " + wantName + "…", "Opening the document…");
       let bytes;
-      try { bytes = await appRead(wantId); } // null = brand-new app (host.create)
+      try { bytes = await appRead(OPEN.id); } // null = brand-new app (host.create)
       catch (e) { fatal(String(e.message || e)); return; }
       try {
         info = await openApp(bytes, wantName);
-        currentAppId = wantId;
+        currentAppId = OPEN.id;
         if (!bytes) scheduleSave(); // persist the fresh app right away
       } catch (e) {
         alert("Could not open the app: " + (e.message || e));
@@ -1174,20 +1237,22 @@ if (tabChannel) {
       currentAppId = null;
       const site = window.__uappSiteArchive;
       if (site) {
-        siteState = { id: "site-" + location.host.replace(/[^a-z0-9.-]/gi, "_"), etag: "", hasLocal: false, localSavedAt: 0 };
+        const siteName = window.__uappSiteName || archiveStem(site);
+        siteState = { id: siteIdFor(site), etag: "", hasLocal: false, localSavedAt: 0 };
         const saved = await appRead(siteState.id);
         if (saved) {
           siteState.hasLocal = true;
           siteState.localSavedAt = Number(kvGet(siteKey("saved"))) || 0;
           siteState.etag = kvGet(siteKey("etag")) || "";
-          info = await openApp(saved, window.__uappSiteName || "Site");
+          info = await openApp(saved, siteName);
         } else {
-          splashShow("Opening the editor…", "Downloading this site…");
-          const r = await fetch(new URL(site, location.origin), { cache: "no-store" });
-          if (!r.ok) throw new Error(`could not fetch this site (HTTP ${r.status})`);
+          splashShow("Opening " + siteName + "…", "Downloading…");
+          const r = await fetch(new URL(site, location.href), { cache: "no-store" });
+          if (!r.ok) throw new Error(`could not fetch ${siteName} (HTTP ${r.status})`);
           siteState.etag = r.headers.get("etag") || "";
           kvSet(siteKey("etag"), siteState.etag);
-          info = await openApp(new Uint8Array(await r.arrayBuffer()), window.__uappSiteName || "Site");
+          splashProgress(0, Number(r.headers.get("content-length")) || 0);
+          info = await openApp(new Uint8Array(await r.arrayBuffer()), siteName);
         }
         // Saved from the first change on (scheduleSave fires on "changes").
         currentAppId = siteState.id;
@@ -1247,11 +1312,27 @@ if (tabChannel) {
     // loadScratchFrame). No cache-buster — these are served no-store, and a
     // stable url lets later reloads replace this history entry instead of
     // pushing a new one (see reloadAppFrame in shell/main.js).
-    if (appFrame) appFrame.src = BASE.pathname + (window.__uappSiteEntry || "app/");
+    if (appFrame) appFrame.src = window.__uappBase + (window.__uappSiteEntry || "app/");
+
+    // Open with the toolbar this app saved for itself (see toolbar.rs), before
+    // the shell's modules run: applied a round trip later, the bar paints and
+    // then vanishes — a glitch on every single open. toolbar-visibility.js
+    // reads this back and owns it from here.
+    try {
+      const tb = await sendRpc("toolbar.get", {});
+      if (tb && tb.hidden) document.getElementById("topbar")?.classList.add("hidden");
+    } catch {}
 
     await import(new URL("shell/main.js", BASE));
     await framePainted;
     splashHide();
+    // An archive that came from a URL can go back to it: the sync pill in the
+    // topbar (local edits, server moved on, Publish). Outside the module graph
+    // so the hosted-site chrome and this page share one implementation.
+    if (siteState) {
+      try { (await import(new URL("sync-pill.js", BASE))).startSyncWatch(); }
+      catch (e) { console.warn("uapp: sync pill unavailable:", e); }
+    }
   } catch (e) {
     console.error(e);
     appReadyReject(e instanceof Error ? e : new Error(String(e)));

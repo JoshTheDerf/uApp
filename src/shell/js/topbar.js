@@ -3,6 +3,7 @@
 
 import { rpc, on, emit } from "./core.js";
 import { $, I, installStyle, togglePanel, openPanel, dlgAlert, downloadUrl } from "./ui.js";
+import { toggleToolbar, shortcutLabel, toolbarDefault } from "./toolbar-visibility.js";
 import { mirrorRefresh } from "./mirror.js";
 import { S } from "./strings.js";
 
@@ -27,6 +28,7 @@ const TPL = /* html */ `
   <button id="btn-settings" class="bar-collapse" title="${S.topbar.settingsBtn}"></button>
   <button id="btn-chat" class="bar-collapse" title="${S.topbar.chatBtn}"></button>
   <span class="winctl-sep bar-collapse"></span>
+  <button id="btn-hidebar" class="winctl bar-collapse"></button>
   <button id="btn-reload" class="winctl bar-collapse" title="${S.topbar.reloadApp}"></button>
   <button id="btn-quit" class="winctl winctl-close hide-native bar-collapse" title="${S.topbar.closeApp}"></button>
   <button id="btn-menu" title="${S.topbar.menuBtn}"></button>
@@ -244,6 +246,7 @@ function buildMenu() {
     ["btn-settings", "settings", S.topbar.menuSettings],
     ["btn-chat", "message-square", S.topbar.menuChat],
     null, // separator
+    ["btn-hidebar", "eye-off", S.toolbar.menuHide],
     ["btn-reload", "rotate-cw", S.topbar.reloadApp],
     ["btn-quit", "x", S.topbar.closeApp, "hide-native"],
   ];
@@ -282,6 +285,7 @@ function wire() {
   $("btn-files").innerHTML = I("files");
   $("btn-sql").innerHTML = I("database");
   $("btn-reload").innerHTML = I("rotate-cw");
+  $("btn-hidebar").innerHTML = I("eye-off");
   $("btn-quit").innerHTML = I("x", 17);
   $("btn-rename").innerHTML = I("pencil", 12);
   $("unsaved-msg").innerHTML =
@@ -317,6 +321,16 @@ function wire() {
   $("btn-settings").onclick = () => togglePanel("settingspanel");
   $("btn-tools").onclick = () => togglePanel("toolspanel");
   $("btn-reload").onclick = () => emit("reload-app");
+  // Hiding leaves the app filling the window. The tooltip names the keystroke
+  // that brings it back — that is the only place most people will ever read
+  // it, so it is kept in step with the setting.
+  $("btn-hidebar").onclick = () => toggleToolbar();
+  const hideTitle = () => {
+    const keys = shortcutLabel(toolbarDefault().shortcut);
+    $("btn-hidebar").title = S.toolbar.hideTitle + (keys ? ` (${keys})` : "");
+  };
+  hideTitle();
+  on("toolbar-state", hideTitle);
   $("btn-quit").onclick = async () => {
     try { await rpc("app.quit"); } catch {}
     // the "closed" sync event finishes the job; fall back locally

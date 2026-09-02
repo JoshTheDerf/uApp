@@ -626,9 +626,24 @@ pub fn publish(target: &Connection, src: &Connection, op: &Op, include_data: boo
         objects += 1;
     }
 
+    // Config stays the server's — except the app's own look: the toolbar
+    // default (hidden / shortcut, see toolbar.rs) is a property of the site
+    // its editor decides on, not a secret, and the served copy carries it to
+    // every visitor. Everything else in uapp_config (API keys, MCP servers)
+    // never moves.
+    let mut carried = 0usize;
+    if let Some(v) = store::config_get(src, "toolbar")? {
+        target.execute(
+            "INSERT OR REPLACE INTO uapp_config(key,value) VALUES('toolbar',?1)",
+            rusqlite::params![v.to_string()],
+        )?;
+        carried += 1;
+    }
+
     Ok(json!({
         "ok": true,
         "files": {"written": written, "removed": removed, "unchanged": unchanged},
+        "config": {"carried": carried},
         "schema": {"tables": tables, "rows": rows, "objects": objects},
         "data": include_data,
     }))

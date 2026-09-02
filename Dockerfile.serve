@@ -1,16 +1,27 @@
-# uapp public site server — `uapp serve`, the hosted-site mode.
+# uapp hosting image — `uapp-server serve` (one .uapp as a website, or the
+# bare browser build) and `uapp-library` (a directory of .uapp files).
 #
-# Serves ONE .uapp as a website: rendered pages under `app/` at real URLs for
-# everyone; the shell, the WebSocket and publishing (PUT /site.uapp) only with
-# the token (see src/server.rs). The .uapp itself is NOT baked into the image;
-# it is bind-mounted under /site so content updates are a publish from the
-# browser (or an rsync + restart), not a rebuild.
+# Site mode serves ONE .uapp as a website: rendered pages under `app/` at real
+# URLs for everyone; the shell, the WebSocket and publishing (PUT /site.uapp)
+# only with the token (see src/server.rs). The .uapp itself is NOT baked into
+# the image; it is bind-mounted under /site so content updates are a publish
+# from the browser (or an rsync + restart), not a rebuild.
 #
 #   docker build -f Dockerfile.serve -t uapp-serve .
-#   docker run -v /path/to/sitedir:/site -e UAPP_TOKEN=... -p 8080:8080 uapp-serve
+#   docker run -v /path/to/sitedir:/site -v /path/to/dist-web:/opt/uapp-web:ro \
+#              -e UAPP_TOKEN=... -p 8080:8080 uapp-serve
 #
-# The mount must be writable by the container user for publishing to work
-# (run with --user <uid> of the file's owner, or chown it); a read-only mount
+# Web-host mode (no archive; the page opens what its URL names, see
+# src/webhost.rs) — unset UAPP_SITE and give a default:
+#   docker run -v /path/to/dist-web:/opt/uapp-web:ro -e UAPP_SITE= \
+#              -e UAPP_SERVE_FLAGS="--open /uapp/apps/launcher.uapp" uapp-serve
+#
+# Library (src/library.rs) — override the command:
+#   docker run -v /path/to/apps:/apps -e UAPP_TOKEN=... uapp-serve \
+#              uapp-library /apps --bind 0.0.0.0 --port 8090
+#
+# The mounts must be writable by the container user for publishing to work
+# (run with --user <uid> of the files' owner, or chown them); a read-only mount
 # still serves, and a publish is refused with an error.
 
 FROM rust:1-trixie AS build
@@ -32,7 +43,7 @@ COPY src ./src
 COPY assets ./assets
 COPY capabilities ./capabilities
 COPY templates ./templates
-RUN cargo build --release --bin uapp-server --no-default-features
+RUN cargo build --release --bin uapp-server --bin uapp-library --no-default-features
 
 # --- runtime image ---
 # The binary links only libc/libm/libgcc (SQLite, SQLCipher and OpenSSL are all
@@ -42,12 +53,12 @@ WORKDIR /site
 
 RUN useradd --system --uid 10001 --no-create-home uapp
 COPY --from=build /src/target/release/uapp-server /usr/local/bin/uapp-server
-# The browser build (wasm engine + shell) behind `--chrome`: what the injected
-# "Edit this site" pill boots. NOT in git — run scripts/build-web.sh (needs
-# clang + wasm-bindgen) right before `docker build`, or the image ships
-# whatever stale dist-web happens to be lying around.
-COPY dist-web /opt/uapp-web
-RUN test -f /opt/uapp-web/boot.js && test -f /opt/uapp-web/uapp_wasm_bg.wasm
+COPY --from=build /src/target/release/uapp-library /usr/local/bin/uapp-library
+# The browser build (wasm engine + shell) behind `--chrome` is NOT in the
+# image: bind-mount dist-web at /opt/uapp-web (read-only is fine). One rsync
+# then updates every container that serves it; restart them to pick it up.
+# Build it with scripts/build-web.sh (needs clang + wasm-bindgen).
+RUN mkdir -p /opt/uapp-web
 
 # The engine keeps its per-user state (crash-rescue snapshots, the registry
 # lock) under HOME; world-writable so `--user <any uid>` works too.
@@ -56,6 +67,7 @@ ENV HOME=/var/lib/uapp
 # An unprivileged user means a bug can't reach anything but the site.
 USER uapp
 
+# The archive to serve. Empty = web-host mode (the browser build alone).
 ENV UAPP_SITE=/site/site.uapp
 ENV UAPP_PORT=8080
 # UAPP_TOKEN: the publish secret (`--token`). Unset = a random one per start,
@@ -69,4 +81,4 @@ EXPOSE 8080
 #   --coi           COOP/COEP on documents, so the editor is cross-origin
 #                   isolated with no reload and the AI's run_js bridge works.
 #                   Drop it if the site embeds cross-origin iframes.
-CMD ["sh", "-c", "exec uapp-server serve \"$UAPP_SITE\" --bind 0.0.0.0 --port \"$UAPP_PORT\" ${UAPP_SERVE_FLAGS:---publish-data --coi --chrome /opt/uapp-web}"]
+CMD ["sh", "-c", "exec uapp-server serve $UAPP_SITE --bind 0.0.0.0 --port \"$UAPP_PORT\" --chrome /opt/uapp-web ${UAPP_SERVE_FLAGS-${UAPP_SITE:+--publish-data --coi}}"]

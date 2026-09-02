@@ -260,6 +260,52 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             "config_set",
             json!({"key": need_str(&p, "key")?, "value": p["value"]}),
         ),
+
+        // ---- the toolbar around the app frame (see toolbar.rs) ----
+        // The saved default: what every fresh open of this app starts from.
+        "toolbar.get" => {
+            let eng = app.engine.lock().unwrap();
+            Ok(crate::toolbar::settings(
+                store::config_get(&eng.db, "toolbar")?.as_ref(),
+            ))
+        }
+        // Show/hide it NOW, in every open shell. Display-only, like
+        // files.present: nothing is written, so the app still opens the way
+        // its saved default says. That is deliberate — someone who reveals a
+        // hidden toolbar to change one thing has not decided the app should
+        // look different from now on.
+        "toolbar.set" => {
+            let visible = match p["visible"].as_bool() {
+                Some(v) => v,
+                None => bail!("toolbar.set needs visible: true or false"),
+            };
+            app.notify("toolbar", json!({"visible": visible}));
+            Ok(json!({"ok": true, "visible": visible}))
+        }
+        // Change the saved default. Broadcast too, so open shells pick up a new
+        // shortcut right away — but only the shortcut: yanking the bar away
+        // from the person who just changed the setting would be startling, and
+        // they can see the effect by reopening the app.
+        "toolbar.setDefault" => {
+            let merged = {
+                let eng = app.engine.lock().unwrap();
+                crate::toolbar::merge(store::config_get(&eng.db, "toolbar")?.as_ref(), &p)?
+            };
+            local_op(app, "config_set", json!({"key": "toolbar", "value": merged.clone()}))?;
+            app.notify("toolbar", json!({"default": merged.clone()}));
+            Ok(merged)
+        }
+        // Open or close one of the toolbar's panels (chat, files, database,
+        // settings, tools). Session state like toolbar.set: which panel someone
+        // has open is not something the app should remember for them.
+        // `open` omitted means toggle — the shell knows what is open, so only
+        // it can answer that; callers who need a definite outcome pass it.
+        "panel.set" => {
+            let panel = crate::toolbar::normalize_panel(need_str(&p, "panel")?)?;
+            let open = p["open"].as_bool();
+            app.notify("panel", json!({"panel": panel, "open": open}));
+            Ok(json!({"ok": true, "panel": panel, "open": open}))
+        }
         "chat.list" => {
             let session = session_arg(&p)?;
             let eng = app.engine.lock().unwrap();

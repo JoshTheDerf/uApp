@@ -9,6 +9,7 @@ import {
   dlgAlert, dlgConfirm, wirePwToggle, downloadUrl, fmtSize,
 } from "./ui.js";
 import { S, LOCALES, getLocale, setLocale } from "./strings.js";
+import { MAC } from "./toolbar-visibility.js";
 import { pickTemplate } from "./template-update.js";
 
 const TPL = /* html */ `
@@ -65,6 +66,28 @@ const TPL = /* html */ `
       <input id="cfg-maxtokens" type="number" min="1024" placeholder="${S.settings.maxTokensPlaceholder}">
     </label>
     <p class="hint">${S.settings.mcpHint}</p>
+    <hr>
+    <!-- The toolbar: the bar this shell wraps around the app. Stored in the
+         .uapp (not machine-local), so an app can ship as a plain-looking app
+         wherever it is opened. Only the DEFAULT lives here — hiding or showing
+         it from the bar itself is never saved (see toolbar.rs). -->
+    <div id="toolbar-box">
+      <div class="sect-head"><b>${S.settings.toolbarSection}</b></div>
+      <p class="hint">${S.settings.toolbarHint}</p>
+      <label>${S.settings.toolbarOpenWith}
+        <select id="cfg-toolbar">
+          <option value="shown">${S.settings.toolbarShown}</option>
+          <option value="hidden">${S.settings.toolbarHidden}</option>
+        </select>
+      </label>
+      <label>${S.settings.toolbarShortcut}
+        <span id="toolbar-keyrow">
+          <input id="cfg-toolbar-key" spellcheck="false" placeholder="${S.settings.toolbarShortcutNone}">
+          <button type="button" id="btn-toolbar-rec" class="btn sm"></button>
+        </span>
+      </label>
+      <p class="hint" id="toolbar-key-hint">${S.settings.toolbarShortcutHint}</p>
+    </div>
     <hr>
     <label>${S.settings.language}
       <select id="cfg-lang">
@@ -129,6 +152,8 @@ const CSS = /* css */ `
 #export-box .row { flex-wrap: wrap; }
 #launch-icon-preview { width: 22px; height: 22px; border-radius: 5px; object-fit: contain; }
 #settings-form details summary { cursor: pointer; font-size: 13px; color: var(--text-2); }
+#toolbar-keyrow { display: flex; gap: 8px; align-items: center; margin-top: 3px; }
+#toolbar-keyrow input { flex: 1; min-width: 0; }
 `;
 
 // ---------- launcher (applications menu / Start Menu / home screen) ----------
@@ -320,11 +345,75 @@ async function renderCrypt() {
   }
 }
 
+// ---------- the toolbar's toggle shortcut ----------
+// Typed by hand or captured by pressing it, which is how anyone sane would
+// expect to set a shortcut. Stored canonically by the core (toolbar.rs); the
+// only rule enforced here is the one worth explaining in place rather than as
+// a save error: a bare printable key would fire while typing in the app.
+let recording = null;
+
+function comboOf(e) {
+  const parts = [];
+  // The platform's own modifier is stored as "Mod" — the same app opened on a
+  // Mac and on Linux should each show the shortcut their user actually presses.
+  if (MAC ? e.metaKey : e.ctrlKey) parts.push("Mod");
+  if (MAC ? e.ctrlKey : e.metaKey) parts.push(MAC ? "Ctrl" : "Meta");
+  if (e.altKey) parts.push("Alt");
+  if (e.shiftKey) parts.push("Shift");
+  const key = e.key === " " ? "Space" : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+  if (!parts.length && !/^F\d{1,2}$/.test(key)) return null;
+  parts.push(key);
+  return parts.join("+");
+}
+
+function stopRecording() {
+  if (!recording) return;
+  document.removeEventListener("keydown", recording, true);
+  recording = null;
+  const b = $("btn-toolbar-rec");
+  b.textContent = S.settings.toolbarRecord;
+  b.classList.remove("primary");
+}
+
+function startRecording() {
+  if (recording) return stopRecording();
+  const b = $("btn-toolbar-rec");
+  b.textContent = S.settings.toolbarRecording;
+  b.classList.add("primary");
+  recording = (e) => {
+    // Swallow it: while we are listening, the keystroke must not toggle the
+    // toolbar, type into the field, or reach the app.
+    e.preventDefault();
+    e.stopPropagation();
+    if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return; // waiting for the real key
+    const bare = !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey;
+    if (e.key === "Escape" && bare) return stopRecording(); // gave up
+    const combo = comboOf(e);
+    if (!combo) { $("toolbar-key-hint").textContent = S.settings.toolbarNeedsModifier; return; }
+    $("cfg-toolbar-key").value = combo;
+    $("toolbar-key-hint").textContent = S.settings.toolbarShortcutHint;
+    stopRecording();
+  };
+  document.addEventListener("keydown", recording, true);
+}
+
 // ---------- open / save ----------
 function syncLocalHint() {
   $("local-hint").classList.toggle("hidden", $("cfg-provider").value !== "local");
 }
 async function loadSettings() {
+  stopRecording();
+  try {
+    const tb = (await rpc("toolbar.get")) || {};
+    $("cfg-toolbar").value = tb.hidden ? "hidden" : "shown";
+    $("cfg-toolbar-key").value = tb.shortcut || "";
+    $("toolbar-key-hint").textContent = S.settings.toolbarShortcutHint;
+    $("toolbar-box").classList.remove("hidden"); // a reconnect to a core that does have it
+  } catch {
+    // An older core has no toolbar.get: leave the section as it is rather
+    // than showing a default that saving would then impose.
+    $("toolbar-box").classList.add("hidden");
+  }
   const ai = (await rpc("config.get", { key: "ai" })) || {};
   $("cfg-provider").value = ai.provider || "";
   $("cfg-key").value = ai.api_key || "";
@@ -438,7 +527,7 @@ function wire() {
   registerPanel("settingspanel", "btn-settings", loadSettings);
   $("st-head-icon").innerHTML = I("settings", 14);
   $("btn-settings-close").innerHTML = I("x", 15);
-  $("btn-settings-close").onclick = () => closePanel("settingspanel");
+  $("btn-settings-close").onclick = () => { stopRecording(); closePanel("settingspanel"); };
   $("btn-dl-app").innerHTML = I("download", 13) + " " + S.settings.downloadApp;
   $("btn-dl-template").innerHTML = I("package", 13) + " " + S.settings.downloadTemplate;
   $("btn-dl-app").onclick = () => downloadUrl("/download.uapp");
@@ -483,9 +572,11 @@ function wire() {
     } else if (++bridgeTries > 20) clearInterval(bridgeTimer);
   }, 500);
 
+  $("btn-toolbar-rec").textContent = S.settings.toolbarRecord;
+  $("btn-toolbar-rec").onclick = startRecording;
   $("cfg-lang").onchange = () => setLocale($("cfg-lang").value);
   $("cfg-provider").onchange = syncLocalHint;
-  $("btn-cancel").onclick = () => closePanel("settingspanel");
+  $("btn-cancel").onclick = () => { stopRecording(); closePanel("settingspanel"); };
   $("btn-save").onclick = async () => {
     const provider = $("cfg-provider").value;
     const ai = provider ? {
@@ -495,10 +586,19 @@ function wire() {
       base_url: ($("cfg-baseurl").value || "").trim() || undefined,
       max_tokens: parseInt($("cfg-maxtokens").value, 10) || undefined,
     } : null;
+    stopRecording();
     try {
       await rpc("config.set", { key: "ai", value: ai });
       // Local (not synced) — how this machine opens apps.
       await rpc("prefs.set", { key: "shell", value: $("cfg-shell").value }).catch(() => {});
+      // The toolbar's DEFAULT only: what the app opens with. The core
+      // validates the shortcut and reports an unusable one by name.
+      if (!$("toolbar-box").classList.contains("hidden")) {
+        await rpc("toolbar.setDefault", {
+          hidden: $("cfg-toolbar").value === "hidden",
+          shortcut: ($("cfg-toolbar-key").value || "").trim(),
+        });
+      }
     } catch (e) { dlgAlert(S.settings.saveFailed(e.message)); return; }
     closePanel("settingspanel");
     refreshInfo();

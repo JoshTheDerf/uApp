@@ -33,6 +33,27 @@ Then open with `uapp open <file>.uapp` to test.
 - `uapp.onChange(cb)` — re-render on changes
 - `await uapp.ready` — `{user, device, …}`
 
+### The toolbar
+
+The bar uapp puts around this app (its name, Files, Database, Settings, chat).
+Hidden, the app fills the window.
+
+- `uapp.toolbar.hide()` / `.show()` / `.toggle()` — this window, right now.
+  Saves nothing: the app still opens the way its setting says.
+- `await uapp.toolbar.state()` — `{visible, hidden, shortcut}`
+- `await uapp.toolbar.setDefault({hidden, shortcut})` — how the app *opens*,
+  saved in the file. `shortcut` is a keystroke like `"F9"` or `"Mod+Alt+B"`
+  (`Mod` = Cmd on macOS, Ctrl elsewhere).
+
+The panels beside the app — `"chat"`, `"files"`, `"database"`, `"settings"`,
+`"tools"`:
+
+- `uapp.panel.open(name)` / `.close(name)` / `.toggle(name)`
+- `await uapp.panel.state()` — the open panel's name, or `null`
+
+Opening one closes whichever was open (they share an edge) and reveals the
+toolbar if it was hidden.
+
 ## Rules
 
 - Vendor dependencies into `app/vendor/`.

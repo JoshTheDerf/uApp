@@ -112,6 +112,17 @@ export const S = {
   },
 
   settings: {
+    toolbarSection: "Toolbar",
+    toolbarHint: "The bar around the app: its name, Files, Database, Tools, Settings and chat. Hidden, the app fills the window on its own. Saved with the app, so it opens this way wherever it is opened.",
+    toolbarOpenWith: "When the app opens",
+    toolbarShown: "Show the toolbar",
+    toolbarHidden: "Hide the toolbar",
+    toolbarShortcut: "Keyboard shortcut",
+    toolbarShortcutNone: "None",
+    toolbarShortcutHint: "Shows and hides the toolbar, wherever you are in the app. Leave it empty to remove it — the button in the corner still brings the toolbar back.",
+    toolbarNeedsModifier: "Hold Ctrl, Alt or Shift as well, or use an F-key: on its own it would fire while you type in the app.",
+    toolbarRecord: "Record",
+    toolbarRecording: "Press keys…",
     title: "Settings",
     downloadSection: "Download",
     downloadHint: "Save a copy of this app, or download a blank template (app files only, no data or history).",
@@ -248,6 +259,12 @@ export const S = {
     restoreConfirm: (name, time) => `Restore ${name} to the version from ${time}? This becomes a new version for everyone.`,
     listView: "List view",
     gridView: "Grid view",
+  },
+
+  toolbar: {
+    hideTitle: "Hide the toolbar",
+    showTitle: "Show the toolbar",
+    menuHide: "Hide toolbar",
   },
 
   topbar: {
