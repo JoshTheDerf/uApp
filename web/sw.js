@@ -281,8 +281,19 @@ async function clientIsShell(clientId) {
   if (known !== undefined) return known;
   let ours = true;                                  // conservative: if we cannot tell, act as before
   try {
-    const c = await self.clients.get(clientId);
+    // Bounded: Firefox does not resolve clients.get() for a dedicated worker
+    // until that worker has finished loading — and the request being judged
+    // here may be one of the module imports it is loading. Waiting on it
+    // deadlocked the boot (the wasm never arrived; Firefox then aborted the
+    // fetch). A worker's client is normally attributed synchronously when
+    // its script is served (see noteWorker in the fetch handler); this is
+    // the fallback for one created before this worker (re)started.
+    const c = await Promise.race([
+      self.clients.get(clientId),
+      new Promise((res) => setTimeout(() => res(undefined), 1000)),
+    ]);
     if (c) { const rel = scopeRelative(new URL(c.url).pathname); ours = rel !== null && shellPath(splitInst(rel).p); }
+    else if (c === undefined) return ours;          // unknown: do not cache the guess
   } catch { /* keep the default */ }
   rememberClient(clientId, ours);
   return ours;
@@ -311,6 +322,19 @@ self.addEventListener("fetch", (ev) => {
   const noteNav = () => {
     const i = inst || instOfClient.get(ev.clientId);
     if (i && ev.resultingClientId) { instOfClient.set(ev.resultingClientId, i); if (instOfClient.size > 256) instOfClient.delete(instOfClient.keys().next().value); }
+  };
+  // A worker this request creates (its main script) is a client of its own,
+  // and every request it makes — the shell's worker.js importing uapp_wasm.js
+  // and fetching the wasm, an app's own workers — arrives with THAT client id.
+  // Attribute it to its creator now, synchronously: asking clients.get() about
+  // it later hangs in Firefox until the worker is loaded, which it cannot be
+  // while its imports wait on us.
+  const isWorkerScript = !!ev.resultingClientId
+    && (ev.request.destination === "worker" || ev.request.destination === "sharedworker");
+  const noteWorker = (ours) => {
+    if (!isWorkerScript) return;
+    rememberClient(ev.resultingClientId, ours);
+    if (ours) noteNav();
   };
   // A client we already know is not ours: no respondWith at all, so the
   // browser fetches exactly as it would with no worker installed. This is the
@@ -389,7 +413,9 @@ self.addEventListener("fetch", (ev) => {
     ev.respondWith((async () => {
       // Another app on this origin that happens to use one of our prefixes
       // (its own /vendor/... say): it has no archive behind it.
-      if (!(await clientIsShell(ev.clientId))) return netFetch(ev.request, u, false);
+      const ours = await clientIsShell(ev.clientId);
+      noteWorker(ours);
+      if (!ours) return netFetch(ev.request, u, false);
       return archiveResponse(ev.request, u, ev.clientId, false, inst);
     })());
     return;
@@ -409,7 +435,9 @@ self.addEventListener("fetch", (ev) => {
       // network and nothing else: no archive probe, no COI stamp. The answer
       // is cached, so every later request from it takes the synchronous
       // hand-back at the top of this handler instead.
-      if (!(await clientIsShell(ev.clientId))) return netFetch(ev.request, null, false);
+      const ours = await clientIsShell(ev.clientId);
+      noteWorker(ours);
+      if (!ours) return netFetch(ev.request, null, false);
       // Never for a navigation: a top document is the SERVER's page (with
       // its injected chrome) — the shell being navigated away from is still
       // a client here and would hand over the raw archive copy instead.
