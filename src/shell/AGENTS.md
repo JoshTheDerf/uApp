@@ -41,6 +41,10 @@ Then open with `uapp open <file>.uapp` to test.
 - `uapp.readFile(name)`, `uapp.writeFile(name, text)`, `uapp.listFiles()`
 - `await uapp.ready`: `{name, user, device, appId, ...}`; `uapp.user` and
   `uapp.device` are null until it resolves
+- `uapp.notify(title, {body})`: a system notification, shown by the uApp window
+- Settings of the app's own: `uapp.rpc("config.get"/"config.set", {key, value})`
+  with keys that start with `app.`. Other uApp settings, the chat and approvals
+  aren't reachable from app pages.
 
 Failed calls reject with `uapp.UappError`. `.method` is the call, `.code` is
 `"timeout"`, `"disconnected"`, `"no_host"` or `"unknown_action"` when known.
@@ -73,6 +77,10 @@ and `"tools"`:
 
 Opening one closes whichever was open (they share an edge) and reveals the
 toolbar if it was hidden.
+
+The app runs on its own origin (`http://localhost:<port>`), apart from the
+uApp window around it: `parent.document` isn't reachable, and its
+`localStorage` is its own.
 
 ## Rules
 

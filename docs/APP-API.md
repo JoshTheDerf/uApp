@@ -12,6 +12,12 @@ That's all you need. uApp also adds the tag to any HTML page in `app/` that does
 
 On a public site served by `uapp serve`, a page opened outside the editor has nothing to talk to, so every call rejects at once with the code `no_host`.
 
+### Your app's own origin
+
+In the desktop and Android apps (and with `uapp open --browser`), your pages are served from `http://localhost:<port>`, an origin of their own, while the editor around them is on `http://127.0.0.1:<port>`. Your code can't reach into the editor (`parent.document` throws), and uapp.js talks to it for you. In the desktop window, links to other sites open in your browser. In the browser build and on a `uapp serve` site, the app shares the editor's origin, and Settings says so.
+
+`localStorage` belongs to your page's origin. What an app saved there before it had its own origin is moved over the first time it opens on the new one (the page reloads once when that happens). IndexedDB and cookies aren't moved.
+
 ### Editor types
 
 The full API with types and doc comments is served at `/uapp.d.ts` while an app is open. Save it next to your code and point a reference comment at it:
@@ -126,6 +132,10 @@ await uapp.call("add_employee", { name: "Ada", hired: "2026-10-01" });
 - `readonly: true` marks an action that changes nothing, so it never needs approval. Other actions may ask the user first.
 - `uapp.call(name, input)` runs one of this page's own actions directly.
 
+### Notifications
+
+`uapp.notify(title, {body})` shows a system notification. The editor shows it for you (as a small message in the window when notifications aren't allowed), since an app page can't be given the browser's notification permission itself.
+
 ### Calling tools
 
 `uapp.tool(name, input)` calls any tool the assistant has: the built-in ones, MCP tools (`mcp__<server>__<tool>`) and app actions (`app__<name>`). `uapp.tools()` lists them, with whether each one is `gated`. A gated tool shows the user an approval prompt first, and if they say no (or don't answer in time) the call fails with an error starting with `denied:` and nothing runs. A tool turned off in the app's settings fails too.
@@ -164,4 +174,11 @@ None of this is saved, apart from `setDefault`.
 
 ## Lower-level calls
 
-`uapp.rpc(method, params)` sends any method to uApp and is what the calls above are built on. Stick to the documented calls where you can. App code currently runs on the same origin as the editor (see [design/app-isolation.md](design/app-isolation.md)), and once it's isolated, app pages will only get the methods the calls on this page use.
+`uapp.rpc(method, params)` sends a method to uApp and is what the calls above are built on. Stick to the documented calls where you can. App pages only get the methods those calls use: `sql.*`, `files.*`, `import.csv`, `tools.list`, `tools.call`, `app.info`, `app.reload`, `toolbar.*`, `panel.set`, `notify.show` and `ping`. Anything else (the chat, the AI and MCP settings, approving prompts) fails with "only available to the uApp editor". See [design/app-isolation.md](design/app-isolation.md).
+
+For settings of your own, `config.get` and `config.set` take keys that start with `app.`. They're saved in the file:
+
+```js
+await uapp.rpc("config.set", { key: "app.units", value: { metric: true } });
+const units = await uapp.rpc("config.get", { key: "app.units" }); // null when unset
+```

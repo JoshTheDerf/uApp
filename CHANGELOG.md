@@ -64,6 +64,7 @@ Notable changes to uApp. The format is based on [Keep a Changelog](https://keepa
 
 ### Security
 
+- Apps run on an origin of their own (`http://localhost:<port>`, next to the editor's `127.0.0.1`) with their own token. App pages can use their data, files, tools and `app.*` settings, but can't reach into the editor, change the AI or MCP setup, read chats or answer their own approval prompts. Notifications go through `uapp.notify()`, and an app's old localStorage is moved over on first open. The browser build still shares one origin and says so in Settings.
 - App and assistant SQL runs in a sandbox. It refuses writes to uApp's own tables (`uapp_*` and `sqlar`), transaction control, `ATTACH`, PRAGMAs outside a read-only list (so `user_version` can't be set), and `load_extension()`. Each refusal says what was refused and why.
 - Schema SQL copied from another file (templates, publishes, library uploads) must be a single `CREATE` statement, and that file is opened read-only with untrusted schema features off.
 - A tool call an app triggers no longer runs when you deny it or the prompt times out.
