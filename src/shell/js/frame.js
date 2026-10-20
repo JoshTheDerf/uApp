@@ -41,9 +41,20 @@ const TOKEN = frameSrc()?.searchParams.get("a") || "";
 /// "/scratch/"), with the token when the app has its own origin.
 export function appPageUrl(path) {
   if (!isolated()) return (window.__uappBase || "/") + String(path).replace(/^\/+/, "");
-  const u = new URL(path, appOrigin());
-  u.searchParams.set("a", TOKEN);
+  const u = withoutToken(new URL(path, appOrigin()));
+  u.searchParams.append("a", TOKEN);
   return u.href;
+}
+
+/// `u` (a URL object, changed in place) without the app token. App pages
+/// keep it in their address (see uapp.js), and it must never be copied into
+/// this page's own address or history.
+export function withoutToken(u) {
+  if (!TOKEN || !u.searchParams.getAll("a").includes(TOKEN)) return u;
+  const keep = u.searchParams.getAll("a").filter((v) => v !== TOKEN);
+  u.searchParams.delete("a");
+  for (const v of keep) u.searchParams.append("a", v);
+  return u;
 }
 
 /// Where to open an archive file (an `appUrl()`) in a tab of its own: on the

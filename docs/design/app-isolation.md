@@ -18,11 +18,14 @@ The shell's routes 404 on the app origin, and the app's root-level files and the
 
 ### Recognizing the app's requests
 
-The shell loads the frame cross-site, so that load (and every reload the shell starts) carries `?a=<app token>`. uapp.js drops it from the frame's address (only a 64-digit hex value, so an app's own `?a=` is left alone) and keeps it in sessionStorage for that tab's later pages. After that:
+The shell loads the frame cross-site, so that load (and every reload the shell starts) carries `?a=<app token>`, and app pages keep it in their address. Only a 64-digit hex value counts, so an app's own `?a=` is left alone and the token goes after it.
 
-- The page's own requests (scripts, images, fetches, links inside the frame) say `Sec-Fetch-Site: same-origin`. On an engine too old to send that header, a `Referer` on the app origin does instead, since app pages are served with `Referrer-Policy: same-origin`. A typed-in URL (`none`) is accepted too.
-- The socket needs the app token and the app's own `Origin`.
+- **With the token, the whole archive.** It's on the URL, in the `Referer` of the page's own requests (app pages are served with `Referrer-Policy: same-origin`, so other sites never see it), or in the app cookie. uapp.js keeps it on the URL across `history.pushState` / `replaceState`, adds it to same-origin worker script URLs (a worker's requests send the script's URL as their `Referer`), and puts it back on a page reached without it, from sessionStorage or by asking the shell. A navigation that arrives without it but with a token-bearing `Referer` (a plain link) is redirected to the same URL with `?a=` added.
+- **Without it, only the app's code.** Some of the app's own requests can't carry it: `url()`s inside a stylesheet, nested module imports, anything under `referrerpolicy="no-referrer"`. They're same-origin, which `Sec-Fetch-Site` says (or a same-origin `Referer` on an engine too old to send that header; `none` is a typed-in URL). A browser page elsewhere can't fake that, but any local program can, so these requests only get files that resolve under `app/` (plus `uapp.js`). Anything that lands in `data/`, directly, through `/app/data/…` or as a root-level name's fallback, is a 403. App pages themselves are code, so they load either way.
+- **The socket** needs the token and the app's own `Origin`.
 - The app cookie is set on the `?a=` load, but browsers drop `SameSite=Strict` cookies in a cross-site frame (and several block third-party cookies outright), so it mostly helps non-browser clients and a page opened in a tab of its own.
+
+The shell never copies the token into its own address bar or history.
 
 App responses carry `Content-Security-Policy: frame-ancestors 'self' http://127.0.0.1:<port>`, and the shell's `frame-src` names the app origin.
 
@@ -74,7 +77,8 @@ localStorage an app wrote used to land in the shell's storage. On the first load
 
 - **The browser build and `uapp serve`** (`src/wasm.rs`, the demo, and a served site's editor) keep everything on one origin. There's no server to mint tokens or tag sockets, and a sandboxed frame gets an opaque origin that no service worker controls, so the app's files wouldn't load. Settings there says "This app isn't isolated from the editor. Only open apps you trust here." A second origin the deployer provides (`apps.example.com` next to `example.com`) would fix it; see [web-build-isolation.md](web-build-isolation.md).
 - **Apps from each other.** Every app on a port shares `localhost:<port>`. Per-app subdomains (`<app id>.localhost`) would separate them, but WebKitGTK and Android's WebView need checking first.
-- **A tab left open after its server exits.** If a later server for another app gets the same port, that old page can read the new app's files with same-origin requests. It can't open a socket, since the token changed. Ports are random, so this takes bad luck and a browser tab (the native window closes with its server).
+- **A tab left open after its server exits.** If a later server for another app gets the same port, that old page can read the new app's code (not its data) with same-origin requests. It can't open a socket, since the token changed. Ports are random, so this takes bad luck and a browser tab (the native window closes with its server).
+- **Data files from a stylesheet or a no-referrer request.** `background: url(/data/x.png)` in a CSS file, or a `/data/` request under `referrerpolicy="no-referrer"`, has no token and gets a 403. Load those from the page itself.
 
 ## Also in place
 

@@ -16,6 +16,8 @@ On a public site served by `uapp serve`, a page opened outside the editor has no
 
 In the desktop and Android apps (and with `uapp open --browser`), your pages are served from `http://localhost:<port>`, an origin of their own, while the editor around them is on `http://127.0.0.1:<port>`. Your code can't reach into the editor (`parent.document` throws), and uapp.js talks to it for you. In the desktop window, links to other sites open in your browser. In the browser build and on a `uapp serve` site, the app shares the editor's origin, and Settings says so.
 
+Your pages' addresses carry `?a=<token>`, uApp's key to that origin (it goes after any `?a=` of your own). Leave it there: it's how requests for files under `data/` are let through. uapp.js keeps it when you use `history.pushState`, and adds it back when a page loses it. A `data/` file referenced from a stylesheet's `url()` or fetched with `referrerpolicy="no-referrer"` can't carry it and won't load, so load those from the page.
+
 `localStorage` belongs to your page's origin. What an app saved there before it had its own origin is moved over the first time it opens on the new one (the page reloads once when that happens). IndexedDB and cookies aren't moved.
 
 ### Editor types

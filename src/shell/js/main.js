@@ -70,7 +70,7 @@ import "./tools-panel.js";
 import "./mirror.js";
 import "./toolbar-visibility.js";
 import "./keepalive.js";
-import { appPageUrl, isolated, onFrame, setFrameConfig, toFrame } from "./frame.js";
+import { appPageUrl, isolated, onFrame, setFrameConfig, toFrame, withoutToken } from "./frame.js";
 import { addRefs } from "./chat-panel.js";
 import { fbCwd, loadFiles, pickDest } from "./files-panel.js";
 import { isUappFile, updateFromDrop, updateFromFile } from "./template-update.js";
@@ -139,6 +139,7 @@ function frameToTopPath(u) {
 // would break reload.
 const MIRROR_URL = !!window.__uappChrome;
 function frameMoved(u) {
+  u = withoutToken(u); // never into our own address bar
   framePage = u.pathname + u.search + u.hash;
   if (!MIRROR_URL || u.origin !== location.origin) return;
   const top = frameToTopPath(u);

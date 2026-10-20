@@ -156,6 +156,31 @@ try {
   ok((await app.rpc("sql.query", { sql: "SELECT t FROM notes" })).rows[0][0] === "hi", "sql works");
   ok((await app.rpc("files.list")).rows.length > 0, "files work");
 
+  console.log("\n[6b] data files need the token; the app's code doesn't");
+  {
+    const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    await owner.rpc("files.write", { name: "data/sales.csv", text: "a,b\n1,2\n" });
+    await owner.rpc("files.write", { name: "data/pic.png", b64: PNG });
+    await owner.rpc("files.write", { name: "app/page.html", text: "<h1>page</h1>" });
+    const st = async (path, h = {}) => (await onApp(path, h)).status;
+    // What any local program can send: the app's Host and a forged Sec-Fetch-Site.
+    ok(await st("/data/sales.csv", { "Sec-Fetch-Site": "none" }) === 403, "forged Sec-Fetch-Site: none gets no data file");
+    ok(await st("/data/sales.csv", { "Sec-Fetch-Site": "same-origin" }) === 403, "forged Sec-Fetch-Site: same-origin gets no data file");
+    ok(await st("/data/sales.csv", { Referer: `${APP}/app/` }) === 403, "a Referer without the token gets no data file");
+    ok(await st("/sales.csv", { "Sec-Fetch-Site": "same-origin" }) === 403, "nor through a root-level name that falls back to data/");
+    ok(await st("/app/data/sales.csv", { "Sec-Fetch-Site": "same-origin" }) === 403, "nor through /app/data/...");
+    ok(await st("/data/pic.png", { "Sec-Fetch-Site": "same-origin", Referer: `${APP}/app/?a=${"0".repeat(64)}` }) === 403, "a Referer with another token gets nothing");
+    ok(await st(`/data/sales.csv?a=${A}`) === 200, "the token on the URL");
+    ok(await st("/data/pic.png", { "Sec-Fetch-Site": "same-origin", Referer: `${APP}/app/?a=${A}` }) === 200, "the token in the Referer (an app page's own request)");
+    ok(await st("/sales.csv", { "Sec-Fetch-Site": "same-origin", Referer: `${APP}/some/route?x=1&a=foo&a=${A}#h` }) === 200, "...after the app's own ?a= and a hash");
+    ok(await st("/app/page.html", { "Sec-Fetch-Site": "same-origin" }) === 200, "the app's code still loads without it (workers, stylesheet url()s, no-referrer)");
+    ok(await st("/uapp.js", { "Sec-Fetch-Site": "same-origin" }) === 200, "and so does uapp.js");
+    const nav = await onApp("/app/page.html?x=1", { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate", Referer: `${APP}/app/?a=${A}` });
+    ok(nav.status === 302 && nav.headers.location === `/app/page.html?x=1&a=${A}`, "a page reached without ?a= is sent back with it", `${nav.status} ${nav.headers.location}`);
+    const nav2 = await onApp(`/app/page.html?a=${A}`, { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate", Referer: `${APP}/app/?a=${A}` });
+    ok(nav2.status === 200, "one that has it isn't");
+  }
+
   console.log("\n[7] events");
   owner.events.length = 0; app.events.length = 0;
   await app.rpc("notify.show", { title: "Done", body: "All synced" });

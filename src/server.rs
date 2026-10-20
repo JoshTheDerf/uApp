@@ -5,7 +5,7 @@
 //! [`Visitor`] extractors, never a handler-local check — and a request with a
 //! non-loopback Host is refused (DNS rebinding). The app frame gets an origin
 //! of its own, `localhost:<port>`, told apart from the shell's `127.0.0.1` by
-//! Host, with its own token and an app-role socket (see `app_authed`,
+//! Host, with its own token and an app-role socket (see `app_access`,
 //! `guard_and_headers` and docs/design/app-isolation.md).
 //!
 //! Public (`uapp serve`, `App::public` set): the same router faces the world
@@ -60,7 +60,7 @@ fn cookie_name(app: &App) -> String {
 
 /// The app frame's cookie. Browsers drop it when the frame is cross-site
 /// with the shell (which it always is), so it mostly serves non-browser
-/// clients and a page opened in a tab of its own; [`app_authed`] has the
+/// clients and a page opened in a tab of its own; [`app_access`] has the
 /// paths a framed page actually uses.
 fn app_cookie_name(app: &App) -> String {
     format!(
@@ -84,15 +84,20 @@ fn on_app_origin(app: &App, headers: &HeaderMap) -> bool {
         .is_some_and(|(h, p)| h == "localhost" && p == port)
 }
 
+/// Is one of the `a=` parameters in `query` the app token? (An app may use
+/// `?a=` for its own purposes too, so every one of them is looked at.)
+fn query_has_app_token(app: &App, query: Option<&str>) -> bool {
+    query
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|kv| kv.strip_prefix("a="))
+        .any(|t| crate::secrets::token_eq(t, &app.app_token))
+}
+
 /// Does the request carry the app token (`?a=` or the app cookie)?
 fn has_app_token(app: &App, headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
     use crate::secrets::token_eq;
-    let q = uri
-        .query()
-        .unwrap_or("")
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("a="));
-    if q.is_some_and(|t| token_eq(t, &app.app_token)) {
+    if query_has_app_token(app, uri.query()) {
         return true;
     }
     let name = app_cookie_name(app);
@@ -105,36 +110,66 @@ fn has_app_token(app: &App, headers: &HeaderMap, uri: &axum::http::Uri) -> bool 
         .any(|(k, v)| k == name && token_eq(v, &app.app_token))
 }
 
-/// May this app-origin request have the app's pages and files?
-///
-/// The shell loads the frame cross-site, so that first navigation (and every
-/// reload the shell starts) carries `?a=<app token>`. After that the page's
-/// own requests (its scripts, images, fetches, in-frame links) are
-/// same-origin, which `Sec-Fetch-Site` says, or on an engine too old to send
-/// it, a `Referer` on the app origin (app pages are served with
-/// `Referrer-Policy: same-origin`, so other sites never get one). A page on
-/// another site, or on another loopback port, has neither. `none` is a URL
-/// typed into the address bar, which no page can fake.
-fn app_authed(app: &App, headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
+/// A `Referer` on the app origin whose URL carries the app token: a request
+/// made by one of the app's own pages. They keep `?a=` in their address
+/// (uapp.js sees to that) and are served with `Referrer-Policy: same-origin`,
+/// so their scripts, images and fetches all send it, and no other site does.
+fn referer_has_app_token(app: &App, headers: &HeaderMap) -> bool {
     let Some(ours) = app.app_origin() else {
         return false;
     };
+    headers
+        .get(header::REFERER)
+        .and_then(|r| r.to_str().ok())
+        .and_then(|r| r.strip_prefix(ours.as_str()))
+        .filter(|rest| rest.starts_with('/'))
+        .and_then(|rest| rest.split('#').next())
+        .is_some_and(|rest| query_has_app_token(app, rest.split_once('?').map(|(_, q)| q)))
+}
+
+/// How much of the app an app-origin request may have.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AppAccess {
+    /// Shows the app token: the whole archive, `data/` included.
+    Full,
+    /// No token, but the request says it's the app's own (see
+    /// [`app_access`]): only the app's code, the files under `app/`.
+    Code,
+}
+
+/// What this app-origin request may have, if anything.
+///
+/// The shell loads the frame cross-site with `?a=<app token>`, every app page
+/// keeps it in its URL, and the page's requests carry it in their `Referer`
+/// (or on the URL, or in the app cookie where the browser keeps it). That's
+/// [`AppAccess::Full`].
+///
+/// Some of the app's requests can't carry it: a worker's own fetches and
+/// imports (its URL is the script's), `url()`s inside a stylesheet, nested
+/// module imports, anything under `referrerpolicy="no-referrer"`. They are
+/// same-origin, which `Sec-Fetch-Site` says (or, on an engine too old to send
+/// it, a same-origin `Referer`); `none` is a URL typed into the address bar.
+/// A browser page elsewhere can't fake either, but any local program can, so
+/// they only get [`AppAccess::Code`]: the app's code, never its data.
+fn app_access(app: &App, headers: &HeaderMap, uri: &axum::http::Uri) -> Option<AppAccess> {
+    let ours = app.app_origin()?;
     if let Some(o) = headers.get(header::ORIGIN)
         && o.to_str().ok() != Some(ours.as_str())
     {
-        return false;
+        return None;
     }
-    if has_app_token(app, headers, uri) {
-        return true;
+    if has_app_token(app, headers, uri) || referer_has_app_token(app, headers) {
+        return Some(AppAccess::Full);
     }
-    match headers.get("sec-fetch-site").map(|v| v.to_str()) {
+    let own = match headers.get("sec-fetch-site").map(|v| v.to_str()) {
         Some(site) => matches!(site, Ok("same-origin" | "none")),
         None => headers
             .get(header::REFERER)
             .and_then(|r| r.to_str().ok())
             .and_then(|r| r.strip_prefix(ours.as_str()))
             .is_some_and(|rest| rest.starts_with('/')),
-    }
+    };
+    own.then_some(AppAccess::Code)
 }
 
 /// DNS-rebinding guard: the server binds 127.0.0.1 only, so a legitimate
@@ -287,8 +322,8 @@ pub struct Owner;
 pub enum Visitor {
     /// Holds the token: the shell, the raw archive, everything.
     Owner,
-    /// The app frame, on its own origin (see [`app_authed`]).
-    App,
+    /// The app frame, on its own origin (see [`app_access`]).
+    App(AppAccess),
     /// Anonymous reader of a public site.
     Reader,
 }
@@ -318,10 +353,9 @@ impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
         app: &Arc<App>,
     ) -> Result<Self, Response> {
         if on_app_origin(app, &parts.headers) {
-            return if app_authed(app, &parts.headers, &parts.uri) {
-                Ok(Visitor::App)
-            } else {
-                Err(deny())
+            return match app_access(app, &parts.headers, &parts.uri) {
+                Some(a) => Ok(Visitor::App(a)),
+                None => Err(deny()),
             };
         }
         // A token-holder's request from another origin is no owner's: on a
@@ -366,7 +400,7 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
         // A public site's front page is the site, not the shell.
         Visitor::Reader => return public_page(&app, "/", &headers),
         // On the app's own origin, `/` simply is the app.
-        Visitor::App => return serve_sqlar(&app, "index.html", &headers),
+        Visitor::App(a) => return serve_sqlar(&app, "index.html", &headers, a == AppAccess::Code),
         Visitor::Owner => {}
     }
     // Sharing the shell's origin, a root-absolute `href="/"` followed INSIDE
@@ -376,7 +410,7 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
     if app.app_origin().is_none()
         && headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("iframe")
     {
-        return serve_sqlar(&app, "index.html", &headers);
+        return serve_sqlar(&app, "index.html", &headers, false);
     }
     // Where the shell loads the app frame from: its own origin, with the app
     // token for that first (cross-site) load, or next to the shell.
@@ -551,10 +585,15 @@ fn parse_range(headers: &HeaderMap, len: u64) -> Option<Result<(u64, u64), ()>> 
     Some(Ok((start, end)))
 }
 
-fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
+/// One archive file for `name`. `code_only` (a request without the app
+/// token, see [`app_access`]) serves only what resolves under `app/`: a name
+/// that lands in `data/` (directly, through `/app/data/…`, or as a root-level
+/// name's fallback) is refused.
+fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap, code_only: bool) -> Response {
     if name.contains("..") {
         return deny();
     }
+    let mut needs_token = false;
     // Read + inflate under the lock, then release it: building the response
     // (and slicing a range out of a large video) must not block every other
     // request on the engine mutex.
@@ -563,7 +602,22 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
     // (and the public `uapp serve` router) link this way.
     let (data, name) = {
         let eng = app.eng();
-        let mut found = (crate::store::sqlar_read(&eng.db, name), name.to_string());
+        let read = |n: &str, needs_token: &mut bool| {
+            if !code_only {
+                return crate::store::sqlar_read(&eng.db, n);
+            }
+            match crate::store::resolve_name(&eng.db, n)? {
+                Some(r) if r.starts_with(crate::store::APP_DIR) => {
+                    crate::store::sqlar_read(&eng.db, &r)
+                }
+                Some(_) => {
+                    *needs_token = true;
+                    Ok(None)
+                }
+                None => Ok(None),
+            }
+        };
+        let mut found = (read(name, &mut needs_token), name.to_string());
         if matches!(found.0, Ok(None)) {
             let bare = name.trim_end_matches('/');
             let last = bare.rsplit('/').next().unwrap_or(bare);
@@ -573,7 +627,7 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
                     tries.insert(0, format!("{bare}.html"));
                 }
                 for t in tries {
-                    match crate::store::sqlar_read(&eng.db, &t) {
+                    match read(&t, &mut needs_token) {
                         Ok(Some(b)) => {
                             found = (Ok(Some(b)), t);
                             break;
@@ -639,6 +693,9 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
                     .into_response(),
             }
         }
+        Ok(None) if needs_token => {
+            (StatusCode::FORBIDDEN, "uapp: data files need the app token").into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             format!("no such file in app: {name}"),
@@ -668,7 +725,7 @@ async fn app_file(
     } else {
         path
     };
-    serve_sqlar(&app, &name, &headers)
+    serve_sqlar(&app, &name, &headers, code_only(&who))
 }
 
 /// Inject `<script src="/uapp.js">` (unless the page already loads it) and a
@@ -721,6 +778,10 @@ fn inject_viewport(bytes: Vec<u8>) -> Vec<u8> {
         }
     }
     format!("{inject}\n{text}").into_bytes()
+}
+
+fn code_only(who: &Visitor) -> bool {
+    matches!(who, Visitor::App(AppAccess::Code))
 }
 
 pub(crate) fn percent_decode(s: &str) -> String {
@@ -789,7 +850,7 @@ async fn root_file(
     if name.is_empty() {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    serve_sqlar(&app, name, &headers)
+    serve_sqlar(&app, name, &headers, code_only(&who))
 }
 
 async fn app_root(state: State<Arc<App>>, who: Visitor, headers: HeaderMap) -> Response {
@@ -1573,6 +1634,33 @@ async fn guard_and_headers(
     if (app_side && shell_only(&path)) || (isolated && !app_side && path == "/scratch/") {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
+    // An app page navigating to another of its pages without `?a=` (a plain
+    // link, a form): send it back with the token, so that page's requests
+    // carry it too. The Referer says which page it came from.
+    if app_side
+        && req.method() == axum::http::Method::GET
+        && !query_has_app_token(&app, req.uri().query())
+        && req
+            .headers()
+            .get("sec-fetch-mode")
+            .and_then(|v| v.to_str().ok())
+            == Some("navigate")
+        && referer_has_app_token(&app, req.headers())
+    {
+        let to = match req.uri().query().filter(|q| !q.is_empty()) {
+            Some(q) => format!("{path}?{q}&a={}", app.app_token),
+            None => format!("{path}?a={}", app.app_token),
+        };
+        let resp = (
+            StatusCode::FOUND,
+            [
+                (header::LOCATION, to),
+                (header::CACHE_CONTROL, "no-store".into()),
+            ],
+        )
+            .into_response();
+        return security_headers(&app, resp);
+    }
     // The shell's first load of the frame carries ?a=; hand the cookie over
     // for clients that keep it (see `app_cookie_name`).
     let set_app_cookie = app_side
@@ -1583,8 +1671,8 @@ async fn guard_and_headers(
     let mut resp = next.run(req).await;
     if app_side {
         // Only our shell (and the app's own pages, for frames of its own)
-        // may frame the app. Same-origin referrers are what lets
-        // `app_authed` recognise the app's requests on older engines.
+        // may frame the app. Same-origin referrers carry the token from the
+        // page's URL to its requests (see `app_access`), and nowhere else.
         if !resp.headers().contains_key(header::CONTENT_SECURITY_POLICY)
             && let Ok(v) = header::HeaderValue::from_str(&format!(
                 "frame-ancestors 'self' {}",

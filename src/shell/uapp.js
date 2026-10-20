@@ -76,23 +76,51 @@
   })();
   const isolatedFrame = !wasmMode && crossTop && location.hostname === "localhost";
   const shellOrigin = isolatedFrame ? `${location.protocol}//127.0.0.1:${location.port}` : location.origin;
-  // The app token. A load the shell starts carries it as ?a= (dropped from
-  // the address right away, as the shell does with ?t=); this tab's later
-  // pages find it in sessionStorage, and failing that, the shell tells us.
-  // Only a 64-hex-digit ?a= is ours: an app's own ?a=foo is left alone.
+  // The app token. A load the shell starts carries it as ?a=, and it stays
+  // in the page's URL: the page's scripts, images and fetches send that URL
+  // as their Referer, which is how the server knows they may have the app's
+  // data files (see app_access in server.rs). This tab's later pages also
+  // find it in sessionStorage, and failing that, the shell tells us. Only a
+  // 64-hex-digit `a` is ours: an app's own ?a=foo is left alone, and ours
+  // goes after it.
+  const isToken = (v) => /^[0-9a-f]{64}$/.test(v || "");
   let appToken = "";
-  try {
-    const u = new URL(location.href);
-    const a = u.searchParams.get("a");
-    if (location.hostname === "localhost" && a && /^[0-9a-f]{64}$/.test(a)) {
-      appToken = a;
-      u.searchParams.delete("a");
-      history.replaceState(history.state, "", u.pathname + u.search + u.hash);
-      try { sessionStorage.setItem("uapp.a", a); } catch {}
-    } else {
-      try { appToken = sessionStorage.getItem("uapp.a") || ""; } catch {}
+  try { appToken = new URL(location.href).searchParams.getAll("a").find(isToken) || ""; } catch {}
+  if (appToken) { try { sessionStorage.setItem("uapp.a", appToken); } catch {} }
+  else if (location.hostname === "localhost") { try { appToken = sessionStorage.getItem("uapp.a") || ""; } catch {} }
+  /// `url` (any form history.pushState takes) with the token added when it
+  /// is one of this origin's pages and doesn't carry it yet.
+  const withToken = (url) => {
+    if (!appToken || url === undefined || url === null) return url;
+    try {
+      const u = new URL(String(url), location.href);
+      if (!/^https?:$/.test(u.protocol) || u.origin !== location.origin
+        || u.searchParams.getAll("a").some(isToken)) return url; // blob: workers too
+      u.searchParams.append("a", appToken);
+      return u.href;
+    } catch { return url; }
+  };
+  if (location.hostname === "localhost") {
+    // Single-page routing must not drop it: this runs at the top of <head>,
+    // before the app's own scripts.
+    for (const name of ["pushState", "replaceState"]) {
+      const real = history[name].bind(history);
+      history[name] = (state, title, url) => real(state, title, withToken(url));
     }
-  } catch {}
+    // A worker's requests send the worker script's URL as their Referer, so
+    // that URL gets the token too.
+    for (const name of ["Worker", "SharedWorker"]) {
+      const Real = window[name];
+      if (typeof Real !== "function") continue;
+      window[name] = class extends Real {
+        constructor(url, opts) { super(withToken(url), opts); }
+      };
+    }
+    // A page reached without it (a link with rel=noreferrer, say).
+    if (appToken && withToken(location.href) !== location.href) {
+      try { history.replaceState(history.state, "", location.href); } catch {}
+    }
+  }
   // The shell hosting this page, at whatever frame depth it sits: in the
   // browser build the nearest ancestor flagged as the wasm host (the shell may
   // itself be a frame in someone's desktop, so `top` would be the wrong
@@ -519,6 +547,7 @@
           if (!t) { reconnectTimer = setTimeout(() => { connect(); openp.then(resolve); }, 1000); return; }
           appToken = t;
           try { sessionStorage.setItem("uapp.a", t); } catch {}
+          try { history.replaceState(history.state, "", location.href); } catch {} // adds it
           connect();
           openp.then(resolve);
         });
