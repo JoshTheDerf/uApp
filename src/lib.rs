@@ -148,7 +148,7 @@ mod native_serve {
             }
         };
 
-        let token: String = (0..32).map(|_| fastrand::alphanumeric()).collect();
+        let token = secrets::new_token();
         let rt = tokio::runtime::Runtime::new()?;
         let mut passphrase = passphrase;
         let mut on_ready = Some(on_ready);
@@ -411,7 +411,13 @@ mod native_serve {
         )
         .with_context(|| format!("opening {}", path.display()))?;
         let generated = token.is_none();
-        let token = token.unwrap_or_else(|| (0..32).map(|_| fastrand::alphanumeric()).collect());
+        if let Some(t) = &token {
+            secrets::check_token(t).context("--token / UAPP_TOKEN")?;
+            if t.len() < 16 {
+                eprintln!("uapp: warning: the token is short ({} characters); anyone who guesses it can edit and publish this site", t.len());
+            }
+        }
+        let token = token.unwrap_or_else(secrets::new_token);
         let mut app = app::App::new(eng, token.clone(), false);
         app.public = Some(opts);
         app.chrome = match &chrome_dir {

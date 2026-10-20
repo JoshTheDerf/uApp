@@ -74,35 +74,44 @@ fn hostname_of(hostport: &str) -> &str {
 
 /// Does this request carry the token (`?t=`, the cookie, or `Authorization:
 /// Bearer`)? In private mode a non-loopback Host fails outright (DNS rebinding).
-fn authed(app: &App, headers: &HeaderMap, query: Option<&str>) -> bool {
+///
+/// On a public site `?t=` only opens the shell (`GET /`, which then sets the
+/// cookie): anywhere else a token in the URL would end up in proxy and CDN
+/// logs for nothing, since the shell's own requests carry the cookie and a
+/// publish sends `Authorization: Bearer`.
+fn authed(app: &App, headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    use crate::secrets::token_eq;
     if app.public.is_none() && !host_is_local(headers) {
         return false;
     }
     if app.token.is_empty() {
         return false;
     }
-    let q_token = query
+    let url_token_ok = app.public.is_none() || uri.path() == "/";
+    let q_token = uri
+        .query()
         .unwrap_or("")
         .split('&')
         .find_map(|kv| kv.strip_prefix("t="));
-    if q_token == Some(app.token.as_str()) {
+    if url_token_ok && q_token.is_some_and(|t| token_eq(t, &app.token)) {
         return true;
     }
     if headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| t.trim() == app.token)
-        .unwrap_or(false)
+        .is_some_and(|t| token_eq(t.trim(), &app.token))
     {
         return true;
     }
-    let want = format!("{}={}", cookie_name(app), app.token);
+    let name = cookie_name(app);
     headers
-        .get(header::COOKIE)
-        .and_then(|c| c.to_str().ok())
-        .map(|c| c.split(';').any(|kv| kv.trim() == want))
-        .unwrap_or(false)
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|c| c.to_str().ok())
+        .flat_map(|c| c.split(';'))
+        .filter_map(|kv| kv.trim().split_once('='))
+        .any(|(k, v)| k == name && token_eq(v, &app.token))
 }
 
 /// Did this request come from one of our own pages, or from no browser at all?
@@ -206,7 +215,7 @@ impl axum::extract::FromRequestParts<Arc<App>> for Owner {
         parts: &mut axum::http::request::Parts,
         app: &Arc<App>,
     ) -> Result<Self, Response> {
-        if !authed(app, &parts.headers, parts.uri.query()) {
+        if !authed(app, &parts.headers, &parts.uri) {
             Err(deny())
         } else if !from_own_origin(app, &parts.headers) {
             Err(cross_origin())
@@ -225,7 +234,7 @@ impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
     ) -> Result<Self, Response> {
         // A token-holder's request from another origin is no owner's: on a
         // public site it still gets what any reader gets.
-        if authed(app, &parts.headers, parts.uri.query()) && from_own_origin(app, &parts.headers) {
+        if authed(app, &parts.headers, &parts.uri) && from_own_origin(app, &parts.headers) {
             Ok(Visitor::Owner)
         } else if app.public.is_some() {
             Ok(Visitor::Reader)
@@ -292,21 +301,20 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
             .replace("{{TOPBAR_CLASS}}", topbar_class),
     )
     .into_response();
-    // Refresh the cookie so the iframe + ws can auth without the token in URL.
-    resp.headers_mut().insert(
-        header::SET_COOKIE,
-        // HttpOnly: app pages run arbitrary (AI-written) JS on this origin and
-        // must not be able to read the token — on a public site it is the
-        // publish secret. Secure there too: never over plain HTTP.
-        format!(
-            "{}={}; Path=/; SameSite=Strict; HttpOnly{}",
-            cookie_name(&app),
-            app.token,
-            if app.public.is_some() { "; Secure" } else { "" }
-        )
-        .parse()
-        .unwrap(),
-    );
+    // Refresh the cookie so the iframe + ws can auth without the token in URL
+    // (the shell then drops ?t= from the address bar, see core.js).
+    // HttpOnly: app pages run arbitrary (AI-written) JS on this origin and
+    // must not be able to read the token — on a public site it is the
+    // publish secret. Secure there too: never over plain HTTP. The token was
+    // checked to be cookie-safe at startup (`secrets::check_token`).
+    if let Ok(v) = header::HeaderValue::from_str(&format!(
+        "{}={}; Path=/; SameSite=Strict; HttpOnly{}",
+        cookie_name(&app),
+        app.token,
+        if app.public.is_some() { "; Secure" } else { "" }
+    )) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
     // The shell is embedded in the binary and changes on every upgrade;
     // stale-cached shells would keep showing the old UI.
     resp.headers_mut()
@@ -903,16 +911,41 @@ pub async fn run_unlock(
     path: &std::path::Path,
 ) -> anyhow::Result<String> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
+    let gate = Arc::new(UnlockGate {
+        port: listener.local_addr()?.port(),
+        tries: tokio::sync::Mutex::new(Tries::default()),
+    });
     loop {
         tokio::select! {
             pw = rx.recv() => return pw.ok_or_else(|| anyhow::anyhow!("unlock cancelled")),
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                tokio::spawn(handle_unlock_conn(stream, path.to_path_buf(), tx.clone()));
+                tokio::spawn(handle_unlock_conn(stream, path.to_path_buf(), tx.clone(), gate.clone()));
             }
         }
     }
 }
+
+/// What every unlock connection shares. The page is reachable by anything
+/// that can reach the port, so password guesses are rate-limited: one at a
+/// time (the lock is held while a guess is checked), and after a few misses
+/// each further guess has to wait, twice as long every time.
+struct UnlockGate {
+    port: u16,
+    tries: tokio::sync::Mutex<Tries>,
+}
+
+#[derive(Default)]
+struct Tries {
+    failures: u32,
+    not_before: Option<tokio::time::Instant>,
+}
+
+/// Misses allowed before the waiting starts (typos happen).
+const UNLOCK_FREE_TRIES: u32 = 3;
+const UNLOCK_MAX_WAIT_SECS: u64 = 60;
+/// A password is never this long; anything bigger isn't a real attempt.
+const UNLOCK_MAX_BODY: usize = 4096;
 
 /// Answer every request on this already-bound listener with one fixed response
 /// for up to `secs` seconds, then return. Used when the browser/native window
@@ -954,10 +987,16 @@ pub async fn run_notice(
 
 /// One unlock connection: GET anything → the password page; POST /unlock →
 /// verify. On success, reply then hand the password to `run_unlock` via `tx`.
+///
+/// Hand-rolled, so the same rules as the real server are spelled out here: a
+/// loopback Host (DNS rebinding), and for the POST an Origin of exactly this
+/// page plus a JSON body (so another site can't submit guesses with a form or
+/// a no-preflight fetch), at most 4 KB of it.
 async fn handle_unlock_conn(
     mut stream: tokio::net::TcpStream,
     path: std::path::PathBuf,
     tx: tokio::sync::mpsc::Sender<String>,
+    gate: Arc<UnlockGate>,
 ) {
     use tokio::io::AsyncReadExt;
     // Read the request head (up to the blank line) plus any body bytes with it.
@@ -979,19 +1018,67 @@ async fn handle_unlock_conn(
     let mut req = head.split("\r\n").next().unwrap_or("").split(' ');
     let method = req.next().unwrap_or("");
     let route = req.next().unwrap_or("/").split('?').next().unwrap_or("/");
+    let header = |name: &str| {
+        head.split("\r\n").skip(1).find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| v.trim().to_string())
+        })
+    };
+    let host = header("host");
+    if let Some(h) = &host {
+        if !host_and_port(h, 80).is_some_and(|(h, _)| is_loopback(&h)) {
+            let _ = write_status(
+                &mut stream,
+                "403 Forbidden",
+                "application/json",
+                br#"{"ok":false}"#,
+            )
+            .await;
+            return;
+        }
+    }
 
     if method == "POST" && route == "/unlock" {
-        let clen = head
-            .split("\r\n")
-            .find_map(|l| {
-                let (k, v) = l.split_once(':')?;
-                if k.trim().eq_ignore_ascii_case("content-length") {
-                    v.trim().parse::<usize>().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
+        let refuse = |status: &'static str, msg: &str| {
+            (status, json!({"ok": false, "error": msg}).to_string())
+        };
+        let origin_ok = match (header("origin"), &host) {
+            (Some(o), Some(h)) => {
+                o == format!("http://{h}")
+                    && host_and_port(h, 80).is_some_and(|(_, p)| p == gate.port)
+            }
+            _ => false,
+        };
+        let is_json = header("content-type").is_some_and(|c| {
+            c.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        });
+        let clen = header("content-length").and_then(|v| v.parse::<usize>().ok());
+        let early = if !origin_ok {
+            Some(refuse(
+                "403 Forbidden",
+                "This page can only be used from the app's own window.",
+            ))
+        } else if !is_json {
+            Some(refuse("415 Unsupported Media Type", "Expected JSON."))
+        } else if clen.unwrap_or(usize::MAX) > UNLOCK_MAX_BODY {
+            Some(refuse(
+                "413 Payload Too Large",
+                "That request is too large.",
+            ))
+        } else {
+            None
+        };
+        if let Some((status, body)) = early {
+            let _ = write_status(&mut stream, status, "application/json", body.as_bytes()).await;
+            return;
+        }
+        let clen = clen.unwrap_or(0);
         let mut body = buf[head_end + 4..].to_vec();
         while body.len() < clen {
             match stream.read(&mut chunk).await {
@@ -999,16 +1086,40 @@ async fn handle_unlock_conn(
                 Ok(n) => body.extend_from_slice(&chunk[..n]),
             }
         }
+        body.truncate(clen);
         let pw = serde_json::from_slice::<Value>(&body)
             .ok()
             .and_then(|v| v["password"].as_str().map(str::to_string))
             .unwrap_or_default();
+
+        // One guess at a time, and none before the back-off has passed.
+        let mut tries = gate.tries.lock().await;
+        let now = tokio::time::Instant::now();
+        if let Some(t) = tries.not_before.filter(|t| *t > now) {
+            let secs = (t - now).as_secs() + 1;
+            let msg = format!("Too many wrong passwords. Try again in {secs} s.");
+            let (status, body) = refuse("429 Too Many Requests", &msg);
+            drop(tries);
+            let _ = write_status(&mut stream, status, "application/json", body.as_bytes()).await;
+            return;
+        }
         let ok = !pw.is_empty() && {
             let (p, pw) = (path.clone(), pw.clone());
             tokio::task::spawn_blocking(move || crate::cipher::open_file(&p, &pw).is_ok())
                 .await
                 .unwrap_or(false)
         };
+        if ok {
+            *tries = Tries::default();
+        } else {
+            tries.failures += 1;
+            if tries.failures >= UNLOCK_FREE_TRIES {
+                let wait = 1u64 << (tries.failures - UNLOCK_FREE_TRIES).min(6);
+                tries.not_before =
+                    Some(now + std::time::Duration::from_secs(wait.min(UNLOCK_MAX_WAIT_SECS)));
+            }
+        }
+        drop(tries);
         let json = if ok {
             r#"{"ok":true}"#
         } else {
@@ -1033,9 +1144,20 @@ async fn write_http(
     content_type: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
+    write_status(stream, "200 OK", content_type, body).await
+}
+
+async fn write_status(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
     let head = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\ncache-control: no-store\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\ncontent-type: {}\r\ncontent-length: {}\r\ncache-control: no-store\r\n\
+         x-content-type-options: nosniff\r\ncontent-security-policy: frame-ancestors 'none'\r\n\
+         connection: close\r\n\r\n",
         content_type,
         body.len()
     );

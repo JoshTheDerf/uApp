@@ -70,6 +70,17 @@ fn body_or_empty(url: &str) -> String {
         Err(_) => String::new(),
     }
 }
+/// GET as the site owner: `Authorization: Bearer`, the way a script or the
+/// CLI would (`?t=` only opens the shell on a public site).
+fn owner_bytes(url: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let resp = ureq::get(url)
+        .set("Authorization", &format!("Bearer {TOKEN}"))
+        .call()
+        .unwrap();
+    std::io::Read::read_to_end(&mut resp.into_reader(), &mut out).unwrap();
+    out
+}
 fn bytes(url: &str) -> Vec<u8> {
     let mut out = Vec::new();
     std::io::Read::read_to_end(&mut ureq::get(url).call().unwrap().into_reader(), &mut out)
@@ -252,7 +263,9 @@ fn never_serves_user_data_and_refuses_privileged_routes_without_the_token() {
     // The shell itself needs the token; with it, the same URL is the editor.
     assert!(!body(&format!("{base}/")).contains("<shell-topbar"));
     assert!(body(&format!("{base}/?t={TOKEN}")).contains("<shell-topbar"));
-    assert!(body(&format!("{base}/download.uapp?t={TOKEN}")).starts_with("SQLite format 3"));
+    assert!(owner_bytes(&format!("{base}/download.uapp")).starts_with(b"SQLite format 3"));
+    // ...but a token in any other URL is refused: it would land in proxy logs.
+    assert_eq!(status(&format!("{base}/download.uapp?t={TOKEN}")), 403);
 }
 
 #[test]
@@ -418,7 +431,7 @@ fn publish_replaces_content_and_keeps_secrets() {
     assert_eq!(tags, 1);
 
     // What the copy never legitimately had is exactly what the server kept.
-    let ai: String = body(&format!("{base}/download.uapp?t={TOKEN}"));
+    let ai = String::from_utf8_lossy(&owner_bytes(&format!("{base}/download.uapp"))).into_owned();
     assert!(
         ai.contains("sk-LEAKED"),
         "server's own api key must survive a publish"
@@ -507,7 +520,7 @@ fn publish_refuses_a_stale_copy_and_junk() {
     assert!(body(&format!("{base}/")).contains(">B<"));
     // With --publish-data the copy's data/ is authoritative: B has none, so
     // A's file is gone from the archive (it lives on in the file history).
-    let full = bytes(&format!("{base}/download.uapp?t={TOKEN}"));
+    let full = owner_bytes(&format!("{base}/download.uapp"));
     let out = tmp("full.uapp");
     std::fs::write(&out, &full).unwrap();
     let c = rusqlite::Connection::open(&out).unwrap();

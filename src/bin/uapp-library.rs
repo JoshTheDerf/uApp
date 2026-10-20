@@ -68,7 +68,10 @@ fn run() -> Result<()> {
     };
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let generated = token.is_none();
-    let token = token.unwrap_or_else(|| (0..32).map(|_| fastrand::alphanumeric()).collect());
+    if let Some(t) = &token {
+        uapp::secrets::check_token(t).context("--token / UAPP_TOKEN")?;
+    }
+    let token = token.unwrap_or_else(uapp::secrets::new_token);
     let lib = Arc::new(uapp::library::Library {
         dir: dir.clone(),
         token: token.clone(),

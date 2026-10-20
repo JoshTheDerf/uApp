@@ -1807,7 +1807,7 @@ fn template_inspect(app: &Arc<App>, p: Value) -> Result<Value> {
             json!(plan["source"]["appId"].as_str() == Some(eng.app_id.as_str()));
         plan
     };
-    let token: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
+    let token = secrets::new_token();
     {
         let mut staged = app.templates.lock().unwrap();
         let now = store::now_ms();
