@@ -2,7 +2,7 @@
  * buttons, and the window controls for the frameless desktop window. */
 
 import { rpc, on, emit } from "./core.js";
-import { $, I, installStyle, togglePanel, openPanel, dlgAlert, downloadUrl } from "./ui.js";
+import { $, I, installStyle, togglePanel, openPanel, dlgAlert, downloadUrl, isComposing } from "./ui.js";
 import { toggleToolbar, shortcutLabel, toolbarDefault } from "./toolbar-visibility.js";
 import { mirrorRefresh } from "./mirror.js";
 import { S } from "./strings.js";
@@ -228,7 +228,7 @@ function startRename() {
     } catch (e) { titleEl.textContent = orig; dlgAlert(e.message); }
   };
   titleEl.onkeydown = (e) => {
-    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    if (e.key === "Enter" && !isComposing(e)) { e.preventDefault(); finish(true); }
     if (e.key === "Escape") { e.preventDefault(); finish(false); }
   };
   titleEl.onblur = () => finish(true);

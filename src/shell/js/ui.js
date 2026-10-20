@@ -8,6 +8,9 @@ import { S } from "./strings.js";
 export const $ = (id) => document.getElementById(id);
 export const I = (name, size) => window.uappIcon(name, size);
 export const div = (cls) => { const d = document.createElement("div"); d.className = cls; return d; };
+/// True while an IME is composing (Japanese, Chinese, Korean input...): the
+/// Enter that confirms a candidate must not also send or save.
+export const isComposing = (e) => e.isComposing || e.keyCode === 229;
 
 // Escape-FIRST discipline: source text is HTML-escaped before any markup is
 // added; only markup this code generates ever reaches innerHTML. The shell
@@ -402,7 +405,9 @@ export function dlgInput(message, value = "", okLabel = "OK") {
     footBtn(d, S.common.cancel).onclick = () => d.close();
     const ok = footBtn(d, okLabel, { primary: true });
     ok.onclick = () => { result = inp.value; d.close(); };
-    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); ok.click(); } });
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !isComposing(e)) { e.preventDefault(); ok.click(); }
+    });
     d.addEventListener("close", () => resolve(result));
     d.showModal();
     inp.focus();

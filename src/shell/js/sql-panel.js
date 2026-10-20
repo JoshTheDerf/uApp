@@ -7,7 +7,7 @@
 import { rpc, on } from "./core.js";
 import {
   $, I, esc, div, fmtSize, installStyle, copyText, showMenu,
-  dlgAlert, dlgConfirm, makeDialog, footBtn, registerPanel, closePanel,
+  dlgAlert, dlgConfirm, makeDialog, footBtn, registerPanel, closePanel, isComposing,
 } from "./ui.js";
 import { toCsv, toTsv, toXlsx, downloadBlob } from "./export.js";
 import { S } from "./strings.js";
@@ -331,7 +331,7 @@ function addFilterRow(col) {
     applyFilters();
   };
   val.addEventListener("input", applyFiltersSoon);
-  val.addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
+  val.addEventListener("keydown", (e) => { if (e.key === "Enter" && !isComposing(e)) applyFilters(); });
   val.focus();
 }
 /// Exactly the non-first rows show an AND/OR connector.
@@ -642,7 +642,7 @@ function editCell(td, editCtx, colIdx, rowVals) {
   };
   input.onblur = () => finish(true);
   input.onkeydown = (e) => {
-    if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+    if (e.key === "Enter" && !isComposing(e)) { e.preventDefault(); input.blur(); }
     if (e.key === "Escape") { e.preventDefault(); done = true; restore(); }
   };
 }
@@ -865,7 +865,7 @@ function wire() {
   $("tab-sql").onclick = () => setSqlTab("sql");
   $("btn-sql-run").onclick = runSql;
   $("sql-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runSql(); }
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !isComposing(e)) { e.preventDefault(); runSql(); }
   });
   $("btn-sql-refresh").onclick = () => loadSqlTables(true);
   $("btn-sql-close").onclick = () => closePanel("sqlpanel");
