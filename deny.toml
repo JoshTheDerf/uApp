@@ -1,0 +1,44 @@
+# cargo-deny: security advisories, banned crates and licenses for the whole
+# dependency tree (CI runs `cargo deny check advisories bans licenses`).
+
+[graph]
+# Check the window build's dependencies (Tauri, WebKitGTK, WebView2) too.
+all-features = true
+
+[advisories]
+# Vulnerabilities and yanked crates fail anywhere in the tree. "Unmaintained"
+# only fails for crates we depend on directly: the transitive ones (as of
+# 2026-10: proc-macro-error under gtk-rs 0.18, the unic-* crates under Tauri's
+# urlpattern) are Tauri's to replace, and there's nothing to swap them for
+# from here.
+unmaintained = "workspace"
+
+[licenses]
+# Permissive licenses, plus MPL-2.0, which is file-level copyleft and only
+# asks that changes to those files stay open (cssparser, dtoa-short and
+# selectors under Tauri; option-ext under dirs). CDLA-Permissive-2.0 is the
+# Mozilla CA list that webpki-roots ships.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+unused-allowed-license = "allow"
+
+[bans]
+# Tauri and its platform crates pull in several versions of windows-sys,
+# bitflags and friends; duplicates are expected and not worth failing on.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
