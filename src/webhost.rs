@@ -8,7 +8,7 @@
 //! visitor's own library, and a bare visit gets the page's default — the
 //! `--open <url>` given here, injected into index.html as
 //! `<meta name="uapp-open">`. Publishing goes back to wherever the archive came
-//! from (a `uapp serve` site's `PUT /site.uapp`, a `uapp-library` PUT), so
+//! from (a `uapp serve` site's `PUT /site.uapp`, a `uapp library` PUT), so
 //! this process holds no state and no secret at all.
 //!
 //! The same binary's full router ([`crate::server`]) serves ONE archive as a

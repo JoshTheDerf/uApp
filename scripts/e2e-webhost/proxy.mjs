@@ -1,8 +1,8 @@
 // A stand-in for the production Caddy: one origin, three backends.
-//   /uapp/demo/*  -> uapp-server serve --chrome dist-web (prefix stripped)
-//   /uapp/apps/*  -> uapp-library                        (prefix stripped)
+//   /uapp/demo/*  -> uapp serve --chrome dist-web (prefix stripped)
+//   /uapp/apps/*  -> uapp library                        (prefix stripped)
 //   /desk.html    -> a fake "desktop" page with two app windows (iframes)
-//   /site/*       -> optional: a uapp-server serve site.uapp (prefix stripped)
+//   /site/*       -> optional: a uapp serve site.uapp (prefix stripped)
 import http from "node:http";
 
 const [demoPort, libPort, listenPort] = process.argv.slice(2).map(Number);

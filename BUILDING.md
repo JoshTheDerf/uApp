@@ -81,7 +81,7 @@ cargo install wasm-bindgen-cli --version 0.2.127 --locked
 
 You also need clang (SQLite is compiled to wasm). The script stops if the wasm-bindgen CLI doesn't match the version in Cargo.lock, and runs `wasm-opt -Oz` when binaryen is installed. The files in the bundle are listed in `web/uapp-bundle.js` (the service worker reads the same list), so a new file goes there.
 
-To check the browser build end to end (headless Chromium, after a debug build of `uapp-server`, `uapp-library` and `make-demo-apps`): `node scripts/e2e-webhost/run.mjs`.
+To check the browser build end to end (headless Chromium, after `cargo build --no-default-features` and `scripts/build-web.sh`): `node scripts/e2e-webhost/run.mjs`.
 
 Limitations: no encryption, no crash snapshots.
 

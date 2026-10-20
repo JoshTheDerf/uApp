@@ -55,7 +55,7 @@ done < <(sed -n 's/^  "\([^"]*\)": "\([^"]*\)",$/\1\t\2/p' "$manifest")
 # can carry API keys and user data). Samples land in examples/ (committed)
 # and are served from dist-web/examples/; the launcher's own SQLite carries
 # the sample catalog.
-cargo run --locked --bin make-demo-apps --release -- dist-web
+cargo run --locked --release --no-default-features --example make-demo-apps -- dist-web
 mkdir -p dist-web/examples
 cp examples/*.uapp dist-web/examples/
 rm -f dist-web/sample.uapp dist-web/sample-expenses.uapp dist-web/samples.json

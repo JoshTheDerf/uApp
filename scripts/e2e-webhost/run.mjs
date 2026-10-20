@@ -12,7 +12,7 @@ import { mkdirSync, rmSync, existsSync, readdirSync, readFileSync, cpSync, write
 import { connect } from "./cdp.mjs";
 
 // Run:  node scripts/e2e-webhost/run.mjs   (after scripts/build-web.sh and a
-// debug build of uapp-server, uapp-library and make-demo-apps; needs
+// debug build of uapp (`cargo build --no-default-features`); needs
 // chromium-browser). Not part of `just test`: it needs the wasm build.
 //
 // E2E_CHROME     browser binary (default chromium-browser)
@@ -25,6 +25,7 @@ const HERE = new URL("./", import.meta.url).pathname;
 const REPO = new URL("../../", import.meta.url).pathname.replace(/\/$/, "");
 const SHOTS = process.env.E2E_SHOTS ? process.env.E2E_SHOTS.replace(/\/?$/, "/") : "";
 const CHROME = process.env.E2E_CHROME || "chromium-browser";
+const UAPP = process.env.UAPP_BIN || `${REPO}/target/debug/uapp`;
 const TMP = process.env.E2E_TMP || `${process.env.HOME}/snap/chromium/common`;
 const APPS = `${TMP}/uapp-e2e-apps-${process.pid}`;
 const TOKEN = "e2e-token-" + Math.random().toString(36).slice(2);
@@ -54,11 +55,11 @@ const profile = `${TMP}/uapp-e2e-${process.pid}`;
 mkdirSync(profile, { recursive: true });
 // The shelf: a launcher whose samples point at the library, plus two samples.
 mkdirSync(APPS, { recursive: true });
-execSync(`UAPP_SAMPLES_BASE=/uapp/apps/ "${REPO}/target/debug/make-demo-apps" "${APPS}"`, { cwd: REPO, stdio: "ignore" });
+execSync(`UAPP_SAMPLES_BASE=/uapp/apps/ cargo run -q --no-default-features --example make-demo-apps -- "${APPS}"`, { cwd: REPO, stdio: "ignore" });
 for (const f of ["kanban-board.uapp", "habit-tracker.uapp"]) execSync(`cp "${REPO}/examples/${f}" "${APPS}/"`);
 try {
-  run(`${REPO}/target/debug/uapp-library`, [APPS, "--port", String(LIB), "--token", TOKEN]);
-  run(`${REPO}/target/debug/uapp-server`, ["serve", "--chrome", `${REPO}/dist-web`, "--port", String(DEMO), "--open", "/uapp/apps/launcher.uapp"]);
+  run(UAPP, ["library", APPS, "--port", String(LIB), "--token", TOKEN]);
+  run(UAPP, ["serve", "--chrome", `${REPO}/dist-web`, "--port", String(DEMO), "--open", "/uapp/apps/launcher.uapp"]);
   run("node", [`${HERE}proxy.mjs`, String(DEMO), String(LIB), String(PROXY)]);
   await waitHttp(`http://127.0.0.1:${LIB}/`);
   await waitHttp(`http://127.0.0.1:${DEMO}/health`);
@@ -260,8 +261,8 @@ try {
   // worker.js from "another deploy": its build no longer matches the page's.
   writeFileSync(`${skewed}/worker.js`, readFileSync(`${skewed}/worker.js`, "utf8").replace(/const BUILD = "[^"]*"/, 'const BUILD = "0000000000ff"'));
   cleanup.push(broken, skewed);
-  run(`${REPO}/target/debug/uapp-server`, ["serve", "--chrome", broken, "--port", String(BAD)]);
-  run(`${REPO}/target/debug/uapp-server`, ["serve", "--chrome", skewed, "--port", String(SKEW)]);
+  run(UAPP, ["serve", "--chrome", broken, "--port", String(BAD)]);
+  run(UAPP, ["serve", "--chrome", skewed, "--port", String(SKEW)]);
   await waitHttp(`http://127.0.0.1:${BAD}/health`);
   await waitHttp(`http://127.0.0.1:${SKEW}/health`);
   const badPage = await connect(CDP, `http://127.0.0.1:${BAD}/`);

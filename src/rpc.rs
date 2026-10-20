@@ -196,7 +196,9 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         }
         // Fabricate one, so the drop path can be tested without a desktop
         // session (the real producer is the native window's event handler).
-        // Off unless UAPP_TEST_DROPS is set: it takes paths from the caller.
+        // Debug builds only, and off unless UAPP_TEST_DROPS is set: it takes
+        // paths from the caller.
+        #[cfg(debug_assertions)]
         "drop.simulate" if std::env::var("UAPP_TEST_DROPS").is_ok() => {
             let phase = match p["phase"].as_str().unwrap_or("drop") {
                 "hover" => crate::native::DropPhase::Hover,
@@ -531,7 +533,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(400));
                     app2.graceful_cleanup();
-                    eprintln!("uapp: closed from the shell");
+                    tracing::info!("closed from the shell");
                     crate::native::dispatch(crate::native::NativeReq::Close);
                     std::process::exit(0);
                 });
@@ -1827,7 +1829,7 @@ fn template_apply(app: &Arc<App>, p: Value) -> Result<Value> {
     {
         let mut eng = app.eng();
         if let Err(e) = eng.snapshot() {
-            eprintln!("uapp: snapshot before the template update failed: {e:#}");
+            tracing::warn!("snapshot before the template update failed: {e:#}");
         }
     }
     let mut payload = json!({

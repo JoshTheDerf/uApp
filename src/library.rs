@@ -1,8 +1,8 @@
-//! `uapp-library`: a directory of `.uapp` files over HTTP — the place a shell
+//! `uapp library`: a directory of `.uapp` files over HTTP — the place a shell
 //! fetches archives from (`?open=<url>`, a launcher's samples, a desktop's
 //! launchers) and publishes them back to.
 //!
-//! Deliberately NOT part of `uapp-server`: that binary serves one archive as a
+//! Deliberately separate from `uapp serve`: that command serves one archive as a
 //! website, or the bare browser build, and knows nothing about collections.
 //! This one knows nothing about apps beyond "is it a .uapp, and is it safe to
 //! hand out".
@@ -97,7 +97,7 @@ impl axum::extract::FromRequestParts<Arc<Library>> for Owner {
 }
 
 fn deny() -> Response {
-    (StatusCode::FORBIDDEN, "uapp-library: missing or bad token").into_response()
+    (StatusCode::FORBIDDEN, "uapp library: missing or bad token").into_response()
 }
 
 fn bad(msg: impl Into<String>) -> Response {
