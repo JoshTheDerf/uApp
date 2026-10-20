@@ -4,15 +4,24 @@
 // library; a bare /uapp/demo/ opens the launcher, whose samples come from the
 // library and open by navigating the frame itself.
 import { spawn, execSync } from "node:child_process";
-import { mkdirSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { connect } from "./cdp.mjs";
 
 // Run:  node scripts/e2e-webhost/run.mjs   (after scripts/build-web.sh and a
 // debug build of uapp-server, uapp-library and make-demo-apps; needs
 // chromium-browser). Not part of `just test`: it needs the wasm build.
+//
+// E2E_CHROME     browser binary (default chromium-browser)
+// E2E_TMP        where the profile and the shelf go. The default is inside
+//                snap chromium's confinement, the only place it honours
+//                --user-data-dir (anywhere else it silently uses its own
+//                default profile, cached service worker and all).
+// E2E_SHOTS=1    screenshots next to this file;  E2E_VERBOSE=1  server logs
 const HERE = new URL("./", import.meta.url).pathname;
 const REPO = new URL("../../", import.meta.url).pathname.replace(/\/$/, "");
-const APPS = `${process.env.HOME}/snap/chromium/common/uapp-e2e-apps-${process.pid}`;
+const CHROME = process.env.E2E_CHROME || "chromium-browser";
+const TMP = process.env.E2E_TMP || `${process.env.HOME}/snap/chromium/common`;
+const APPS = `${TMP}/uapp-e2e-apps-${process.pid}`;
 const TOKEN = "e2e-token-" + Math.random().toString(36).slice(2);
 const port = () => 20000 + Math.floor(Math.random() * 20000);
 const LIB = port(), DEMO = port(), PROXY = port(), CDP = port();
@@ -21,9 +30,21 @@ const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (fail
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const procs = [];
 const run = (cmd, args, extra = {}) => { const p = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], ...extra }); p.stderr.on("data", (d) => process.env.E2E_VERBOSE && process.stderr.write(`[${cmd.split("/").pop()}] ${d}`)); p.stdout.on("data", (d) => process.env.E2E_VERBOSE && process.stdout.write(`[${cmd.split("/").pop()}] ${d}`)); procs.push(p); return p; };
+// Snap chromium's processes are named "chrome" and outlive the pid we
+// spawned, and other runs (other people's browsers) may be using chrome too:
+// kill exactly the processes running our profile, by pid.
+function killProfile(dir) {
+  for (const pid of readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
+    let cmd = "";
+    try { cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8"); } catch { continue; }
+    if (cmd.includes(`--user-data-dir=${dir}\0`) || cmd.endsWith(`--user-data-dir=${dir}`)) {
+      try { process.kill(Number(pid), "SIGKILL"); } catch {}
+    }
+  }
+}
 const waitHttp = async (url, ms = 20000) => { const t0 = Date.now(); for (;;) { try { const r = await fetch(url); if (r.status < 500) return; } catch {} if (Date.now() - t0 > ms) throw new Error("not up: " + url); await sleep(150); } };
 
-const profile = `${process.env.HOME}/snap/chromium/common/uapp-e2e-${process.pid}`;
+const profile = `${TMP}/uapp-e2e-${process.pid}`;
 mkdirSync(profile, { recursive: true });
 // The shelf: a launcher whose samples point at the library, plus two samples.
 mkdirSync(APPS, { recursive: true });
@@ -48,7 +69,7 @@ try {
     ok(l.apps.map((a) => a.name).join() === "habit-tracker.uapp,kanban-board.uapp,launcher.uapp", "library lists the shelf", JSON.stringify(l.apps.map((a) => a.name)));
   }
 
-  run("chromium-browser", ["--headless=new", `--remote-debugging-port=${CDP}`, "--no-sandbox", `--user-data-dir=${profile}`, "--window-size=1400,900", "about:blank"]);
+  run(CHROME, ["--headless=new", `--remote-debugging-port=${CDP}`, "--no-sandbox", `--user-data-dir=${profile}`, "--window-size=1400,900", "about:blank"]);
   await waitHttp(`http://127.0.0.1:${CDP}/json/version`, 30000);
 
   // ---- two apps in two frames of one page -----------------------------------
@@ -121,8 +142,8 @@ try {
   ok(after !== before && after === pub.etag, "the shelf's ETag moved to the published copy");
   const bad = await desk.evalJs(`(async () => { try { return await ${F("w1")}.__uappSitePublish("wrong-token"); } catch (e) { return { error: String(e.message || e), status: e.status }; } })()`);
   ok(bad && bad.status === 403, "a wrong token is refused", JSON.stringify(bad));
-  // The pill's own Publish button (token remembered for the session).
-  await desk.evalJs(`(async () => { const w = ${F("w1")}; w.sessionStorage.setItem("uapp.publish.token", "${TOKEN}"); await w.__uappPublish(); })()`);
+  // The pill's own Publish button: it asks for the token (kept in memory only).
+  await desk.evalJs(`(async () => { const w = ${F("w1")}; w.prompt = () => "${TOKEN}"; await w.__uappPublish(); })()`);
   const pillText = await desk.evalJs(`(() => { const p = ${F("w1")}.document.getElementById("site-sync-pill"); return p ? p.textContent : null; })()`);
   console.log("  sync pill:", JSON.stringify(pillText));
   ok(pillText !== null && /Published/.test(pillText), "the sync pill reports the publish", pillText);
@@ -154,7 +175,7 @@ try {
   console.log("  ✗ FAIL:", e.stack || e);
 } finally {
   for (const p of procs) { try { p.kill("SIGKILL"); } catch {} }
-  try { execSync("pkill -9 -x chrome 2>/dev/null || true"); } catch {}
+  killProfile(profile);
   try { rmSync(profile, { recursive: true, force: true }); } catch {}
   try { rmSync(APPS, { recursive: true, force: true }); } catch {}
 }
