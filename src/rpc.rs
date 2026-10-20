@@ -1336,10 +1336,12 @@ pub fn truncate_utf8(s: &mut String, max: usize) {
     s.truncate(end);
 }
 
-/// Best-effort SSRF guard for model/app-triggered fetches: refuse URLs whose
+/// Up-front SSRF check for model/app-triggered fetches: refuse URLs whose
 /// host resolves to loopback, private, link-local (incl. cloud metadata) or
 /// unspecified addresses. UAPP_ALLOW_LOCAL_FETCH=1 opts out (tests, intranet
-/// setups).
+/// setups). This is what decides whether the AI's fetch asks first (see
+/// `tools::forced_gate`); the fetch itself goes through `net::get_public`,
+/// which checks again at connect time and on every redirect.
 pub(crate) fn check_public_url(url: &str) -> Result<()> {
     // Browser build: there is no OS network access at all — the browser's own
     // same-origin/CORS model gates every request, and DNS is unavailable to
@@ -1351,47 +1353,18 @@ pub(crate) fn check_public_url(url: &str) -> Result<()> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if std::env::var("UAPP_ALLOW_LOCAL_FETCH")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+        if allow_local_fetch() {
             return Ok(());
         }
-        let host = url
-            .split("//")
-            .nth(1)
-            .and_then(|r| r.split(['/', '?', '#']).next())
-            .map(|a| a.rsplit('@').next().unwrap_or(a))
-            .map(|a| {
-                if let Some(h) = a.strip_prefix('[') {
-                    h.split(']').next().unwrap_or(h).to_string()
-                } else {
-                    a.split(':').next().unwrap_or(a).to_string()
-                }
-            })
+        // Parsed the way the request will be (WHATWG rules, as ureq does):
+        // a hand split read `http://127.0.0.1\@example.com/` as example.com.
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .map(|h| h.trim_start_matches('[').trim_end_matches(']').to_string())
             .unwrap_or_default();
         if host.is_empty() {
             bail!("could not parse the URL host");
-        }
-        fn is_local(ip: std::net::IpAddr) -> bool {
-            match ip {
-                std::net::IpAddr::V4(v4) => {
-                    let o = v4.octets();
-                    v4.is_loopback()
-                        || v4.is_private()
-                        || v4.is_link_local()
-                        || v4.is_unspecified()
-                        || v4.is_broadcast()
-                        || (o[0] == 100 && (o[1] & 0xc0) == 64) // CGNAT 100.64/10
-                }
-                std::net::IpAddr::V6(v6) => {
-                    v6.is_loopback()
-                    || v6.is_unspecified()
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00 // ULA
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local
-                    || v6.to_ipv4_mapped().map_or(false, |v4| is_local(std::net::IpAddr::V4(v4)))
-                }
-            }
         }
         let addrs: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse() {
             vec![ip]
@@ -1402,11 +1375,35 @@ pub(crate) fn check_public_url(url: &str) -> Result<()> {
                 .map(|it| it.map(|a| a.ip()).collect())
                 .unwrap_or_default() // unresolvable: let the fetch report the error
         };
-        if addrs.iter().any(|ip| is_local(*ip)) {
+        if addrs.iter().any(|ip| crate::net::is_local_ip(*ip)) {
             bail!("refusing to fetch {host}: it resolves to a local/private address");
         }
         Ok(())
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn allow_local_fetch() -> bool {
+    std::env::var("UAPP_ALLOW_LOCAL_FETCH").is_ok_and(|v| v == "1")
+}
+
+/// The GET behind `web.fetch` / `files.fetch`: public addresses only, checked
+/// up front and again at connect time and on every redirect, unless the user
+/// approved this very call (the AI's local-network prompt) or
+/// UAPP_ALLOW_LOCAL_FETCH=1.
+fn fetch_get(
+    url: &str,
+    approved: bool,
+    connect_secs: u64,
+    read_secs: u64,
+) -> Result<crate::net::Resp> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if !approved && !allow_local_fetch() {
+        check_public_url(url)?;
+        return crate::net::get_public(url, connect_secs, read_secs);
+    }
+    let _ = approved;
+    crate::net::request("GET", url, &[], None, connect_secs, read_secs)
 }
 
 fn url_decode(s: &str) -> String {
@@ -1500,10 +1497,7 @@ fn web_fetch(p: Value) -> Result<Value> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         bail!("fetch_url only supports http(s) URLs");
     }
-    if p["_user_approved"] != json!(true) {
-        check_public_url(url)?;
-    }
-    let resp = crate::net::request("GET", url, &[], None, 15, 45)
+    let resp = fetch_get(url, p["_user_approved"] == json!(true), 15, 45)
         .map_err(|e| anyhow!("fetch failed: {e}"))?;
     if resp.status >= 400 {
         bail!("HTTP {} from {url}", resp.status);
@@ -1623,8 +1617,9 @@ fn files_fetch(app: &Arc<App>, p: Value) -> Result<Value> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         bail!("files.fetch only supports http(s) URLs");
     }
-    if p["_user_approved"] != json!(true) {
-        check_public_url(&url)?;
+    let approved = p["_user_approved"] == json!(true);
+    if !approved {
+        check_public_url(&url)?; // before naming/downloading anything
     }
     let name = match p["name"].as_str() {
         Some(n) => n.to_string(),
@@ -1642,8 +1637,7 @@ fn files_fetch(app: &Arc<App>, p: Value) -> Result<Value> {
     if name.contains("..") {
         bail!("bad target name");
     }
-    let resp = crate::net::request("GET", &url, &[], None, 20, 120)
-        .map_err(|e| anyhow!("download failed: {e}"))?;
+    let resp = fetch_get(&url, approved, 20, 120).map_err(|e| anyhow!("download failed: {e}"))?;
     if resp.status >= 400 {
         bail!("download failed: HTTP {} from {url}", resp.status);
     }
@@ -2190,5 +2184,17 @@ mod tests {
         ] {
             assert!(openable_url(bad).is_err(), "{bad:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    #[test]
+    fn the_up_front_check_parses_hosts_like_the_request_does() {
+        // ureq (WHATWG URL rules) treats `\` as `/`, so this is 127.0.0.1.
+        assert!(super::check_public_url("http://127.0.0.1:1\\@example.com/").is_err());
+        assert!(super::check_public_url("http://[::1]:8080/").is_err());
+        assert!(super::check_public_url("http://169.254.169.254/latest").is_err());
+        assert!(super::check_public_url("http://2130706433/").is_err());
     }
 }

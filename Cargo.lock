@@ -4221,6 +4221,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tokio",
  "ureq",
+ "url",
  "wasm-bindgen",
  "webkit2gtk",
  "webkit2gtk-sys",
