@@ -37,6 +37,15 @@ pub fn new_token() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// The browser build serves nothing and so has no session token; this only
+/// names in-page handles there (a staged template), which guard nothing.
+#[cfg(target_arch = "wasm32")]
+pub fn new_token() -> String {
+    (0..32)
+        .map(|_| format!("{:02x}", fastrand::u8(..)))
+        .collect()
+}
+
 /// Compare a presented token with the real one in time that doesn't depend on
 /// where they first differ. (The length can leak; it isn't secret.)
 pub fn token_eq(given: &str, want: &str) -> bool {
