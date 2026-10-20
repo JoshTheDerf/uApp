@@ -31,7 +31,8 @@ Then open with `uapp open <file>.uapp` to test.
 - `await uapp.exec(sql, params)` — write
 - `uapp.action(name, {description, params}, handler)` — register business logic
 - `uapp.onChange(cb)` — re-render on changes
-- `await uapp.ready` — `{user, device, …}`
+- `await uapp.ready` — `{user, device, …}`; `uapp.user` and `uapp.device`
+  are null until it resolves
 
 ### The toolbar
 

@@ -245,7 +245,7 @@ await A.rpc("config.set", { key: "mcp", value: [{ name: "crm", url: `${MOCK}/mcp
   const toolRows = done.rows.filter((r) => r[4] === "tool");
   ok(toolRows.some((r) => r[5].includes("ECHO:hello from model")), "remote MCP tool call executed and result returned");
   const sys = oaCalls[0].messages.find((m) => m.role === "system");
-  ok(sys && sys.content.includes("DETERMINISM"), "system prompt sent");
+  ok(sys && sys.content.includes("uapp.action") && !sys.content.includes("REPLAYED"), "system prompt sent");
   ok(oaCalls.length === 4, `loop iterations: ${oaCalls.length} provider calls`);
   const toolMsg = oaCalls[1].messages.find((m) => m.role === "tool");
   ok(!!toolMsg && toolMsg.tool_call_id === "c1", "tool results threaded back in OpenAI format");

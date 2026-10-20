@@ -18,7 +18,7 @@ You can switch modes in the chat header. Each chat keeps its own mode, so switch
 |------|-------|-------------|
 | `get_schema` | No | Get all table definitions and row counts in the app database. |
 | `sql_query` | No | Run read-only SQL (SELECT/WITH/PRAGMA). Complex queries, joins and aggregates are encouraged. |
-| `sql_exec` | Yes | Run ONE deterministic write statement (INSERT/UPDATE/DELETE/DDL) with optional params. |
+| `sql_exec` | Yes | Run ONE write statement (INSERT/UPDATE/DELETE/DDL) with optional params. |
 | `sql_batch` | Yes | Run multiple write statements separated by semicolons as one atomic write. |
 | `import_csv` | Yes | Parse a CSV/TSV file from the archive into a database table as one efficient bulk write. Auto-detects delimiter and column types. |
 
@@ -79,7 +79,7 @@ hang off it). `sql` is accepted for `database`, `ai` for `chat`.
 
 | Tool | Gated | Description |
 |------|-------|-------------|
-| `add_mcp_server` | Yes | Connect a remote MCP server. Its tools appear immediately as `mcp__<name>__*`. |
+| `add_mcp_server` | Yes | Connect a remote MCP server. Its tools appear as `mcp__<name>__*` from the assistant's next step. |
 | `remove_mcp_server` | Yes | Disconnect a previously added MCP server. |
 
 MCP tools are **always gated** (unknown side effects) and are prefixed with `mcp__`. Providers only accept tool names made of letters, digits, `_` and `-`, up to 64 characters, so a longer or odd MCP tool name is shortened for the model (with a short hash to keep it unique). Apps still call it by its full `mcp__<server>__<tool>` name.

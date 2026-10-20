@@ -61,7 +61,7 @@ pub fn registry() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "sql_exec",
-            description: "Run ONE deterministic write statement (INSERT/UPDATE/DELETE/DDL) with optional params. Replicated to all users.",
+            description: "Run ONE write statement (INSERT/UPDATE/DELETE/DDL) with optional params.",
             gated: true,
             schema: || obj(json!({"sql": {"type": "string"}, "params": {"type": "array"}}), &["sql"]),
             run: |app, input| rpc::dispatch(app, "sql.exec", input.clone()),
@@ -302,7 +302,7 @@ pub fn registry() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "add_mcp_server",
-            description: "Connect a remote MCP server for this app (verified before saving; its tools appear immediately as mcp__<name>__* and the config replicates to the whole team).",
+            description: "Connect a remote MCP server for this app (verified before saving; its tools appear as mcp__<name>__* from your next step on. The server is saved in the app; its token stays on this computer).",
             gated: true,
             schema: || obj(json!({
                 "name": {"type": "string", "description": "short identifier, e.g. 'crm'"},
