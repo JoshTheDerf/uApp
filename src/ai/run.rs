@@ -9,7 +9,7 @@ use crate::rpc;
 use crate::store;
 
 use super::approval::approval_gate;
-use super::compact::auto_compact;
+use super::compact::Compactor;
 use super::history::{build_messages, Budget};
 use super::prompt::{app_snapshot, system_prompt};
 use super::providers::{call_provider_retrying, is_stopped, Request, Usage};
@@ -91,6 +91,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
     // one.
     let cap = compact_bytes(&cfg);
     let mut frozen = Frozen::build(app, ctx, plan_mode(app));
+    let mut compactor = Compactor::default();
     let mut steps = 0usize;
     let mut report = String::new();
 
@@ -101,7 +102,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         // Every iteration, not just at run start: a long tool-using run grows
         // the history by tens of KB per step and would otherwise sail past the
         // model's context window mid-run.
-        auto_compact(app, ctx, cap);
+        compactor.maybe_compact(app, ctx, &cfg, cap);
         frozen.refresh(app, ctx, plan_mode(app));
         deliver_snapshot(app, &ctx.session)?;
         // Captured BEFORE building: any user row landing after this id was not

@@ -84,6 +84,21 @@ const mock = createServer(async (req, res) => {
     res.write("data: [DONE]\n\n");
     return res.end();
   }
+  if (scen === "long" || scen === "longfail") {
+    // One request, many tool rounds of ~6KB each; summarizer calls answered
+    // (or refused, for longfail) separately.
+    const sys = (body.messages || []).find((m) => m.role === "system");
+    const isSum = sys && sys.content.startsWith("You are a summarizer");
+    log(isSum ? `${scen}-sum` : scen, req, body);
+    res.writeHead(isSum && scen === "longfail" ? 400 : 200, { "content-type": "application/json" });
+    if (isSum) return res.end(JSON.stringify(scen === "longfail" ? { error: { message: "no summaries today" } }
+      : { choices: [{ message: { content: `SUMMARY ${calls[`${scen}-sum`].length}` } }] }));
+    const steps = calls[scen].length;
+    const msg = steps < 14
+      ? { content: null, tool_calls: [{ id: `r${steps}`, type: "function", function: { name: "read_file", arguments: JSON.stringify({ name: "data/big.txt" }) } }] }
+      : { content: "long run done" };
+    return res.end(JSON.stringify({ choices: [{ message: msg, finish_reason: "stop" }] }));
+  }
   if (scen === "ri") {
     const n = log(scen, req, body);
     res.writeHead(200, { "content-type": "application/json" });
@@ -278,6 +293,30 @@ console.log("\n[10] images: oversize refused up front, only recent turns resend 
   const images = last.filter((b) => b.type === "image");
   ok(images.length === 3, `three newest turns resend images (${images.length})`);
   ok(last.some((b) => b.type === "text" && /image data\/p0\.png was attached here/.test(b.text)), "the oldest became a note");
+}
+
+console.log("\n[11] one long run compacts more than once and keeps the request");
+{
+  await A.rpc("files.write", { name: "data/big.txt", text: "lorem ipsum ".repeat(500) });
+  const cfg = (scen) => ({ provider: "openai-compatible", model: "m", base_url: `${MOCK}/${scen}`, stream: false, max_tokens: 1000, context_tokens: 9000 });
+  const s = await send(cfg("long"), "please read the big file over and over");
+  await idle(s);
+  const rows = await rowsOf(s);
+  ok(rows.some((r) => r[4] === "assistant" && r[5].includes("long run done")), "run finished");
+  const sums = (calls["long-sum"] || []).length;
+  ok(sums >= 2, `compacted more than once (${sums})`);
+  const summary = rows.find((r) => r[4] === "summary");
+  ok(summary && summary[5].includes("please read the big file over and over"), "summary carries the request word for word");
+  const cap = 8000 * 3;
+  const sizes = calls.long.map((c) => JSON.stringify(c.body.messages).length);
+  ok(Math.max(...sizes) < cap * 1.3, `requests stayed near the budget (max ${Math.max(...sizes)})`);
+  ok(calls.long.every((c) => c.body.messages[1].role === "user"), "every request starts with a user turn");
+
+  const s2 = await send(cfg("longfail"), "please read the big file over and over");
+  await idle(s2);
+  const fails = (calls["longfail-sum"] || []).length;
+  ok((await rowsOf(s2)).some((r) => r[5].includes("long run done")), "run still finished without a summarizer");
+  ok(fails >= 1 && fails <= 4, `failed summarizer not retried every step (${fails} tries over ${calls.longfail.length} steps)`);
 }
 
 await A.stop();
