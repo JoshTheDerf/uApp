@@ -598,9 +598,18 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             Ok(app.console_read(only_errors, only_latest, limit))
         }
         // Machine-local prefs (NOT synced) — e.g. browser vs. native window.
-        "prefs.get" => Ok(crate::prefs::load()),
+        // Only the prefs the settings panel offers travel over the wire: the
+        // rest (launcher install records, which name files `app.removeShortcut`
+        // deletes) is the core's own bookkeeping, and any page on this socket
+        // could otherwise rewrite it.
+        "prefs.get" => Ok(json!({"shell": crate::prefs::shell()})),
         "prefs.set" => {
-            crate::prefs::set(need_str(&p, "key")?, p["value"].clone())?;
+            let key = need_str(&p, "key")?;
+            match (key, p["value"].as_str()) {
+                ("shell", Some(v @ ("native" | "browser"))) => crate::prefs::set(key, json!(v))?,
+                ("shell", _) => bail!("shell must be \"native\" or \"browser\""),
+                _ => bail!("'{key}' is not a preference that can be set here"),
+            }
             Ok(json!({"ok": true}))
         }
         "web.search" => web_search(p),
