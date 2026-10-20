@@ -53,16 +53,28 @@ window.__uappBase = BASE.pathname + (window.__uappChrome ? "" : "i/" + INST + "/
 //             from the first edit on, publishable back to the URL.
 //   app       ?app=<id>: a document of the OPFS app library.
 //   launcher  nothing named: the launcher.uapp next to boot.js, ephemeral.
+// `via` says who chose a site archive: the hosted site's chrome, the page's
+// default (the operator), or a ?open= parameter (whoever wrote the link).
 const OPEN = (() => {
-  if (window.__uappSiteArchive) return { kind: "site", url: new URL(window.__uappSiteArchive, location.href).href };
+  const abs = (u) => { try { return new URL(u, location.href).href; } catch { return ""; } };
+  const meta = document.querySelector('meta[name="uapp-open"]');
+  const def = abs((meta && meta.getAttribute("content")) || "");
+  if (window.__uappSiteArchive) return { kind: "site", url: abs(window.__uappSiteArchive), via: "chrome" };
   const q = new URL(location.href).searchParams;
   if (q.get("app")) return { kind: "app", id: q.get("app") };
-  const meta = document.querySelector('meta[name="uapp-open"]');
-  const o = q.get("open") || (meta && meta.getAttribute("content")) || "";
-  if (o) { try { return { kind: "site", url: new URL(o, location.href).href }; } catch {} }
+  const o = q.get("open") ? abs(q.get("open")) : "";
+  if (o) return { kind: "site", url: o, via: o === def ? "default" : "param" };
+  if (def) return { kind: "site", url: def, via: "default" };
   return { kind: "launcher" };
 })();
 if (OPEN.kind === "site") window.__uappSiteArchive = OPEN.url;
+// The one document that may manage this browser's app library (host.*: list,
+// open, export and delete the OTHER apps stored here). It is whatever the
+// operator put on this page: the bundled launcher on a bare visit, the
+// server's --open default, or a hosted site's own archive. Never a document
+// a link can name (?open=, ?app=), and never decided by anything inside the
+// archive itself, since any app can claim to be a launcher.
+const IS_LAUNCHER = OPEN.kind === "launcher" || (OPEN.kind === "site" && OPEN.via !== "param");
 
 // ---- boot splash ------------------------------------------------------------
 // index.html paints it on every load; we keep it up until the app frame is
@@ -618,8 +630,9 @@ window.addEventListener("message", (ev) => {
 });
 
 // ---- demo host API (used by the launcher .uapp) --------------------------------
-// Lets an app manage the OPFS app library and switch documents. It's a demo:
-// every app gets it (there is no cross-user data to protect here).
+// Lets the launcher manage the OPFS app library and switch documents. Only
+// the launcher (IS_LAUNCHER): any other app could otherwise read, export or
+// delete every app stored in this browser.
 
 // Where the browser build's own page lives on this origin: a hosted site's
 // chrome runs at the site root, but its apps open in the DEMO page (the
@@ -631,6 +644,7 @@ function demoBase() {
 }
 
 async function handleHostRpc(m) {
+  if (!IS_LAUNCHER) throw new Error(m.method + " is only available to the launcher app");
   const p = m.params || {};
   switch (m.method) {
     case "host.apps":
@@ -1076,6 +1090,58 @@ function openApp(bytes, name) {
   });
 }
 
+// A ?open= link to an archive on another site: ask before running it. It
+// runs on THIS origin, in the same storage as every other app here (see
+// docs/design/web-build-isolation.md), so the visitor should know whose code
+// it is. Asked once per archive URL; the answer is kept with the copy.
+async function allowForeignOpen(url) {
+  if (OPEN.via !== "param") return true;
+  const u = new URL(url, location.href);
+  if (u.origin === location.origin) return true;
+  const key = "uapp.site.allowed:" + siteIdFor(url);
+  if (kvGet(key)) return true;
+  const yes = await splashAsk(
+    `Open an app from ${u.host}?`,
+    "It will run in this browser with the same access as the apps you keep " +
+    "here, including their stored data. Only open apps from sites you trust.",
+    "Open app", "Cancel");
+  if (yes) kvSet(key, "1");
+  return yes;
+}
+
+// A question on the boot splash (or a plain confirm where there is none).
+function splashAsk(title, text, okLabel, cancelLabel) {
+  if (!splashEl) return Promise.resolve(window.confirm(title + "\n\n" + text));
+  return new Promise((resolve) => {
+    splashShow(title, "");
+    const track = document.getElementById("boot-track");
+    if (track) track.style.display = "none";
+    const box = document.createElement("div");
+    box.id = "boot-ask";
+    box.style.cssText = "margin-top:10px;font-size:13px;color:#4a5262";
+    const p = document.createElement("p");
+    p.style.margin = "0 0 14px";
+    p.textContent = text;
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;gap:8px;justify-content:center";
+    const btn = (label, primary, val) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.style.cssText = "padding:8px 16px;border-radius:8px;font:inherit;font-weight:600;cursor:pointer;" +
+        (primary ? "border:none;background:#2f6df6;color:#fff" : "border:1px solid #c9ced8;background:#fff;color:#1d2129");
+      b.onclick = () => {
+        box.remove();
+        if (track) track.style.display = "";
+        resolve(val);
+      };
+      return b;
+    };
+    row.append(btn(cancelLabel, false, false), btn(okLabel, true, true));
+    box.append(p, row);
+    splashDetail.after(box);
+  });
+}
+
 function fatal(msg) {
   // Hosted-site mode (site-chrome.js): the body is the reader's page, and the
   // right failure mode is to leave it alone. Report, don't repaint.
@@ -1282,6 +1348,7 @@ if (tabChannel) {
           siteState.etag = kvGet(siteKey("etag")) || "";
           info = await openApp(saved, siteName);
         } else {
+          if (!(await allowForeignOpen(site))) { switchTo(null); return; }
           splashShow("Opening " + siteName + "…", "Downloading…");
           const r = await fetch(new URL(site, location.href), { cache: "no-store" });
           if (!r.ok) throw new Error(`could not fetch ${siteName} (HTTP ${r.status})`);

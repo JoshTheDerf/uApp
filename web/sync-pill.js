@@ -25,19 +25,20 @@ window.addEventListener("uapp-changes", () => { localEditAt = Date.now(); render
 // ---- publish ------------------------------------------------------------------
 // The local copy becomes the server's site: boot.js PUTs the export to
 // /site.uapp with the site's publish token (server.rs). The token is asked
-// for once per browser session and kept only in sessionStorage. A 409 means
-// the server moved on since this copy was downloaded; the visitor chooses.
-const TOKEN_KEY = "uapp.publish.token";
+// for once per page and kept only in this module. sessionStorage (where it
+// used to live) is readable by every same-origin page in the tab, including
+// any app's frame, without going through us. A 409 means the server moved
+// on since this copy was downloaded; the visitor chooses.
+let token = "";
+try { sessionStorage.removeItem("uapp.publish.token"); } catch {} // the old copy
 function publishToken(forget) {
-  try {
-    if (forget) { sessionStorage.removeItem(TOKEN_KEY); return null; }
-    let t = sessionStorage.getItem(TOKEN_KEY);
-    if (!t) {
-      t = window.prompt("Publish token for this archive (the server's --token / UAPP_TOKEN):");
-      if (t && t.trim()) sessionStorage.setItem(TOKEN_KEY, t.trim()); else return null;
-    }
-    return t.trim();
-  } catch { return window.prompt("Publish token for this archive:"); }
+  if (forget) { token = ""; return null; }
+  if (!token) {
+    const t = window.prompt("Publish token for this archive (the server's --token / UAPP_TOKEN):");
+    if (!t || !t.trim()) return null;
+    token = t.trim();
+  }
+  return token;
 }
 async function publish() {
   if (publishing || !window.__uappSitePublish) return;
