@@ -16,8 +16,8 @@
 #   docker run -v /path/to/dist-web:/opt/uapp-web:ro -e UAPP_SITE= \
 #              -e UAPP_SERVE_FLAGS="--open /uapp/apps/launcher.uapp" uapp-serve
 #
-# Library (src/library.rs) — override the command (and UAPP_PORT, which the
-# health check probes):
+# Library (src/library.rs): override the command, and set UAPP_PORT to its
+# port so the health check probes the right one:
 #   docker run -v /path/to/apps:/apps -e UAPP_TOKEN=... -e UAPP_PORT=8090 \
 #              uapp-serve sh -c 'exec uapp-library /apps --bind 0.0.0.0 --port "$UAPP_PORT"'
 #
