@@ -213,6 +213,15 @@ pub(crate) fn load_config(app: &Arc<App>) -> Result<AiConfig> {
 
 /// Plan mode = read-only toolset: gated builtins can write, and agents can
 /// write inside their own loop, so both are withheld.
-pub(crate) fn plan_mode(app: &Arc<App>) -> bool {
-    crate::app::lock(&app.ai_mode).as_str() == "plan"
+pub(crate) fn plan_mode(app: &Arc<App>, ctx: &RunCtx) -> bool {
+    run_mode(app, ctx) == "plan"
+}
+
+/// The approval mode of the chat a run belongs to (its root session, so a
+/// sub-agent follows the chat that started it).
+pub(crate) fn run_mode(app: &Arc<App>, ctx: &RunCtx) -> String {
+    crate::app::lock(&app.ai_modes)
+        .get(&ctx.root)
+        .cloned()
+        .unwrap_or_else(|| "auto".into())
 }

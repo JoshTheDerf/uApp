@@ -990,7 +990,7 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
         if !matches!(mode, "auto" | "manual" | "plan") {
             bail!("mode must be auto, manual or plan (got '{mode}')");
         }
-        *crate::app::lock(&app.ai_mode) = mode.to_string();
+        crate::app::lock(&app.ai_modes).insert(session.clone(), mode.to_string());
     }
     let attachments = p["attachments"].as_array().cloned().unwrap_or_default();
     let mut stored = Vec::new();

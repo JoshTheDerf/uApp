@@ -217,8 +217,11 @@ pub struct App {
     /// True for a scratch app opened with no file (lives only in a temp file).
     /// The shell shows a "not saved" banner + a Download button.
     pub unsaved: AtomicBool,
-    /// "auto" | "manual" — set per chat.send from the shell's toggle.
-    pub ai_mode: Mutex<String>,
+    /// Approval mode per chat session: "auto" | "manual" | "plan", set by
+    /// chat.send from the shell's toggle. A run (and its sub-agents) reads
+    /// its own session's entry, so a send in one chat can't change another
+    /// chat's run. Missing = "auto".
+    pub ai_modes: Mutex<HashMap<String, String>>,
     pub pending: Mutex<HashMap<String, PendingApproval>>,
     /// Open ask_user prompts, keyed by question id.
     pub questions: Mutex<HashMap<String, PendingQuestion>>,
@@ -300,7 +303,7 @@ impl App {
             name,
             ai_runs: Mutex::new(HashMap::new()),
             unsaved: AtomicBool::new(unsaved),
-            ai_mode: Mutex::new("auto".into()),
+            ai_modes: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
             always_allow: Mutex::new(std::collections::HashSet::new()),

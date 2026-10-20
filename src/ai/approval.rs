@@ -84,8 +84,12 @@ pub(crate) fn approval_gate(
 ) -> bool {
     match forced {
         None => {
-            let manual = crate::app::lock(&app.ai_mode).as_str() == "manual";
-            if !manual || !crate::tools::is_gated(app, name) {
+            let manual = super::run_mode(app, ctx) == "manual";
+            // In manual mode the web tools ask too: a page the model read can
+            // carry instructions, and fetch_url/web_search are the way data
+            // could leave the app. (They stay ungated for apps and in auto.)
+            let gated = crate::tools::is_gated(app, name) || crate::tools::is_web_tool(name);
+            if !manual || !gated {
                 return true;
             }
             if crate::app::lock(&app.always_allow).contains(name) {

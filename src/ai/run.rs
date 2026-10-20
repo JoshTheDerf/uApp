@@ -90,7 +90,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
     // context window is far smaller than a cloud model's, so it gets a tighter
     // one.
     let cap = compact_bytes(&cfg);
-    let mut frozen = Frozen::build(app, ctx, plan_mode(app));
+    let mut frozen = Frozen::build(app, ctx, plan_mode(app, ctx));
     let mut compactor = Compactor::default();
     let mut steps = 0usize;
     let mut report = String::new();
@@ -103,7 +103,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         // the history by tens of KB per step and would otherwise sail past the
         // model's context window mid-run.
         compactor.maybe_compact(app, ctx, &cfg, cap);
-        frozen.refresh(app, ctx, plan_mode(app));
+        frozen.refresh(app, ctx, plan_mode(app, ctx));
         deliver_snapshot(app, &ctx.session)?;
         // Captured BEFORE building: any user row landing after this id was not
         // part of this turn's context and still needs an answer.
@@ -237,7 +237,7 @@ fn run_call(app: &Arc<App>, ctx: &RunCtx, toolset: &Toolset, tu: &Value) -> Valu
     }
     // Plan mode backstop: write tools are absent from the offered toolset,
     // but a hallucinated call must not execute either.
-    if plan_mode(app)
+    if plan_mode(app, ctx)
         && (matches!(target, Target::Mcp { .. })
             || crate::tools::is_gated(app, &name)
             || crate::tools::is_agent_tool(&name))

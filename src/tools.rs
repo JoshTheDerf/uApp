@@ -395,6 +395,13 @@ pub fn forced_gate(name: &str, input: &Value) -> Option<(String, String)> {
     }
 }
 
+/// Tools that reach the web. Not gated as such (an app may call them, and
+/// plan mode keeps them for research), but in manual mode the assistant
+/// asks before using them.
+pub fn is_web_tool(name: &str) -> bool {
+    name == "fetch_url" || name == "web_search"
+}
+
 /// Is this tool gated (needs approval in manual mode)? MCP tools always are;
 /// app actions are gated unless the app declared them readonly.
 pub fn is_gated(app: &Arc<App>, name: &str) -> bool {
