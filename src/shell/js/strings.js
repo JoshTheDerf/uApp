@@ -50,6 +50,7 @@ export function setLocale(code) {
 
 export const S = LANGS[getLocale()] || en;
 
-// The page's language, for screen readers, hyphenation and fonts. Not in a
-// hosted site's page, whose own <html lang> describes the site.
-if (!window.__uappSiteArchive) document.documentElement.lang = getLocale();
+// The shell's language, for screen readers, hyphenation and fonts. On a
+// hosted site the shell lives in its own root inside the site's page, whose
+// <html lang> describes the site, so it goes on that root instead.
+(document.getElementById("uapp-shell-root") || document.documentElement).lang = getLocale();
