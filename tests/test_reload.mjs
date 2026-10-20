@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { rmSync, mkdirSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-reload";
 let passed = 0, failed = 0;
 const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (failed++, console.log(`  ✗ FAIL: ${n} ${x}`)); };
@@ -19,7 +19,7 @@ const proc = spawn(BIN, ["open", `${DIR}/r.uapp`, "--headless"], {
 });
 const line = await new Promise((res) => { let b = ""; proc.stdout.on("data", (d) => { b += d; const i = b.indexOf("\n"); if (i >= 0) res(b.slice(0, i)); }); });
 const info = JSON.parse(line);
-if (info.reused) { console.error("FAIL: a uapp-server from an earlier run still has the test file open (old code!) — pkill -x uapp-server"); process.exit(2); }
+if (info.reused) { console.error("FAIL: a uapp from an earlier run still has the test file open (old code!); stop that uapp process first"); process.exit(2); }
 if (process.env.UAPP_DEBUG) proc.stderr.pipe(process.stderr);
 const TOKEN = new URL(info.url).searchParams.get("t");
 

@@ -4,35 +4,40 @@
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# where `just install` puts the binaries
+# where `just install` puts the binary
 install_dir := env("UAPP_INSTALL_DIR", env("HOME") + "/.local/bin")
 
 default:
     @just --list
 
-# release build of both binaries (native window `uapp` + CLI/server `uapp-server`)
+# release build of `uapp` with the native window
 build:
     cargo build --release
 
-# CLI/server only, no Tauri/webview deps (what CI, Docker and the tests use)
+# release build of `uapp` without the window (what servers and Docker use)
 build-server:
-    cargo build --release --bin uapp-server --no-default-features
+    cargo build --release --no-default-features
 
-# debug build of the server + the whole test suite (Rust + node end-to-end)
-test: 
-    cargo build --bin uapp-server --no-default-features
-    cargo test
-    for t in tests/test_*.mjs; do UAPP_BIN="$PWD/target/debug/uapp-server" node "$t" || exit 1; done
+# Rust tests, then the node end-to-end suites (against a build without the window)
+test:
+    cargo test --no-default-features
+    scripts/test-e2e.sh
 
 # Rust tests only
 test-rust:
-    cargo test
+    cargo test --no-default-features
+
+# formatting check and clippy, for both builds
+lint:
+    cargo fmt --check
+    cargo clippy --all-targets --no-default-features -- -D warnings
+    cargo clippy --all-targets -- -D warnings
 
 # the browser build (wasm engine + shell + site chrome) into dist-web/
 web:
     scripts/build-web.sh
 
-# build + install ~/.local/bin/uapp and ~/.local/bin/uapp-desktop (old ones kept as .bak)
+# build + install ~/.local/bin/uapp (the old one kept as .bak)
 install: build
     UAPP_INSTALL_DIR="{{install_dir}}" scripts/install-local.sh --no-build
 
@@ -42,11 +47,12 @@ dev:
 
 # open a .uapp headless and print its URL as JSON
 open file:
-    cargo run --release --bin uapp-server --no-default-features -- open "{{file}}" --headless
+    cargo run --release --no-default-features -- open "{{file}}" --headless
 
-# serve a .uapp as a public website locally, with the editing chrome (needs `just web` once)
+# serve a .uapp as a public website locally, with the editing chrome (run `just web` first)
 serve file port="8080":
-    cargo run --release --bin uapp-server --no-default-features -- serve "{{file}}" --port {{port}} --coi --publish-data --chrome dist-web
+    @test -f dist-web/index.html || { echo "dist-web/ is missing or incomplete; run 'just web' first" >&2; exit 1; }
+    cargo run --release --no-default-features -- serve "{{file}}" --port {{port}} --coi --publish-data --chrome dist-web
 
 # remove build output
 clean:

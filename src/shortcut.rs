@@ -146,8 +146,8 @@ fn default_entry(name: &str) -> Option<PathBuf> {
 /// deleted: see [`ours`].
 fn remove_path(p: &Path) -> bool {
     if !ours(p) {
-        eprintln!(
-            "uapp: not removing {}: not a launcher entry uapp created",
+        tracing::warn!(
+            "not removing {}: not a launcher entry uapp created",
             p.display()
         );
         return false;

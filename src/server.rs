@@ -1886,7 +1886,7 @@ async fn site_publish(
         }
         // Rescue point before a whole-site change, like a template update.
         if let Err(e) = app.eng().snapshot() {
-            eprintln!("uapp: snapshot before publish failed: {e:#}");
+            tracing::warn!("snapshot before publish failed: {e:#}");
         }
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body);
         let result = crate::rpc::local_op(&app, "publish", json!({"b64": b64, "data": opts.export_data}))

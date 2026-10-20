@@ -1,5 +1,5 @@
-# uapp hosting image — `uapp-server serve` (one .uapp as a website, or the
-# bare browser build) and `uapp-library` (a directory of .uapp files).
+# uapp hosting image: `uapp serve` (one .uapp as a website, or the bare
+# browser build) and `uapp library` (a directory of .uapp files).
 #
 # Site mode serves ONE .uapp as a website: rendered pages under `app/` at real
 # URLs for everyone; the shell, the WebSocket and publishing (PUT /site.uapp)
@@ -19,7 +19,7 @@
 # Library (src/library.rs): override the command, and set UAPP_PORT to its
 # port so the health check probes the right one:
 #   docker run -v /path/to/apps:/apps -e UAPP_TOKEN=... -e UAPP_PORT=8090 \
-#              uapp-serve sh -c 'exec uapp-library /apps --bind 0.0.0.0 --port "$UAPP_PORT"'
+#              uapp-serve sh -c 'exec uapp library /apps --bind 0.0.0.0 --port "$UAPP_PORT"'
 #
 # The mounts must be writable by the container user for publishing to work
 # (run with --user <uid> of the files' owner, or chown them); a read-only mount
@@ -44,7 +44,10 @@ COPY src ./src
 COPY assets ./assets
 COPY capabilities ./capabilities
 COPY templates ./templates
-RUN cargo build --release --bin uapp-server --bin uapp-library --no-default-features
+# Not built here, but Cargo.toml names it, and cargo wants every target it
+# names to exist.
+COPY examples/make-demo-apps.rs ./examples/
+RUN cargo build --release --bin uapp --no-default-features
 
 # --- runtime image ---
 # The binary links only libc/libm/libgcc (SQLite, SQLCipher and OpenSSL are all
@@ -53,8 +56,7 @@ FROM debian:trixie-slim
 WORKDIR /site
 
 RUN useradd --system --uid 10001 --no-create-home uapp
-COPY --from=build /src/target/release/uapp-server /usr/local/bin/uapp-server
-COPY --from=build /src/target/release/uapp-library /usr/local/bin/uapp-library
+COPY --from=build /src/target/release/uapp /usr/local/bin/uapp
 # The browser build (wasm engine + shell) behind `--chrome` is NOT in the
 # image: bind-mount dist-web at /opt/uapp-web (read-only is fine). One rsync
 # then updates every container that serves it; restart them to pick it up.
@@ -88,7 +90,7 @@ EXPOSE 8080
 # Not on by default: --publish-data, which ships data/ (content sources)
 # inside the PUBLIC /site.uapp so a visitor can re-run the site's build
 # pipeline. Opt in with UAPP_SERVE_FLAGS="--publish-data --coi".
-CMD ["sh", "-c", "exec uapp-server serve $UAPP_SITE --bind 0.0.0.0 --port \"$UAPP_PORT\" --chrome /opt/uapp-web ${UAPP_SERVE_FLAGS-${UAPP_SITE:+--coi}}"]
+CMD ["sh", "-c", "exec uapp serve $UAPP_SITE --bind 0.0.0.0 --port \"$UAPP_PORT\" --chrome /opt/uapp-web ${UAPP_SERVE_FLAGS-${UAPP_SITE:+--coi}}"]
 
 # /health answers in every mode (site, web host, library). No curl in the
 # slim image, so bash's /dev/tcp makes the request.

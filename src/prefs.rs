@@ -75,10 +75,9 @@ pub fn set(key: &str, value: Value) -> Result<()> {
     Ok(())
 }
 
-/// Which shell opens apps on this machine: "native" (the UApp desktop window
-/// — the primary path and the default; the CLI delegates to the Tauri app) or
-/// "browser" (the fallback shell, explicit opt-out — also what the CLI uses,
-/// with a note, when the UApp app isn't installed).
+/// Which shell opens a .uapp file on this machine: "native" (the UApp window,
+/// the default) or "browser" (the system browser, an explicit opt-out). Only
+/// the window build reads it; `uapp --browser` / `--window` override it.
 pub fn shell() -> String {
     get_str("shell", "native")
 }

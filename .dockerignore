@@ -5,6 +5,8 @@ dist-web/launcher.uapp
 node_modules/
 .git/
 examples/
+# ...except the one source file Cargo.toml names (see Dockerfile.serve).
+!examples/make-demo-apps.rs
 gen/
 icons/
 installer/

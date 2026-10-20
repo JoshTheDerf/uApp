@@ -511,7 +511,7 @@ pub fn migrate(app: &App) -> Result<()> {
 pub fn follow_save_as(from: &std::path::Path, to: &std::path::Path, consumed: bool) {
     let (a, b) = (crate::registry::key(from), crate::registry::key(to));
     if let Err(e) = local::copy(&a, &b, consumed) {
-        eprintln!("uapp: could not carry this app's saved keys over to the new file: {e:#}");
+        tracing::warn!("could not carry this app's saved keys over to the new file: {e:#}");
     }
 }
 

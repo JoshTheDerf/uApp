@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { rmSync, mkdirSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-sessions";
 const FILE = `${DIR}/sessions.uapp`;
 let passed = 0, failed = 0;
@@ -83,7 +83,7 @@ class Instance {
       this.proc.stdout.on("data", (d) => { b += d; const i = b.indexOf("\n"); if (i >= 0) { clearTimeout(t); res(b.slice(0, i)); } });
     });
     const info = JSON.parse(line);
-if (info.reused) { console.error("FAIL: a uapp-server from an earlier run still has the test file open (old code!) — pkill -x uapp-server"); process.exit(2); }
+if (info.reused) { console.error("FAIL: a uapp from an earlier run still has the test file open (old code!); stop that uapp process first"); process.exit(2); }
     await this.connect(info.port, new URL(info.url).searchParams.get("t"));
   }
   // A second shell client on an already-running server (multi-tab case).
