@@ -68,7 +68,10 @@ fn run() -> Result<()> {
     };
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let generated = token.is_none();
-    let token = token.unwrap_or_else(|| (0..32).map(|_| fastrand::alphanumeric()).collect());
+    if let Some(t) = &token {
+        uapp::secrets::check_token(t).context("--token / UAPP_TOKEN")?;
+    }
+    let token = token.unwrap_or_else(uapp::secrets::new_token);
     let lib = Arc::new(uapp::library::Library {
         dir: dir.clone(),
         token: token.clone(),
@@ -77,6 +80,7 @@ fn run() -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
+        let stop = uapp::shutdown_signal();
         let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
         let addr = listener.local_addr()?;
         eprintln!(
@@ -98,7 +102,8 @@ fn run() -> Result<()> {
         }
         axum::serve(listener, uapp::library::router(lib))
             .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
+                stop.await;
+                eprintln!("uapp-library: shutting down");
             })
             .await?;
         Ok::<_, anyhow::Error>(())

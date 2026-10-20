@@ -142,7 +142,9 @@ console.log("\n[2] apply: code updated, data untouched");
   ok(view.rows[0][0] === 2, "the new view works against existing rows");
 
   const ai = await rpc("config.get", { key: "ai" });
-  ok(ai && ai.api_key === "MY-OWN-KEY", `the user's API key was NOT overwritten (${JSON.stringify(ai)})`);
+  // The key itself lives outside the file (secrets.rs); config.get only says
+  // whether one is saved for this provider.
+  ok(ai && ai.has_api_key === true && ai.provider === "zai", `the user's API key was NOT overwritten (${JSON.stringify(ai)})`);
   const extra = await rpc("config.get", { key: "template_only" });
   ok(extra && extra.hello === true, "a config key only the template had was filled in");
 

@@ -16,6 +16,15 @@ use tokio::sync::broadcast;
 
 use crate::engine::{ChangeSet, Engine};
 
+/// Lock a mutex even when a thread panicked while holding it. A poisoned
+/// engine mutex used to take every later request down with it (each handler
+/// unwrapped the lock), so one bad request ended the server. The data behind
+/// these locks stays usable after a panic: SQLite rolls back the transaction
+/// a panicking op left open, and the rest is plain bookkeeping.
+pub fn lock<T: ?Sized>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A gated tool call waiting for the user's decision (manual mode).
 /// Lives only on the device that started the AI run.
 pub struct PendingApproval {
@@ -156,6 +165,35 @@ pub struct PublicArchive {
     pub etag: String,
 }
 
+/// A public site's page as served (archive entry, bytes after injection,
+/// ETag), kept until the next write so a busy site doesn't re-read and
+/// re-inflate the same file under the engine lock on every request.
+pub struct CachedPage {
+    pub name: String,
+    pub body: Vec<u8>,
+    pub etag: String,
+}
+
+impl AsRef<[u8]> for CachedPage {
+    fn as_ref(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+impl AsRef<[u8]> for PublicArchive {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// [`CachedPage`]s by request path, valid for one value of `Engine::writes`.
+#[derive(Default)]
+pub struct PageCache {
+    pub writes: u64,
+    pub bytes: usize,
+    pub pages: HashMap<String, std::sync::Arc<CachedPage>>,
+}
+
 /// A dropped template .uapp held between "here's what this would change" and
 /// the user pressing Update.
 pub struct StagedTemplate {
@@ -242,6 +280,8 @@ pub struct App {
     /// moves (`Engine::writes`), so an unchanged site never rebuilds it and a
     /// publish is visible on the very next request.
     pub archive_cache: Mutex<Option<(u64, std::sync::Arc<PublicArchive>)>>,
+    /// Public mode: pages served to anonymous visitors (see `server::public_page`).
+    pub page_cache: Mutex<PageCache>,
 }
 
 impl App {
@@ -280,11 +320,17 @@ impl App {
             public: None,
             chrome: None,
             archive_cache: Mutex::new(None),
+            page_cache: Mutex::new(PageCache::default()),
         }
     }
 }
 
 impl App {
+    /// The engine, locked (poison-tolerant, see [`lock`]).
+    pub fn eng(&self) -> std::sync::MutexGuard<'_, Engine> {
+        lock(&self.engine)
+    }
+
     /// Best-effort cleanup before the process exits: a final rescue snapshot
     /// if anything changed, and drop this file's registry addr so future opens
     /// stop dialing a dead server. Every exit path — quit from the shell,
@@ -293,7 +339,7 @@ impl App {
     pub fn graceful_cleanup(&self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut eng = self.engine.lock().unwrap();
+            let mut eng = self.eng();
             eng.snapshot_if_dirty();
             crate::registry::remove_addr(&eng.path);
         }
@@ -302,7 +348,7 @@ impl App {
     /// Is any session's assistant run live? (`app.info.aiBusy`, kept global for
     /// compatibility with clients that predate per-session runs.)
     pub fn ai_busy_any(&self) -> bool {
-        !self.ai_runs.lock().unwrap().is_empty()
+        !lock(&self.ai_runs).is_empty()
     }
 
     // ---- console forwarding (live app iframe -> AI) ------------------------
@@ -323,7 +369,7 @@ impl App {
             text: text.chars().take(8000).collect(),
             ts: crate::store::now_ms() as i64,
         };
-        let mut buf = self.console.lock().unwrap();
+        let mut buf = lock(&self.console);
         buf.push_back(entry);
         while buf.len() > CONSOLE_CAP {
             buf.pop_front();
@@ -335,7 +381,7 @@ impl App {
     /// it. Returns `{entries, dropped, latest_gen}`.
     pub fn console_read(&self, only_errors: bool, only_latest: bool, limit: usize) -> Value {
         let latest_gen = self.console_gen.load(Ordering::Relaxed);
-        let buf = self.console.lock().unwrap();
+        let buf = lock(&self.console);
         let mut rows: Vec<&ConsoleEntry> = buf
             .iter()
             .filter(|e| !only_latest || e.gen == latest_gen)
@@ -367,7 +413,7 @@ impl App {
     /// Marks the new lines acked so it fires once per batch, not every turn.
     pub fn console_alert(&self) -> Option<String> {
         let ack = self.console_ack.load(Ordering::Relaxed);
-        let buf = self.console.lock().unwrap();
+        let buf = lock(&self.console);
         // A line the AI has already been shown (same text, e.g. a framework
         // warning repeated on every page load) is not news again.
         let seen: std::collections::HashSet<&str> = buf
@@ -418,7 +464,7 @@ impl App {
 
     /// Sessions with a live run, oldest first.
     pub fn ai_sessions(&self) -> Vec<String> {
-        let runs = self.ai_runs.lock().unwrap();
+        let runs = lock(&self.ai_runs);
         let mut v: Vec<(u64, String)> = runs.iter().map(|(s, h)| (h.started, s.clone())).collect();
         v.sort();
         v.into_iter().map(|(_, s)| s).collect()
@@ -430,12 +476,12 @@ impl App {
         // Runs are keyed by their ROOT session: stopping an agent conversation
         // means stopping the parent run that spawned it (agents are depth-1).
         let session = session.map(|s| {
-            let runs = self.ai_runs.lock().unwrap();
+            let runs = lock(&self.ai_runs);
             if runs.contains_key(s) {
                 return s.to_string();
             }
             drop(runs);
-            let eng = self.engine.lock().unwrap();
+            let eng = self.eng();
             crate::store::query(
                 &eng.db,
                 "SELECT parent FROM uapp_sessions WHERE id = ?1 AND kind = 'agent'",
@@ -446,16 +492,16 @@ impl App {
             .unwrap_or_else(|| s.to_string())
         });
         let session = session.as_deref();
-        for (id, h) in self.ai_runs.lock().unwrap().iter() {
-            if session.map_or(true, |s| s == id) {
+        for (id, h) in lock(&self.ai_runs).iter() {
+            if session.is_none_or(|s| s == id) {
                 h.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
         let drained: Vec<_> = {
-            let mut p = self.pending.lock().unwrap();
+            let mut p = lock(&self.pending);
             let ids: Vec<String> = p
                 .iter()
-                .filter(|(_, e)| session.map_or(true, |s| s == e.session))
+                .filter(|(_, e)| session.is_none_or(|s| s == e.session))
                 .map(|(id, _)| id.clone())
                 .collect();
             ids.into_iter().filter_map(|id| p.remove(&id)).collect()
@@ -467,10 +513,10 @@ impl App {
         // Open ask_user prompts in the stopped session resolve as unanswered
         // so the blocked tool call returns immediately.
         let dropped: Vec<_> = {
-            let mut q = self.questions.lock().unwrap();
+            let mut q = lock(&self.questions);
             let ids: Vec<String> = q
                 .iter()
-                .filter(|(_, e)| session.map_or(true, |s| s == e.session))
+                .filter(|(_, e)| session.is_none_or(|s| s == e.session))
                 .map(|(id, _)| id.clone())
                 .collect();
             ids.into_iter().filter_map(|id| q.remove(&id)).collect()
@@ -482,7 +528,7 @@ impl App {
     }
 
     pub fn questions_list(&self) -> Value {
-        let q = self.questions.lock().unwrap();
+        let q = lock(&self.questions);
         let mut list: Vec<Value> = q
             .iter()
             .map(|(id, e)| {
@@ -499,7 +545,7 @@ impl App {
     }
 
     pub fn pending_list(&self) -> Value {
-        let p = self.pending.lock().unwrap();
+        let p = lock(&self.pending);
         let mut list: Vec<Value> = p
             .iter()
             .map(|(id, e)| {
@@ -516,10 +562,7 @@ impl App {
     }
 
     pub fn actions_snapshot(&self) -> Vec<(String, AppAction)> {
-        let mut v: Vec<(String, AppAction)> = self
-            .actions
-            .lock()
-            .unwrap()
+        let mut v: Vec<(String, AppAction)> = lock(&self.actions)
             .iter()
             .map(|(k, a)| (k.clone(), a.clone()))
             .collect();
@@ -538,17 +581,17 @@ impl App {
     /// A page connected. `send` delivers server→page messages to it.
     pub fn conn_open(&self, id: u64, send: ConnSender) {
         self.clients.fetch_add(1, Ordering::SeqCst);
-        self.conns.lock().unwrap().insert(id, send);
+        lock(&self.conns).insert(id, send);
     }
 
     /// A page went away: everything it registered dies with it.
     pub fn conn_close(&self, id: u64) {
-        if self.conns.lock().unwrap().remove(&id).is_some() {
+        if lock(&self.conns).remove(&id).is_some() {
             self.clients.fetch_sub(1, Ordering::SeqCst);
         }
-        self.actions.lock().unwrap().retain(|_, a| a.conn != id);
-        self.contexts.lock().unwrap().retain(|(_, c)| *c != id);
-        self.ctx_loaded.lock().unwrap().remove(&id);
+        lock(&self.actions).retain(|_, a| a.conn != id);
+        lock(&self.contexts).retain(|(_, c)| *c != id);
+        lock(&self.ctx_loaded).remove(&id);
     }
 
     /// Transport-level messages a page sends about ITSELF (they need the
@@ -559,18 +602,18 @@ impl App {
             "ctx.register" => {
                 let ctx = params["context"].as_str().unwrap_or("");
                 if !ctx.is_empty() && ctx.len() <= 32 {
-                    let mut ctxs = self.contexts.lock().unwrap();
+                    let mut ctxs = lock(&self.contexts);
                     ctxs.retain(|(c, cid)| !(c == ctx && *cid == id));
                     ctxs.push((ctx.to_string(), id));
                 }
                 Some(json!({"ok": true}))
             }
             "ctx.loaded" => {
-                self.ctx_loaded.lock().unwrap().insert(id);
+                lock(&self.ctx_loaded).insert(id);
                 Some(json!({"ok": true}))
             }
             "actions.register" => {
-                let mut reg = self.actions.lock().unwrap();
+                let mut reg = lock(&self.actions);
                 reg.retain(|_, a| a.conn != id);
                 let mut count = 0;
                 for a in params["actions"].as_array().cloned().unwrap_or_default() {
@@ -599,7 +642,7 @@ impl App {
             }
             "actions.result" | "eval.result" => {
                 let iid = params["id"].as_str().unwrap_or("");
-                if let Some(slot) = self.invokes.lock().unwrap().get_mut(iid) {
+                if let Some(slot) = lock(&self.invokes).get_mut(iid) {
                     *slot = Some(params.clone());
                 }
                 Some(json!({"ok": true}))
@@ -619,8 +662,8 @@ impl App {
 
     /// Newest still-connected page that registered `context`.
     fn context_conn(&self, context: &str) -> Option<u64> {
-        let ctxs = self.contexts.lock().unwrap();
-        let conns = self.conns.lock().unwrap();
+        let ctxs = lock(&self.contexts);
+        let conns = lock(&self.conns);
         ctxs.iter()
             .rev()
             .find(|(c, id)| c == context && conns.contains_key(id))
@@ -654,7 +697,7 @@ impl App {
     /// its bootstrap chain, so its actions register a moment later; waiting
     /// here beats failing with "unknown action".
     pub fn wait_for_action(&self, name: &str) -> anyhow::Result<u64> {
-        let find = || self.actions.lock().unwrap().get(name).map(|a| a.conn);
+        let find = || lock(&self.actions).get(name).map(|a| a.conn);
         if self.wait_until(ACTION_REGISTER_WAIT_MS, 100, || find().is_some())? {
             return Ok(find().unwrap());
         }
@@ -676,31 +719,26 @@ impl App {
         timeout_ms: u64,
         what: &str,
     ) -> anyhow::Result<Value> {
-        let send = self
-            .conns
-            .lock()
-            .unwrap()
+        let send = lock(&self.conns)
             .get(&conn_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("the page for {what} has disconnected"))?;
         let id: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
         params["id"] = json!(id);
-        self.invokes.lock().unwrap().insert(id.clone(), None);
+        lock(&self.invokes).insert(id.clone(), None);
         let msg = json!({"method": method, "params": params}).to_string();
         if !send(msg) {
-            self.invokes.lock().unwrap().remove(&id);
+            lock(&self.invokes).remove(&id);
             anyhow::bail!("the page disconnected before {what} could run");
         }
         let done = || {
-            self.invokes
-                .lock()
-                .unwrap()
+            lock(&self.invokes)
                 .get(&id)
                 .map(|v| v.is_some())
                 .unwrap_or(true)
         };
         let finished = self.wait_until(timeout_ms, 20, done);
-        let reply = self.invokes.lock().unwrap().remove(&id).flatten();
+        let reply = lock(&self.invokes).remove(&id).flatten();
         finished?;
         match reply {
             Some(v) => {
@@ -797,8 +835,8 @@ impl App {
     /// [`RELOAD_WAIT_MS`] instead of hanging the turn.
     pub fn invoke_reload(&self) -> anyhow::Result<Value> {
         let app_conns = || -> std::collections::HashSet<u64> {
-            let ctxs = self.contexts.lock().unwrap();
-            let conns = self.conns.lock().unwrap();
+            let ctxs = lock(&self.contexts);
+            let conns = lock(&self.conns);
             ctxs.iter()
                 .filter(|(c, id)| c == "app" && conns.contains_key(id))
                 .map(|(_, id)| *id)
@@ -812,7 +850,7 @@ impl App {
         let start = crate::store::now_ms();
         let loaded = self.wait_until(RELOAD_WAIT_MS, 50, || {
             let fresh = app_conns();
-            let loaded = self.ctx_loaded.lock().unwrap();
+            let loaded = lock(&self.ctx_loaded);
             fresh
                 .iter()
                 .any(|id| !before.contains(id) && loaded.contains(id))
@@ -895,7 +933,7 @@ impl App {
             DropPhase::Drop => {
                 let id: String = (0..12).map(|_| fastrand::alphanumeric()).collect();
                 {
-                    let mut drops = self.drops.lock().unwrap();
+                    let mut drops = lock(&self.drops);
                     if drops.len() > 8 {
                         drops.clear(); // ids expire anyway; keep this bounded
                     }

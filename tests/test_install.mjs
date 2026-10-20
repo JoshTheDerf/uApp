@@ -3,7 +3,7 @@
 // shortcutStatus/removeShortcut track it via the machine-local install record
 // so a rename never leaves a duplicate launcher behind.
 import { spawn } from "node:child_process";
-import { rmSync, mkdirSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { rmSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
@@ -113,6 +113,23 @@ if (isLinux) {
   // removing again is an error — there's nothing installed
   try { await call("app.removeShortcut"); ok(false, "second remove errors"); }
   catch (e) { ok(/no launcher/.test(e.message), "second remove errors", e.message); }
+}
+
+// 8. the install record can't be pointed at something else to delete
+{
+  let err = null;
+  try { await call("prefs.set", { key: "shortcuts", value: {} }); } catch (e) { err = e; }
+  ok(!!err, "prefs.set refuses anything but the shell pref", err && err.message);
+  const prefs = await call("prefs.get");
+  ok(Object.keys(prefs).join() === "shell", "prefs.get returns only the shell pref", JSON.stringify(prefs));
+  // A record planted in prefs.json directly (another process, an older build).
+  const victim = `${DIR}/victim`;
+  mkdirSync(victim, { recursive: true });
+  writeFileSync(`${victim}/keep.txt`, "x");
+  const appId = (await call("app.info")).appId;
+  writeFileSync(`${DIR}/.config/uapp/prefs.json`, JSON.stringify({ shortcuts: { [appId]: { files: [victim, `${victim}/keep.txt`] } } }));
+  try { await call("app.removeShortcut"); } catch {}
+  ok(existsSync(`${victim}/keep.txt`), "removeShortcut leaves paths it didn't create alone");
 }
 
 ws.close();

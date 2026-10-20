@@ -25,6 +25,17 @@ let reconnectTimer = null;
 // Browser (wasm) build: boot.js installs a worker-backed transport before the
 // shell loads; when present it replaces the WebSocket entirely.
 const wasmT = () => window.__uappTransport;
+// ?t= is only for the first load: that response set the HttpOnly cookie that
+// authenticates everything after it (reloads, the socket, the app frame). Left
+// in the address bar it ends up in history and pasted links, and app code can
+// read it from parent.location.
+try {
+  const u = new URL(location.href);
+  if (u.searchParams.has("t")) {
+    u.searchParams.delete("t");
+    history.replaceState(history.state, "", u.pathname + u.search + u.hash);
+  }
+} catch {}
 export function connect() {
   if (state.shuttingDown) return; // a reconnect timer that outlived closeSocket
   if (wasmT()) {

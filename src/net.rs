@@ -70,6 +70,117 @@ pub fn request(
         Err(ureq::Error::Status(_code, r)) => r,
         Err(e) => anyhow::bail!("request failed: {e}"),
     };
+    Ok(into_resp(resp))
+}
+
+/// A GET of a URL that an app or the model chose (`web.fetch`,
+/// `files.fetch`), which must not reach this machine or its network. Checking
+/// the host before the request isn't enough on its own: DNS can answer
+/// differently when the connection is made, and a public page can redirect
+/// to `http://127.0.0.1/`. So every address is checked as the connection is
+/// made (a resolver that refuses local ones), and redirects are followed here,
+/// one hop at a time, each hop under the same rule.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn get_public(url: &str, connect_timeout_secs: u64, read_timeout_secs: u64) -> Result<Resp> {
+    const MAX_REDIRECTS: usize = 10;
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(connect_timeout_secs))
+        .timeout_read(std::time::Duration::from_secs(read_timeout_secs))
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) uapp/0.1")
+        .redirects(0)
+        .resolver(PublicOnly)
+        .build();
+    let mut current = url::Url::parse(url).map_err(|e| anyhow::anyhow!("bad URL {url}: {e}"))?;
+    for _ in 0..=MAX_REDIRECTS {
+        if !matches!(current.scheme(), "http" | "https") {
+            anyhow::bail!("refusing to fetch a {}: URL", current.scheme());
+        }
+        let resp = match agent.get(current.as_str()).call() {
+            Ok(r) => r,
+            Err(ureq::Error::Status(_code, r)) => r,
+            Err(e) => anyhow::bail!("request failed: {e}"),
+        };
+        if (300..400).contains(&resp.status()) {
+            if let Some(loc) = resp.header("location") {
+                current = current
+                    .join(loc)
+                    .map_err(|e| anyhow::anyhow!("bad redirect to {loc}: {e}"))?;
+                continue;
+            }
+        }
+        return Ok(into_resp(resp));
+    }
+    anyhow::bail!("too many redirects")
+}
+
+/// Resolves like the default, then refuses the lot if any address is
+/// loopback, private, link-local or otherwise not on the public internet.
+#[cfg(not(target_arch = "wasm32"))]
+struct PublicOnly;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ureq::Resolver for PublicOnly {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        use std::net::ToSocketAddrs;
+        let addrs: Vec<_> = netloc.to_socket_addrs()?.collect();
+        if let Some(a) = addrs.iter().find(|a| is_local_ip(a.ip())) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to connect to {netloc}: it resolves to a local/private address ({})",
+                    a.ip()
+                ),
+            ));
+        }
+        Ok(addrs)
+    }
+}
+
+/// Not somewhere on the public internet: loopback, private, link-local
+/// (cloud metadata lives there), CGNAT, multicast, reserved, unspecified, and
+/// IPv6 forms that carry one of those IPv4 addresses inside.
+pub fn is_local_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || o[0] == 0
+                || o[0] >= 240
+                || (o[0] == 100 && (o[1] & 0xc0) == 64) // CGNAT 100.64/10
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0/24
+                || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18/15
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            let embedded = |a: u16, b: u16| {
+                is_local_ip(IpAddr::V4(Ipv4Addr::new(
+                    (a >> 8) as u8,
+                    a as u8,
+                    (b >> 8) as u8,
+                    b as u8,
+                )))
+            };
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // ULA
+                || (s[0] & 0xffc0) == 0xfe80 // link-local
+                || v6.to_ipv4_mapped().is_some_and(|v4| is_local_ip(IpAddr::V4(v4)))
+                || (s[0..6] == [0, 0, 0, 0, 0, 0] && embedded(s[6], s[7])) // ::a.b.c.d
+                || (s[0] == 0x64 && s[1] == 0xff9b && embedded(s[6], s[7])) // NAT64
+                || (s[0] == 0x2002 && embedded(s[1], s[2])) // 6to4
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn into_resp(resp: ureq::Response) -> Resp {
     let status = resp.status();
     let content_type = resp.content_type().to_string();
     let headers = resp
@@ -80,12 +191,12 @@ pub fn request(
                 .map(|v| (n.to_ascii_lowercase(), v.to_string()))
         })
         .collect();
-    Ok(Resp {
+    Resp {
         status,
         content_type,
         headers,
         reader: Box::new(std::io::BufReader::new(resp.into_reader())),
-    })
+    }
 }
 
 /// wasm: body of an in-flight request, pulled chunk by chunk from the glue.
@@ -202,4 +313,59 @@ pub fn request(
         headers,
         reader,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_addresses_are_recognised() {
+        for a in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "0.1.2.3",
+            "224.0.0.1",
+            "255.255.255.255",
+            "198.18.0.1",
+            "::1",
+            "::",
+            "fe80::1",
+            "fd00::1",
+            "::ffff:127.0.0.1",
+            "::127.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "2002:7f00:1::",
+            "ff02::1",
+        ] {
+            assert!(is_local_ip(a.parse().unwrap()), "{a}");
+        }
+        for a in [
+            "93.184.215.14",
+            "1.1.1.1",
+            "2606:4700::6810:84e5",
+            "::ffff:8.8.8.8",
+        ] {
+            assert!(!is_local_ip(a.parse().unwrap()), "{a}");
+        }
+    }
+
+    #[test]
+    fn a_local_target_is_refused_at_connect_time() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/", l.local_addr().unwrap().port());
+        let err = get_public(&url, 2, 2)
+            .err()
+            .expect("must refuse")
+            .to_string();
+        assert!(err.contains("local/private"), "{err}");
+        // The same through a name that resolves to loopback.
+        let url = format!("http://localhost:{}/", l.local_addr().unwrap().port());
+        assert!(get_public(&url, 2, 2).is_err());
+    }
 }

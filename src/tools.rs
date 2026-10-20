@@ -334,7 +334,7 @@ pub fn is_agent_tool(name: &str) -> bool {
 
 /// Names in config key "tools_disabled" (synced app-wide).
 pub fn disabled_set(app: &Arc<App>) -> std::collections::HashSet<String> {
-    let eng = app.engine.lock().unwrap();
+    let eng = app.eng();
     crate::store::config_get(&eng.db, "tools_disabled")
         .ok()
         .flatten()

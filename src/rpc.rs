@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::app::App;
-use crate::store;
+use crate::{secrets, store};
 
 /// Entry point for anything that arrived over a transport (WebSocket, the
 /// browser worker's postMessage, an HTTP upload): strips the server-internal
@@ -26,7 +26,7 @@ pub fn dispatch_untrusted(app: &Arc<App>, method: &str, mut p: Value) -> Result<
 pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
     match method {
         "app.info" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let name = store::meta_get(&eng.db, "name")?.unwrap_or_default();
             Ok(json!({
                 "name": name,
@@ -63,7 +63,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             }))
         }
         "sql.query" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let params: Vec<Value> = p["params"].as_array().cloned().unwrap_or_default();
             // _user_approved is set only by the AI loop after the user's
             // permission prompt (and stripped from wire requests).
@@ -83,7 +83,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         }
         "sql.batch" => local_op(app, "batch", json!({"sql": need_str(&p, "sql")?})),
         "files.list" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let mut r = store::query(
                 &eng.db,
                 "SELECT name, sz, mtime FROM sqlar ORDER BY name",
@@ -91,17 +91,21 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             )?;
             // Role is the top-level directory the file sits in (app/ vs data/);
             // kept as a column so callers don't have to parse paths.
-            r["columns"].as_array_mut().map(|c| c.push(json!("role")));
+            if let Some(c) = r["columns"].as_array_mut() {
+                c.push(json!("role"));
+            }
             if let Some(rows) = r["rows"].as_array_mut() {
                 for row in rows {
                     let role = row[0].as_str().map(store::file_role).unwrap_or("app");
-                    row.as_array_mut().map(|a| a.push(json!(role)));
+                    if let Some(a) = row.as_array_mut() {
+                        a.push(json!(role));
+                    }
                 }
             }
             Ok(r)
         }
         "files.read" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let name = need_str(&p, "name")?;
             // Report the archive name it resolved to, not the reference given.
             let name = &store::resolve_name(&eng.db, name)?.unwrap_or_else(|| name.to_string());
@@ -135,7 +139,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "files.delete" => {
             // A miss is an error, never a silent no-op: "deleted" must mean gone.
             let name = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 let asked = need_str(&p, "name")?;
                 store::resolve_name(&eng.db, asked)?.ok_or_else(|| {
                     anyhow!("no file named '{asked}' (list_files shows the archive's names)")
@@ -154,7 +158,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 bail!("mode must be auto, raw, pretty or edit");
             }
             let by = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 match store::resolve_name(&eng.db, &name)? {
                     Some(n) => name = n,
                     None => bail!("no such file: {name}"),
@@ -185,7 +189,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "template.apply" => template_apply(app, p),
         "template.discard" => {
             let token = need_str(&p, "token")?;
-            if app.templates.lock().unwrap().remove(token).is_none() {
+            if crate::app::lock(&app.templates).remove(token).is_none() {
                 bail!("no staged template with that token (already applied or discarded?)");
             }
             Ok(json!({"ok": true}))
@@ -215,7 +219,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             Ok(json!({"ok": true}))
         }
         "files.history" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let name = need_str(&p, "name")?;
             let name =
                 store::resolve_name(&eng.db, name)?.unwrap_or_else(|| store::canon_name(name));
@@ -232,7 +236,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 .ok_or_else(|| anyhow!("files.revert needs id"))?;
             let mut name = need_str(&p, "name")?.to_string();
             let (sz, data): (Option<i64>, Option<Vec<u8>>) = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 name = store::resolve_name(&eng.db, &name)?
                     .unwrap_or_else(|| store::canon_name(&name));
                 let mut stmt = eng
@@ -258,20 +262,40 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 None => bail!("that history entry has no content (file was created then)"),
             }
         }
+        // Secrets never come back out (see secrets.rs): the AI key reads as
+        // `has_api_key`, MCP credentials as `hasAuth`.
         "config.get" => {
-            let eng = app.engine.lock().unwrap();
-            Ok(store::config_get(&eng.db, need_str(&p, "key")?)?.unwrap_or(Value::Null))
+            let key = need_str(&p, "key")?;
+            if secrets::reserved_config_key(key) {
+                return Ok(Value::Null);
+            }
+            let v = store::config_get(&app.eng().db, key)?.unwrap_or(Value::Null);
+            Ok(match key {
+                "ai" => secrets::redact_ai(app, v),
+                "mcp" => secrets::redact_mcp(app, v),
+                _ => v,
+            })
         }
-        "config.set" => local_op(
-            app,
-            "config_set",
-            json!({"key": need_str(&p, "key")?, "value": p["value"]}),
-        ),
+        "config.set" => {
+            let key = need_str(&p, "key")?;
+            if secrets::reserved_config_key(key) {
+                bail!("'{key}' is kept by uapp on this machine and can't be set here");
+            }
+            let value = match key {
+                "ai" => secrets::prepare_ai(app, p["value"].clone())?,
+                "mcp" => match p["value"].as_array() {
+                    Some(list) => json!(secrets::mcp_store_credentials(app, list.clone())?),
+                    None => p["value"].clone(),
+                },
+                _ => p["value"].clone(),
+            };
+            local_op(app, "config_set", json!({"key": key, "value": value}))
+        }
 
         // ---- the toolbar around the app frame (see toolbar.rs) ----
         // The saved default: what every fresh open of this app starts from.
         "toolbar.get" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             Ok(crate::toolbar::settings(
                 store::config_get(&eng.db, "toolbar")?.as_ref(),
             ))
@@ -295,7 +319,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // they can see the effect by reopening the app.
         "toolbar.setDefault" => {
             let merged = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 crate::toolbar::merge(store::config_get(&eng.db, "toolbar")?.as_ref(), &p)?
             };
             local_op(
@@ -319,7 +343,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         }
         "chat.list" => {
             let session = session_arg(&p)?;
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             store::query(
                 &eng.db,
                 "SELECT mid, ts, device, user, role, content, COALESCE(session,'main') AS session
@@ -399,7 +423,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // one entry per question in the prompt's order.
         "ai.answer" => {
             let id = need_str(&p, "id")?;
-            let entry = app.questions.lock().unwrap().remove(id);
+            let entry = crate::app::lock(&app.questions).remove(id);
             match entry {
                 Some(e) => {
                     let _ = e.tx.try_send(json!({
@@ -415,7 +439,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             let id = need_str(&p, "id")?;
             let allow = p["allow"].as_bool().unwrap_or(false);
             let always = p["always"].as_bool().unwrap_or(false);
-            let entry = app.pending.lock().unwrap().remove(id);
+            let entry = crate::app::lock(&app.pending).remove(id);
             match entry {
                 Some(e) => {
                     let _ = e.tx.try_send((allow, always));
@@ -471,8 +495,12 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             if let Some(action) = name.strip_prefix("app__") {
                 app.wait_for_action(action)?;
             }
-            if crate::tools::is_gated(app, &name) {
-                crate::ai::app_approval_gate(app, &name, &p["input"])?;
+            // A Deny, a timeout or a stopped prompt all come back as false,
+            // and none of them may run the tool.
+            if crate::tools::is_gated(app, &name)
+                && !crate::ai::app_approval_gate(app, &name, &p["input"])?
+            {
+                bail!("denied: '{name}' was not allowed to run (the user said no, or the prompt timed out)");
             }
             crate::ai::run_tool(app, &name, &p["input"])
         }
@@ -513,7 +541,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // Reclaim dead space in the .uapp (deleted rows/files keep their pages
         // until a VACUUM) and refresh the rescue snapshot.
         "app.compact" => {
-            let mut eng = app.engine.lock().unwrap();
+            let mut eng = app.eng();
             eng.compact()?;
             let size = file_size(&eng);
             Ok(json!({"ok": true, "fileSize": size}))
@@ -566,16 +594,25 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             Ok(app.console_read(only_errors, only_latest, limit))
         }
         // Machine-local prefs (NOT synced) — e.g. browser vs. native window.
-        "prefs.get" => Ok(crate::prefs::load()),
+        // Only the prefs the settings panel offers travel over the wire: the
+        // rest (launcher install records, which name files `app.removeShortcut`
+        // deletes) is the core's own bookkeeping, and any page on this socket
+        // could otherwise rewrite it.
+        "prefs.get" => Ok(json!({"shell": crate::prefs::shell()})),
         "prefs.set" => {
-            crate::prefs::set(need_str(&p, "key")?, p["value"].clone())?;
+            let key = need_str(&p, "key")?;
+            match (key, p["value"].as_str()) {
+                ("shell", Some(v @ ("native" | "browser"))) => crate::prefs::set(key, json!(v))?,
+                ("shell", _) => bail!("shell must be \"native\" or \"browser\""),
+                _ => bail!("'{key}' is not a preference that can be set here"),
+            }
             Ok(json!({"ok": true}))
         }
         "web.search" => web_search(p),
         "web.fetch" => web_fetch(p),
         // Open a URL in the system browser (from apps or AI tools).
         "browser.open" => {
-            let url = need_str(&p, "url")?;
+            let url = openable_url(need_str(&p, "url")?)?;
             #[cfg(not(target_arch = "wasm32"))]
             open::that(url).map_err(|e| anyhow!("failed to open URL: {e}"))?;
             // wasm: the shell opens it (window.open) on this notification.
@@ -628,7 +665,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 bail!("this app isn't saved to a file yet — download it first");
             }
             let (app_id, name, path) = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "uapp".into());
                 (eng.app_id.clone(), name, eng.path.clone())
             };
@@ -657,7 +694,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         #[cfg(not(target_arch = "wasm32"))]
         "app.shortcutStatus" => {
             let (app_id, name, path) = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "uapp".into());
                 (eng.app_id.clone(), name, eng.path.clone())
             };
@@ -676,7 +713,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         #[cfg(not(target_arch = "wasm32"))]
         "app.removeShortcut" => {
             let (app_id, name) = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "uapp".into());
                 (eng.app_id.clone(), name)
             };
@@ -686,7 +723,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // the Download button.
         #[cfg(target_arch = "wasm32")]
         "app.export" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let bytes = eng.serialize_bytes()?;
             Ok(
                 json!({"b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -696,7 +733,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // Template export works on wasm too (in-memory build).
         #[cfg(target_arch = "wasm32")]
         "app.exportTemplate" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "app".into());
             let bytes = store::export_template(&eng.db, &name)?;
             Ok(
@@ -721,6 +758,25 @@ fn file_size(eng: &crate::engine::Engine) -> u64 {
     eng.serialize_bytes().map(|b| b.len() as u64).unwrap_or(0)
 }
 
+/// What `browser.open` may hand to the OS: a web page or a mail link. The
+/// OS opener (ShellExecute, xdg-open, `open`) runs whatever it is given, so a
+/// path, `file:`, `smb:` or some app's own URL scheme would launch programs
+/// or files; and in the browser build a `javascript:` URL would run in the
+/// shell's origin.
+fn openable_url(url: &str) -> Result<&str> {
+    let url = url.trim();
+    let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
+    let ok = match scheme.as_deref() {
+        Some("http" | "https") => url[url.find(':').unwrap_or(0)..].starts_with("://"),
+        Some("mailto") => true,
+        _ => false,
+    };
+    if !ok || url.chars().any(|c| c.is_control() || c == ' ') {
+        bail!("only http(s) and mailto: links can be opened");
+    }
+    Ok(url)
+}
+
 fn need_str<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
     p[key]
         .as_str()
@@ -741,7 +797,7 @@ fn crypt_set(app: &Arc<App>, p: Value) -> Result<Value> {
         .map(|s| s.to_string());
     let current = p["current_password"].as_str().unwrap_or("").to_string();
 
-    let mut eng = app.engine.lock().unwrap();
+    let mut eng = app.eng();
     let is_encrypted = eng.passphrase().is_some();
     if !is_encrypted && new_password.is_none() {
         bail!("this app is not encrypted");
@@ -781,7 +837,7 @@ fn app_save(app: &Arc<App>) -> Result<Value> {
     }
     let was_unsaved = app.unsaved.load(Ordering::Relaxed);
     let default_name = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "app".into());
         let safe: String = name
             .chars()
@@ -803,7 +859,7 @@ fn app_save(app: &Arc<App>) -> Result<Value> {
     // Re-home the running engine onto the chosen file, and move the reuse
     // advertisement to the new path (same server/port, new backing file).
     let old_path = {
-        let mut eng = app.engine.lock().unwrap();
+        let mut eng = app.eng();
         let old_path = eng.path.clone();
         eng.save_as(path.clone())?;
         crate::registry::write_addr(&eng.path, app.port.load(Ordering::Relaxed), &app.token);
@@ -812,7 +868,9 @@ fn app_save(app: &Arc<App>) -> Result<Value> {
     // A scratch / default document is CONSUMED by Save As: its content now
     // lives in the chosen file, so delete the old one (and its registry
     // records) — the next bare launch starts a fresh blank document.
-    if was_unsaved && crate::registry::key(&old_path) != crate::registry::key(&path) {
+    let consumed = was_unsaved && crate::registry::key(&old_path) != crate::registry::key(&path);
+    crate::secrets::follow_save_as(&old_path, &path, consumed);
+    if consumed {
         let _ = std::fs::remove_file(&old_path);
         crate::registry::forget(&old_path);
     }
@@ -855,7 +913,7 @@ fn app_open_file(app: &Arc<App>) -> Result<Value> {
         bail!("{} is not a file", path.display());
     }
     let (cur_path, blank) = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         (eng.path.clone(), store::is_blank_app(&eng.db))
     };
     // Picking the file this window already has would hand the new instance our
@@ -892,7 +950,7 @@ fn app_open_file(app: &Arc<App>) -> Result<Value> {
 /// Run + persist a local op, then push change notifications to all clients.
 pub fn local_op(app: &Arc<App>, kind: &str, payload: Value) -> Result<Value> {
     let (result, op) = {
-        let mut eng = app.engine.lock().unwrap();
+        let mut eng = app.eng();
         eng.local_op(kind, payload)?
     };
     let mut c = crate::engine::ChangeSet::default();
@@ -901,13 +959,14 @@ pub fn local_op(app: &Arc<App>, kind: &str, payload: Value) -> Result<Value> {
     Ok(result)
 }
 
+/// The configured MCP servers, each with this machine's credentials for it.
 pub fn mcp_servers(app: &Arc<App>) -> Vec<Value> {
-    let eng = app.engine.lock().unwrap();
-    store::config_get(&eng.db, "mcp")
+    let list = store::config_get(&app.eng().db, "mcp")
         .ok()
         .flatten()
         .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    secrets::mcp_with_credentials(app, list)
 }
 
 /// Only servers not switched off — what the toolset is built from.
@@ -928,7 +987,7 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
         if !matches!(mode, "auto" | "manual" | "plan") {
             bail!("mode must be auto, manual or plan (got '{mode}')");
         }
-        *app.ai_mode.lock().unwrap() = mode.to_string();
+        *crate::app::lock(&app.ai_mode) = mode.to_string();
     }
     let attachments = p["attachments"].as_array().cloned().unwrap_or_default();
     let mut stored = Vec::new();
@@ -936,7 +995,7 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
     for r in p["refs"].as_array().cloned().unwrap_or_default() {
         if let Some(name) = r.as_str() {
             let exists = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 store::sqlar_read(&eng.db, name)?.is_some()
             };
             if !exists {
@@ -988,7 +1047,7 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
 /// did not start another), start the next run now so it is not left
 /// unanswered. Not after a stop: the user asked for silence.
 pub fn finish_run(app: &Arc<App>, session: &str, result: Result<()>, stopped: bool) {
-    app.ai_runs.lock().unwrap().remove(session);
+    crate::app::lock(&app.ai_runs).remove(session);
     match result {
         Ok(_) => {
             app.notify("ai", json!({"state": "idle", "session": session}));
@@ -1018,7 +1077,7 @@ pub fn finish_run(app: &Arc<App>, session: &str, result: Result<()>, stopped: bo
 /// session's live loop, while another session starts its own thread.
 pub fn spawn_ai(app: Arc<App>, session: String) {
     let stop = {
-        let mut runs = app.ai_runs.lock().unwrap();
+        let mut runs = crate::app::lock(&app.ai_runs);
         if runs.contains_key(&session) {
             return; // this session already has a loop; it re-reads the history
         }
@@ -1090,7 +1149,7 @@ pub fn session_id(s: &str) -> Result<String> {
 /// device). Newest-active first, archived ones last.
 pub fn sessions_list(app: &Arc<App>) -> Result<Value> {
     let (metas, stats) = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         (
             store::query(
                 &eng.db,
@@ -1266,10 +1325,12 @@ pub fn truncate_utf8(s: &mut String, max: usize) {
     s.truncate(end);
 }
 
-/// Best-effort SSRF guard for model/app-triggered fetches: refuse URLs whose
+/// Up-front SSRF check for model/app-triggered fetches: refuse URLs whose
 /// host resolves to loopback, private, link-local (incl. cloud metadata) or
 /// unspecified addresses. UAPP_ALLOW_LOCAL_FETCH=1 opts out (tests, intranet
-/// setups).
+/// setups). This is what decides whether the AI's fetch asks first (see
+/// `tools::forced_gate`); the fetch itself goes through `net::get_public`,
+/// which checks again at connect time and on every redirect.
 pub(crate) fn check_public_url(url: &str) -> Result<()> {
     // Browser build: there is no OS network access at all — the browser's own
     // same-origin/CORS model gates every request, and DNS is unavailable to
@@ -1281,47 +1342,18 @@ pub(crate) fn check_public_url(url: &str) -> Result<()> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if std::env::var("UAPP_ALLOW_LOCAL_FETCH")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+        if allow_local_fetch() {
             return Ok(());
         }
-        let host = url
-            .split("//")
-            .nth(1)
-            .and_then(|r| r.split(['/', '?', '#']).next())
-            .map(|a| a.rsplit('@').next().unwrap_or(a))
-            .map(|a| {
-                if let Some(h) = a.strip_prefix('[') {
-                    h.split(']').next().unwrap_or(h).to_string()
-                } else {
-                    a.split(':').next().unwrap_or(a).to_string()
-                }
-            })
+        // Parsed the way the request will be (WHATWG rules, as ureq does):
+        // a hand split read `http://127.0.0.1\@example.com/` as example.com.
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .map(|h| h.trim_start_matches('[').trim_end_matches(']').to_string())
             .unwrap_or_default();
         if host.is_empty() {
             bail!("could not parse the URL host");
-        }
-        fn is_local(ip: std::net::IpAddr) -> bool {
-            match ip {
-                std::net::IpAddr::V4(v4) => {
-                    let o = v4.octets();
-                    v4.is_loopback()
-                        || v4.is_private()
-                        || v4.is_link_local()
-                        || v4.is_unspecified()
-                        || v4.is_broadcast()
-                        || (o[0] == 100 && (o[1] & 0xc0) == 64) // CGNAT 100.64/10
-                }
-                std::net::IpAddr::V6(v6) => {
-                    v6.is_loopback()
-                    || v6.is_unspecified()
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00 // ULA
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local
-                    || v6.to_ipv4_mapped().map_or(false, |v4| is_local(std::net::IpAddr::V4(v4)))
-                }
-            }
         }
         let addrs: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse() {
             vec![ip]
@@ -1332,11 +1364,35 @@ pub(crate) fn check_public_url(url: &str) -> Result<()> {
                 .map(|it| it.map(|a| a.ip()).collect())
                 .unwrap_or_default() // unresolvable: let the fetch report the error
         };
-        if addrs.iter().any(|ip| is_local(*ip)) {
+        if addrs.iter().any(|ip| crate::net::is_local_ip(*ip)) {
             bail!("refusing to fetch {host}: it resolves to a local/private address");
         }
         Ok(())
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn allow_local_fetch() -> bool {
+    std::env::var("UAPP_ALLOW_LOCAL_FETCH").is_ok_and(|v| v == "1")
+}
+
+/// The GET behind `web.fetch` / `files.fetch`: public addresses only, checked
+/// up front and again at connect time and on every redirect, unless the user
+/// approved this very call (the AI's local-network prompt) or
+/// UAPP_ALLOW_LOCAL_FETCH=1.
+fn fetch_get(
+    url: &str,
+    approved: bool,
+    connect_secs: u64,
+    read_secs: u64,
+) -> Result<crate::net::Resp> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if !approved && !allow_local_fetch() {
+        check_public_url(url)?;
+        return crate::net::get_public(url, connect_secs, read_secs);
+    }
+    let _ = approved;
+    crate::net::request("GET", url, &[], None, connect_secs, read_secs)
 }
 
 fn url_decode(s: &str) -> String {
@@ -1430,10 +1486,7 @@ fn web_fetch(p: Value) -> Result<Value> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         bail!("fetch_url only supports http(s) URLs");
     }
-    if p["_user_approved"] != json!(true) {
-        check_public_url(url)?;
-    }
-    let resp = crate::net::request("GET", url, &[], None, 15, 45)
+    let resp = fetch_get(url, p["_user_approved"] == json!(true), 15, 45)
         .map_err(|e| anyhow!("fetch failed: {e}"))?;
     if resp.status >= 400 {
         bail!("HTTP {} from {url}", resp.status);
@@ -1470,6 +1523,7 @@ fn mcp_mutate(
     if f(&mut servers) == 0 {
         bail!("no MCP server named '{name}' (mcp.status lists them)");
     }
+    let servers = secrets::mcp_store_credentials(app, servers)?;
     local_op(app, "config_set", json!({"key": "mcp", "value": servers}))?;
     Ok(json!({"ok": true}))
 }
@@ -1552,15 +1606,16 @@ fn files_fetch(app: &Arc<App>, p: Value) -> Result<Value> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         bail!("files.fetch only supports http(s) URLs");
     }
-    if p["_user_approved"] != json!(true) {
-        check_public_url(&url)?;
+    let approved = p["_user_approved"] == json!(true);
+    if !approved {
+        check_public_url(&url)?; // before naming/downloading anything
     }
     let name = match p["name"].as_str() {
         Some(n) => n.to_string(),
         None => {
             let base = url
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or("lib")
                 .split(['?', '#'])
                 .next()
@@ -1571,8 +1626,7 @@ fn files_fetch(app: &Arc<App>, p: Value) -> Result<Value> {
     if name.contains("..") {
         bail!("bad target name");
     }
-    let resp = crate::net::request("GET", &url, &[], None, 20, 120)
-        .map_err(|e| anyhow!("download failed: {e}"))?;
+    let resp = fetch_get(&url, approved, 20, 120).map_err(|e| anyhow!("download failed: {e}"))?;
     if resp.status >= 400 {
         bail!("download failed: HTTP {} from {url}", resp.status);
     }
@@ -1605,7 +1659,7 @@ fn take_drop(app: &Arc<App>, p: &Value) -> Result<(Vec<std::path::PathBuf>, Vec<
     let id = need_str(p, "id")?.to_string();
     let now = crate::store::now_ms();
     let paths = {
-        let mut drops = app.drops.lock().unwrap();
+        let mut drops = crate::app::lock(&app.drops);
         drops.retain(|_, (ts, _)| now.saturating_sub(*ts) < DROP_TTL_MS);
         match drops.remove(&id) {
             Some((_, paths)) => paths,
@@ -1726,7 +1780,7 @@ fn template_inspect(app: &Arc<App>, p: Value) -> Result<Value> {
     let (bytes, label) = template_bytes(app, &p)?;
     let plan = {
         let src = crate::template::Source::from_bytes(&bytes, password.as_deref())?;
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let mut plan = crate::template::plan(&eng.db, src.conn())?;
         // What only this layer knows: the name it was dropped as, and whether
         // it came out of this very app (so the dialog can say so).
@@ -1736,9 +1790,9 @@ fn template_inspect(app: &Arc<App>, p: Value) -> Result<Value> {
             json!(plan["source"]["appId"].as_str() == Some(eng.app_id.as_str()));
         plan
     };
-    let token: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
+    let token = secrets::new_token();
     {
-        let mut staged = app.templates.lock().unwrap();
+        let mut staged = crate::app::lock(&app.templates);
         let now = store::now_ms();
         staged.retain(|_, s| now.saturating_sub(s.ts) < TEMPLATE_TTL_MS);
         // A template can be tens of megabytes; never hold more than the one
@@ -1764,16 +1818,13 @@ fn template_inspect(app: &Arc<App>, p: Value) -> Result<Value> {
 fn template_apply(app: &Arc<App>, p: Value) -> Result<Value> {
     let token = need_str(&p, "token")?;
     let remove_stale = p["remove_stale"].as_bool().unwrap_or(true);
-    let staged = app
-        .templates
-        .lock()
-        .unwrap()
+    let staged = crate::app::lock(&app.templates)
         .remove(token)
         .ok_or_else(|| anyhow!("that template is no longer staged — drop it in again"))?;
     // Rescue point before a whole-app change, like an encryption switch.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut eng = app.engine.lock().unwrap();
+        let mut eng = app.eng();
         if let Err(e) = eng.snapshot() {
             eprintln!("uapp: snapshot before the template update failed: {e:#}");
         }
@@ -1824,7 +1875,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
     check_target(&to_raw)?;
     if !from_raw.ends_with('/') {
         let from = {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             store::resolve_name(&eng.db, &from_raw)?.unwrap_or_else(|| store::canon_name(&from_raw))
         };
         let to = store::canon_name(&to_raw);
@@ -1835,7 +1886,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
             return Ok(json!({"ok": true, "from": from, "to": to}));
         }
         let (data, taken) = {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             (
                 store::sqlar_read(&eng.db, &from)?,
                 store::sqlar_read(&eng.db, &to)?.is_some(),
@@ -1876,7 +1927,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
     }
     // Every file under the prefix, with its destination name.
     let moves: Vec<(String, String)> = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let mut stmt = eng
             .db
             .prepare("SELECT name FROM sqlar WHERE name LIKE ?1 || '%' ORDER BY name")?;
@@ -1892,7 +1943,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
         bail!("no such folder: {from}");
     }
     {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let mut stmt = eng.db.prepare("SELECT 1 FROM sqlar WHERE name=?1")?;
         for (_, new) in &moves {
             if stmt.exists(rusqlite::params![new])? {
@@ -1902,7 +1953,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
     }
     for (old, new) in &moves {
         let data = {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             store::sqlar_read(&eng.db, old)?
         };
         let Some(data) = data else { continue }; // vanished mid-move
@@ -2018,7 +2069,7 @@ pub fn import_csv(app: &Arc<App>, p: Value) -> Result<Value> {
         ),
     );
     let data = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         store::sqlar_read(&eng.db, file)?.ok_or_else(|| anyhow!("no such file: {file}"))?
     };
     let text = String::from_utf8_lossy(&data).to_string();
@@ -2089,4 +2140,47 @@ pub fn import_csv(app: &Arc<App>, p: Value) -> Result<Value> {
         }),
     )?;
     Ok(json!({"table": table, "rows": n, "columns": columns}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::openable_url;
+
+    #[test]
+    fn only_web_and_mail_links_open() {
+        for ok in [
+            "https://example.com/a?b",
+            "HTTP://x.y",
+            "mailto:a@b.c",
+            " https://x.y ",
+        ] {
+            assert!(openable_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "file:///etc/passwd",
+            "/usr/bin/xterm",
+            "C:\\Windows\\System32\\calc.exe",
+            "\\\\evil\\share\\x.exe",
+            "smb://evil/x",
+            "javascript:alert(1)",
+            "http:evil",
+            "https://x.y/\nfoo",
+            "ms-settings:",
+            "",
+        ] {
+            assert!(openable_url(bad).is_err(), "{bad:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    #[test]
+    fn the_up_front_check_parses_hosts_like_the_request_does() {
+        // ureq (WHATWG URL rules) treats `\` as `/`, so this is 127.0.0.1.
+        assert!(super::check_public_url("http://127.0.0.1:1\\@example.com/").is_err());
+        assert!(super::check_public_url("http://[::1]:8080/").is_err());
+        assert!(super::check_public_url("http://169.254.169.254/latest").is_err());
+        assert!(super::check_public_url("http://2130706433/").is_err());
+    }
 }

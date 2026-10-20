@@ -9,6 +9,7 @@
 //!     publishing) must refuse without the token — and work with it.
 //!   * `/site.uapp` must carry the site's own tables WITH rows, but no chat,
 //!     no `data/` files and no config secrets.
+//!
 //! And the write half: a `PUT /site.uapp` of an edited copy makes the served
 //! site match it without touching config, chat or history.
 
@@ -62,11 +63,24 @@ fn status(url: &str) -> u16 {
 fn body(url: &str) -> String {
     ureq::get(url).call().unwrap().into_string().unwrap()
 }
+/// The body whatever the status (ureq hands a 4xx back as an error), so a
+/// negative check reads what was really served.
 fn body_or_empty(url: &str) -> String {
-    ureq::get(url)
+    match ureq::get(url).call() {
+        Ok(r) | Err(ureq::Error::Status(_, r)) => r.into_string().unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+/// GET as the site owner: `Authorization: Bearer`, the way a script or the
+/// CLI would (`?t=` only opens the shell on a public site).
+fn owner_bytes(url: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let resp = ureq::get(url)
+        .set("Authorization", &format!("Bearer {TOKEN}"))
         .call()
-        .map(|r| r.into_string().unwrap_or_default())
-        .unwrap_or_default()
+        .unwrap();
+    std::io::Read::read_to_end(&mut resp.into_reader(), &mut out).unwrap();
+    out
 }
 fn bytes(url: &str) -> Vec<u8> {
     let mut out = Vec::new();
@@ -167,9 +181,29 @@ fn serves_pages_at_real_urls() {
     assert!(body(&format!("{base}/app/posts/hello")).contains("hello"));
     // A missing page gets the site's 404 document, with a 404 status...
     assert_eq!(status(&format!("{base}/nope")), 404);
-    assert!(body_or_empty(&format!("{base}/nope")).is_empty() || true);
+    assert!(body_or_empty(&format!("{base}/nope")).contains("no such page"));
+    // ...every time (it is cached once, not per missing path).
+    assert!(body_or_empty(&format!("{base}/nope2")).contains("no such page"));
     // ...but 404.html requested directly is a normal page.
     assert_eq!(status(&format!("{base}/404.html")), 200);
+    // Byte ranges, so audio/video on a site can seek.
+    let full = bytes(&format!("{base}/posts/hello.html"));
+    let r = ureq::get(&format!("{base}/posts/hello.html"))
+        .set("Range", "bytes=2-9")
+        .call()
+        .unwrap();
+    assert_eq!(r.status(), 206);
+    assert_eq!(
+        r.header("content-range"),
+        Some(format!("bytes 2-9/{}", full.len()).as_str())
+    );
+    let mut part = Vec::new();
+    std::io::Read::read_to_end(&mut r.into_reader(), &mut part).unwrap();
+    assert_eq!(part, full[2..=9]);
+    let past = ureq::get(&format!("{base}/posts/hello.html"))
+        .set("Range", &format!("bytes={}-", full.len() + 10))
+        .call();
+    assert_eq!(status_of(past, "range past the end"), 416);
     // The viewport meta is injected; `/uapp.js` (the privileged console
     // forwarder) is NOT.
     let home = body(&format!("{base}/"));
@@ -250,7 +284,9 @@ fn never_serves_user_data_and_refuses_privileged_routes_without_the_token() {
     // The shell itself needs the token; with it, the same URL is the editor.
     assert!(!body(&format!("{base}/")).contains("<shell-topbar"));
     assert!(body(&format!("{base}/?t={TOKEN}")).contains("<shell-topbar"));
-    assert!(body(&format!("{base}/download.uapp?t={TOKEN}")).starts_with("SQLite format 3"));
+    assert!(owner_bytes(&format!("{base}/download.uapp")).starts_with(b"SQLite format 3"));
+    // ...but a token in any other URL is refused: it would land in proxy logs.
+    assert_eq!(status(&format!("{base}/download.uapp?t={TOKEN}")), 403);
 }
 
 #[test]
@@ -416,7 +452,7 @@ fn publish_replaces_content_and_keeps_secrets() {
     assert_eq!(tags, 1);
 
     // What the copy never legitimately had is exactly what the server kept.
-    let ai: String = body(&format!("{base}/download.uapp?t={TOKEN}"));
+    let ai = String::from_utf8_lossy(&owner_bytes(&format!("{base}/download.uapp"))).into_owned();
     assert!(
         ai.contains("sk-LEAKED"),
         "server's own api key must survive a publish"
@@ -505,7 +541,7 @@ fn publish_refuses_a_stale_copy_and_junk() {
     assert!(body(&format!("{base}/")).contains(">B<"));
     // With --publish-data the copy's data/ is authoritative: B has none, so
     // A's file is gone from the archive (it lives on in the file history).
-    let full = bytes(&format!("{base}/download.uapp?t={TOKEN}"));
+    let full = owner_bytes(&format!("{base}/download.uapp"));
     let out = tmp("full.uapp");
     std::fs::write(&out, &full).unwrap();
     let c = rusqlite::Connection::open(&out).unwrap();

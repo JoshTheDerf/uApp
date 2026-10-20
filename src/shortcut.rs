@@ -139,12 +139,68 @@ fn default_entry(name: &str) -> Option<PathBuf> {
 
 /// Delete one created entry: macOS installs are a directory bundle, the rest
 /// plain files. Returns whether something actually existed and was removed.
+///
+/// The paths come from the install record in prefs.json, which is not ours
+/// alone (another process, or an older build's `prefs.set` over the wire,
+/// could have written it), so only something `install` could have created is
+/// deleted: see [`ours`].
 fn remove_path(p: &Path) -> bool {
+    if !ours(p) {
+        eprintln!(
+            "uapp: not removing {}: not a launcher entry uapp created",
+            p.display()
+        );
+        return false;
+    }
     match std::fs::symlink_metadata(p) {
         Ok(m) if m.is_dir() => std::fs::remove_dir_all(p).is_ok(),
         Ok(_) => std::fs::remove_file(p).is_ok(),
         Err(_) => false,
     }
+}
+
+/// Could `install` have created `p`? It must sit directly in one of the
+/// directories install writes to, with the name shape install gives it there:
+///   * Linux: `<data>/applications/uapp-*.desktop`;
+///   * Windows: `*.lnk` in the Start Menu's `uapp` folder or on the desktop;
+///   * macOS: a `~/Applications/*.app` bundle with our `uapp-launch` inside;
+///   * any platform: a `.png`/`.ico` in uapp's own icons folder.
+///
+/// The parent is compared after resolving symlinks, so a link can't smuggle
+/// in a different directory.
+fn ours(p: &Path) -> bool {
+    let (Some(parent), Some(name)) = (p.parent(), p.file_name().and_then(|n| n.to_str())) else {
+        return false;
+    };
+    let Ok(parent) = parent.canonicalize() else {
+        return false;
+    };
+    let is = |dir: Option<PathBuf>| {
+        dir.and_then(|d| d.canonicalize().ok())
+            .is_some_and(|d| d == parent)
+    };
+    let data = dirs::data_dir();
+    if is(data.as_ref().map(|d| d.join("uapp").join("icons")))
+        && (name.ends_with(".png") || name.ends_with(".ico"))
+    {
+        return true;
+    }
+    if cfg!(target_os = "linux") {
+        return is(data.as_ref().map(|d| d.join("applications")))
+            && name.starts_with("uapp-")
+            && name.ends_with(".desktop");
+    }
+    if cfg!(windows) {
+        return name.ends_with(".lnk")
+            && (is(data.map(|d| d.join("Microsoft\\Windows\\Start Menu\\Programs\\uapp")))
+                || is(dirs::desktop_dir()));
+    }
+    if cfg!(target_os = "macos") {
+        return is(dirs::home_dir().map(|h| h.join("Applications")))
+            && name.ends_with(".app")
+            && p.join("Contents/MacOS/uapp-launch").is_file();
+    }
+    false
 }
 
 // ---- Install record in machine-local prefs: {"shortcuts": {<app_id>: …}} ---

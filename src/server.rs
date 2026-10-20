@@ -61,8 +61,7 @@ fn host_is_local(headers: &HeaderMap) -> bool {
     let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) else {
         return true; // HTTP/1.0 / some native webviews omit Host
     };
-    let hostname = hostname_of(host);
-    matches!(hostname, "localhost" | "127.0.0.1" | "::1") || hostname.starts_with("127.")
+    is_loopback(hostname_of(host))
 }
 
 /// `host[:port]` -> `host`, with `[::1]:port` handled.
@@ -75,35 +74,121 @@ fn hostname_of(hostport: &str) -> &str {
 
 /// Does this request carry the token (`?t=`, the cookie, or `Authorization:
 /// Bearer`)? In private mode a non-loopback Host fails outright (DNS rebinding).
-fn authed(app: &App, headers: &HeaderMap, query: Option<&str>) -> bool {
+///
+/// On a public site `?t=` only opens the shell (`GET /`, which then sets the
+/// cookie): anywhere else a token in the URL would end up in proxy and CDN
+/// logs for nothing, since the shell's own requests carry the cookie and a
+/// publish sends `Authorization: Bearer`.
+fn authed(app: &App, headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    use crate::secrets::token_eq;
     if app.public.is_none() && !host_is_local(headers) {
         return false;
     }
     if app.token.is_empty() {
         return false;
     }
-    let q_token = query
+    let url_token_ok = app.public.is_none() || uri.path() == "/";
+    let q_token = uri
+        .query()
         .unwrap_or("")
         .split('&')
         .find_map(|kv| kv.strip_prefix("t="));
-    if q_token == Some(app.token.as_str()) {
+    if url_token_ok && q_token.is_some_and(|t| token_eq(t, &app.token)) {
         return true;
     }
     if headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| t.trim() == app.token)
-        .unwrap_or(false)
+        .is_some_and(|t| token_eq(t.trim(), &app.token))
     {
         return true;
     }
-    let want = format!("{}={}", cookie_name(app), app.token);
+    let name = cookie_name(app);
     headers
-        .get(header::COOKIE)
-        .and_then(|c| c.to_str().ok())
-        .map(|c| c.split(';').any(|kv| kv.trim() == want))
-        .unwrap_or(false)
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|c| c.to_str().ok())
+        .flat_map(|c| c.split(';'))
+        .filter_map(|kv| kv.trim().split_once('='))
+        .any(|(k, v)| k == name && token_eq(v, &app.token))
+}
+
+/// Did this request come from one of our own pages, or from no browser at all?
+///
+/// The token cookie can't tell: cookies aren't scoped to a port, so a page on
+/// any other loopback port is "same-site" and the browser sends our
+/// SameSite=Strict cookie along with its requests (a cross-port
+/// `POST /upload` as text/plain needs no preflight and used to land). So on
+/// top of the token, a browser request must say it is same-origin:
+///   * `Sec-Fetch-Site`, when present, is `same-origin` or `none` (typed in,
+///     a bookmark, the native window's first load);
+///   * `Origin`, when present, is exactly our own scheme://host:port. Browsers
+///     send it on every WebSocket handshake and every non-GET request, so its
+///     absence there means a non-browser client (the CLI, curl, the tests),
+///     which has to present the token itself.
+fn from_own_origin(app: &App, headers: &HeaderMap) -> bool {
+    if let Some(site) = headers.get("sec-fetch-site") {
+        if !matches!(site.to_str(), Ok("same-origin" | "none")) {
+            return false;
+        }
+    }
+    match headers.get(header::ORIGIN) {
+        Some(o) => o.to_str().is_ok_and(|o| origin_is_self(app, headers, o)),
+        None => true,
+    }
+}
+
+/// `origin` (scheme://host[:port]) names the host and port this request was
+/// sent to. The Host header says what that was; in private mode it must also
+/// be our loopback port (DNS rebinding is refused earlier, by Host).
+fn origin_is_self(app: &App, headers: &HeaderMap, origin: &str) -> bool {
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false; // "null" (sandboxed frames, file://) and junk
+    };
+    let default = match scheme {
+        "http" => 80,
+        "https" => 443,
+        _ => return false,
+    };
+    let Some((host, port)) = host_and_port(authority, default) else {
+        return false;
+    };
+    let ours = app.port.load(std::sync::atomic::Ordering::Relaxed);
+    if app.public.is_none() && (port != ours || !is_loopback(&host)) {
+        return false;
+    }
+    match headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
+        Some(h) => host_and_port(h, default) == Some((host, port)),
+        None => app.public.is_none(),
+    }
+}
+
+/// `host[:port]` (as in a Host header or an origin) -> lowercased host and the
+/// port, `default` when none is given. `[::1]:8080` style included.
+fn host_and_port(authority: &str, default: u16) -> Option<(String, u16)> {
+    if authority.is_empty() || authority.contains(['/', '@', ' ']) {
+        return None;
+    }
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(v6) => {
+            let (h, rest) = v6.split_once(']')?;
+            (h, rest.strip_prefix(':'))
+        }
+        None => match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        },
+    };
+    let port = match port {
+        Some(p) => p.parse().ok()?,
+        None => default,
+    };
+    Some((host.to_ascii_lowercase(), port))
+}
+
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
 }
 
 /// Who is asking — decided ONCE per request, by these two extractors, so no
@@ -130,10 +215,12 @@ impl axum::extract::FromRequestParts<Arc<App>> for Owner {
         parts: &mut axum::http::request::Parts,
         app: &Arc<App>,
     ) -> Result<Self, Response> {
-        if authed(app, &parts.headers, parts.uri.query()) {
-            Ok(Owner)
-        } else {
+        if !authed(app, &parts.headers, &parts.uri) {
             Err(deny())
+        } else if !from_own_origin(app, &parts.headers) {
+            Err(cross_origin())
+        } else {
+            Ok(Owner)
         }
     }
 }
@@ -145,7 +232,9 @@ impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
         parts: &mut axum::http::request::Parts,
         app: &Arc<App>,
     ) -> Result<Self, Response> {
-        if authed(app, &parts.headers, parts.uri.query()) {
+        // A token-holder's request from another origin is no owner's: on a
+        // public site it still gets what any reader gets.
+        if authed(app, &parts.headers, &parts.uri) && from_own_origin(app, &parts.headers) {
             Ok(Visitor::Owner)
         } else if app.public.is_some() {
             Ok(Visitor::Reader)
@@ -157,6 +246,14 @@ impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
 
 fn deny() -> Response {
     (StatusCode::FORBIDDEN, "uapp: missing or bad token").into_response()
+}
+
+fn cross_origin() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        "uapp: refused a request from another origin",
+    )
+        .into_response()
 }
 
 pub(crate) fn html_escape(s: &str) -> String {
@@ -188,7 +285,7 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
     // arrives a round trip late means the bar paints and then vanishes, which
     // reads as a glitch every single time the app is opened.
     let topbar_class = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let saved = crate::store::config_get(&eng.db, "toolbar").ok().flatten();
         if crate::toolbar::settings(saved.as_ref())["hidden"] == json!(true) {
             " class=\"hidden\""
@@ -204,26 +301,57 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
             .replace("{{TOPBAR_CLASS}}", topbar_class),
     )
     .into_response();
-    // Refresh the cookie so the iframe + ws can auth without the token in URL.
-    resp.headers_mut().insert(
-        header::SET_COOKIE,
-        // HttpOnly: app pages run arbitrary (AI-written) JS on this origin and
-        // must not be able to read the token — on a public site it is the
-        // publish secret. Secure there too: never over plain HTTP.
-        format!(
-            "{}={}; Path=/; SameSite=Strict; HttpOnly{}",
-            cookie_name(&app),
-            app.token,
-            if app.public.is_some() { "; Secure" } else { "" }
-        )
-        .parse()
-        .unwrap(),
-    );
+    // Refresh the cookie so the iframe + ws can auth without the token in URL
+    // (the shell then drops ?t= from the address bar, see core.js).
+    // HttpOnly: app pages run arbitrary (AI-written) JS on this origin and
+    // must not be able to read the token — on a public site it is the
+    // publish secret. Secure there too: never over plain HTTP. The token was
+    // checked to be cookie-safe at startup (`secrets::check_token`).
+    if let Ok(v) = header::HeaderValue::from_str(&format!(
+        "{}={}; Path=/; SameSite=Strict; HttpOnly{}",
+        cookie_name(&app),
+        app.token,
+        if app.public.is_some() { "; Secure" } else { "" }
+    )) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
     // The shell is embedded in the binary and changes on every upgrade;
     // stale-cached shells would keep showing the old UI.
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    if let Ok(csp) = header::HeaderValue::from_str(&shell_csp(&headers)) {
+        resp.headers_mut()
+            .insert(header::CONTENT_SECURITY_POLICY, csp);
+    }
     resp
+}
+
+/// The shell document's CSP. The shell's own code is all served files (no
+/// inline script, no eval), so script-src 'self' holds, and anything injected
+/// into it (a hostile app name, chat markdown) can't run. Styles stay inline
+/// because the Web Components carry theirs in their templates. frame-src is
+/// broad on purpose: it governs where the APP frame may navigate, and an app
+/// may take its own frame anywhere. The socket is named explicitly since older
+/// WebKit doesn't count ws: as 'self'. Only the shell gets this; app pages run
+/// whatever their authors wrote and get just frame-ancestors (see
+/// `security_headers`).
+fn shell_csp(headers: &HeaderMap) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|h| {
+            h.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+        });
+    let sockets = host
+        .map(|h| format!(" ws://{h} wss://{h}"))
+        .unwrap_or_default();
+    format!(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; \
+         connect-src 'self'{sockets}; frame-src 'self' blob: http: https:; worker-src 'self'; \
+         object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"
+    )
 }
 
 fn static_asset(body: &'static str, ctype: &'static str) -> Response {
@@ -325,7 +453,7 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
     // "posts/x" -> posts/x/index.html, "admin" -> admin.html. Generated sites
     // (and the public `uapp serve` router) link this way.
     let (data, name) = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let mut found = (crate::store::sqlar_read(&eng.db, name), name.to_string());
         if matches!(found.0, Ok(None)) {
             let bare = name.trim_end_matches('/');
@@ -555,7 +683,7 @@ async fn app_root(state: State<Arc<App>>, who: Visitor, headers: HeaderMap) -> R
 async fn health(State(app): State<Arc<App>>) -> Response {
     // The key names WHICH file this server has open: a stale registry entry
     // whose port was recycled by another uapp must not be mistaken for ours.
-    let key = crate::registry::key(&app.engine.lock().unwrap().path);
+    let key = crate::registry::key(&app.eng().path);
     // Android's chat keep-alive service polls this to know when it can stop
     // holding the process out of the cached-apps freezer.
     let busy = if app.ai_busy_any() { "1" } else { "0" };
@@ -575,7 +703,7 @@ async fn health(State(app): State<Arc<App>>) -> Response {
 /// shell button just navigates here.
 async fn template_download(State(app): State<Arc<App>>, _who: Owner) -> Response {
     let result = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let name = app_display_name(&eng);
         crate::store::export_template(&eng.db, &name).map(|b| (b, name))
     };
@@ -593,7 +721,7 @@ async fn template_download(State(app): State<Arc<App>>, _who: Owner) -> Response
 /// save a scratch/unsaved app, but works for any app.
 async fn app_download(State(app): State<Arc<App>>, _who: Owner) -> Response {
     let result = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let name = app_display_name(&eng);
         crate::store::export_full(&eng.db, eng.crypt.as_ref().map(|k| k.passphrase.as_str()))
             .map(|b| (b, name))
@@ -666,49 +794,27 @@ async fn scratch_page(_who: Owner) -> Response {
     resp
 }
 
-async fn ws_route(
-    State(app): State<Arc<App>>,
-    _who: Owner,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Response {
+async fn ws_route(State(app): State<Arc<App>>, _who: Owner, ws: WebSocketUpgrade) -> Response {
     // File uploads travel as base64 inside an RPC frame, so the socket has to
     // carry MAX_UPLOAD_BYTES * 4/3 plus JSON overhead (the defaults are 64/16
     // MiB, and an over-size frame kills the whole connection).
     let ws = ws
         .max_message_size(crate::rpc::MAX_UPLOAD_B64 + 4 * 1024 * 1024)
         .max_frame_size(crate::rpc::MAX_UPLOAD_B64 + 4 * 1024 * 1024);
-    // Cross-origin WebSocket connects aren't blocked by the same-origin policy,
-    // so reject any Origin that isn't our own loopback (defense in depth on top
-    // of the token). A missing Origin is a non-browser client (native webview,
-    // tests) and is allowed.
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
-        let ok = origin
-            .split("//")
-            .nth(1)
-            .map(|hostport| {
-                let host = hostname_of(hostport);
-                if app.public.is_some() {
-                    // A public site is its own origin: the page that opened
-                    // the socket must have come from the Host we were asked for.
-                    headers
-                        .get(header::HOST)
-                        .and_then(|h| h.to_str().ok())
-                        .map(|h| hostname_of(h) == host)
-                        .unwrap_or(false)
-                } else {
-                    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
-                }
-            })
-            .unwrap_or(false);
-        if !ok {
-            return deny();
-        }
-    }
+    // Cross-origin WebSocket connects aren't blocked by the same-origin
+    // policy; the Owner extractor has already required our own Origin.
     ws.on_upgrade(move |socket| ws_conn(app, socket))
 }
 
 static CONN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// How much one connection may have running at once. Every RPC takes a
+/// blocking-pool thread until it returns (some wait minutes on a prompt), and
+/// its message stays in memory meanwhile, so a request costs 1 plus 1 per MiB
+/// of message. Over budget, the request is refused straight away rather than
+/// queued: queuing would stop this socket being read, and the replies that
+/// in-flight calls are waiting for (an app action's result) arrive on it.
+const CONN_BUDGET: usize = 256;
 
 async fn ws_conn(app: Arc<App>, socket: WebSocket) {
     struct ClientGuard(Arc<App>, u64);
@@ -722,6 +828,7 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
     let mut events = app.events.subscribe();
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(256);
+    let budget = Arc::new(tokio::sync::Semaphore::new(CONN_BUDGET));
     {
         let tx = out_tx.clone();
         app.conn_open(
@@ -778,10 +885,21 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
             }
             continue;
         }
+        let cost = (1 + (text.len() >> 20)).min(CONN_BUDGET) as u32;
+        let Ok(permit) = budget.clone().try_acquire_many_owned(cost) else {
+            if !id.is_null() {
+                let msg = "too many requests in flight on this connection; wait for some to finish";
+                let _ = out_tx
+                    .send(json!({"id": id, "error": {"message": msg}}).to_string())
+                    .await;
+            }
+            continue;
+        };
         let app2 = app.clone();
         let out = out_tx.clone();
         // Each request handled on the blocking pool (SQLite is sync).
         tokio::spawn(async move {
+            let _permit = permit;
             let result = tokio::task::spawn_blocking(move || {
                 crate::rpc::dispatch_untrusted(&app2, &method, params)
             })
@@ -813,16 +931,41 @@ pub async fn run_unlock(
     path: &std::path::Path,
 ) -> anyhow::Result<String> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
+    let gate = Arc::new(UnlockGate {
+        port: listener.local_addr()?.port(),
+        tries: tokio::sync::Mutex::new(Tries::default()),
+    });
     loop {
         tokio::select! {
             pw = rx.recv() => return pw.ok_or_else(|| anyhow::anyhow!("unlock cancelled")),
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                tokio::spawn(handle_unlock_conn(stream, path.to_path_buf(), tx.clone()));
+                tokio::spawn(handle_unlock_conn(stream, path.to_path_buf(), tx.clone(), gate.clone()));
             }
         }
     }
 }
+
+/// What every unlock connection shares. The page is reachable by anything
+/// that can reach the port, so password guesses are rate-limited: one at a
+/// time (the lock is held while a guess is checked), and after a few misses
+/// each further guess has to wait, twice as long every time.
+struct UnlockGate {
+    port: u16,
+    tries: tokio::sync::Mutex<Tries>,
+}
+
+#[derive(Default)]
+struct Tries {
+    failures: u32,
+    not_before: Option<tokio::time::Instant>,
+}
+
+/// Misses allowed before the waiting starts (typos happen).
+const UNLOCK_FREE_TRIES: u32 = 3;
+const UNLOCK_MAX_WAIT_SECS: u64 = 60;
+/// A password is never this long; anything bigger isn't a real attempt.
+const UNLOCK_MAX_BODY: usize = 4096;
 
 /// Answer every request on this already-bound listener with one fixed response
 /// for up to `secs` seconds, then return. Used when the browser/native window
@@ -864,10 +1007,16 @@ pub async fn run_notice(
 
 /// One unlock connection: GET anything → the password page; POST /unlock →
 /// verify. On success, reply then hand the password to `run_unlock` via `tx`.
+///
+/// Hand-rolled, so the same rules as the real server are spelled out here: a
+/// loopback Host (DNS rebinding), and for the POST an Origin of exactly this
+/// page plus a JSON body (so another site can't submit guesses with a form or
+/// a no-preflight fetch), at most 4 KB of it.
 async fn handle_unlock_conn(
     mut stream: tokio::net::TcpStream,
     path: std::path::PathBuf,
     tx: tokio::sync::mpsc::Sender<String>,
+    gate: Arc<UnlockGate>,
 ) {
     use tokio::io::AsyncReadExt;
     // Read the request head (up to the blank line) plus any body bytes with it.
@@ -889,19 +1038,67 @@ async fn handle_unlock_conn(
     let mut req = head.split("\r\n").next().unwrap_or("").split(' ');
     let method = req.next().unwrap_or("");
     let route = req.next().unwrap_or("/").split('?').next().unwrap_or("/");
+    let header = |name: &str| {
+        head.split("\r\n").skip(1).find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| v.trim().to_string())
+        })
+    };
+    let host = header("host");
+    if let Some(h) = &host {
+        if !host_and_port(h, 80).is_some_and(|(h, _)| is_loopback(&h)) {
+            let _ = write_status(
+                &mut stream,
+                "403 Forbidden",
+                "application/json",
+                br#"{"ok":false}"#,
+            )
+            .await;
+            return;
+        }
+    }
 
     if method == "POST" && route == "/unlock" {
-        let clen = head
-            .split("\r\n")
-            .find_map(|l| {
-                let (k, v) = l.split_once(':')?;
-                if k.trim().eq_ignore_ascii_case("content-length") {
-                    v.trim().parse::<usize>().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
+        let refuse = |status: &'static str, msg: &str| {
+            (status, json!({"ok": false, "error": msg}).to_string())
+        };
+        let origin_ok = match (header("origin"), &host) {
+            (Some(o), Some(h)) => {
+                o == format!("http://{h}")
+                    && host_and_port(h, 80).is_some_and(|(_, p)| p == gate.port)
+            }
+            _ => false,
+        };
+        let is_json = header("content-type").is_some_and(|c| {
+            c.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        });
+        let clen = header("content-length").and_then(|v| v.parse::<usize>().ok());
+        let early = if !origin_ok {
+            Some(refuse(
+                "403 Forbidden",
+                "This page can only be used from the app's own window.",
+            ))
+        } else if !is_json {
+            Some(refuse("415 Unsupported Media Type", "Expected JSON."))
+        } else if clen.unwrap_or(usize::MAX) > UNLOCK_MAX_BODY {
+            Some(refuse(
+                "413 Payload Too Large",
+                "That request is too large.",
+            ))
+        } else {
+            None
+        };
+        if let Some((status, body)) = early {
+            let _ = write_status(&mut stream, status, "application/json", body.as_bytes()).await;
+            return;
+        }
+        let clen = clen.unwrap_or(0);
         let mut body = buf[head_end + 4..].to_vec();
         while body.len() < clen {
             match stream.read(&mut chunk).await {
@@ -909,16 +1106,40 @@ async fn handle_unlock_conn(
                 Ok(n) => body.extend_from_slice(&chunk[..n]),
             }
         }
+        body.truncate(clen);
         let pw = serde_json::from_slice::<Value>(&body)
             .ok()
             .and_then(|v| v["password"].as_str().map(str::to_string))
             .unwrap_or_default();
+
+        // One guess at a time, and none before the back-off has passed.
+        let mut tries = gate.tries.lock().await;
+        let now = tokio::time::Instant::now();
+        if let Some(t) = tries.not_before.filter(|t| *t > now) {
+            let secs = (t - now).as_secs() + 1;
+            let msg = format!("Too many wrong passwords. Try again in {secs} s.");
+            let (status, body) = refuse("429 Too Many Requests", &msg);
+            drop(tries);
+            let _ = write_status(&mut stream, status, "application/json", body.as_bytes()).await;
+            return;
+        }
         let ok = !pw.is_empty() && {
             let (p, pw) = (path.clone(), pw.clone());
             tokio::task::spawn_blocking(move || crate::cipher::open_file(&p, &pw).is_ok())
                 .await
                 .unwrap_or(false)
         };
+        if ok {
+            *tries = Tries::default();
+        } else {
+            tries.failures += 1;
+            if tries.failures >= UNLOCK_FREE_TRIES {
+                let wait = 1u64 << (tries.failures - UNLOCK_FREE_TRIES).min(6);
+                tries.not_before =
+                    Some(now + std::time::Duration::from_secs(wait.min(UNLOCK_MAX_WAIT_SECS)));
+            }
+        }
+        drop(tries);
         let json = if ok {
             r#"{"ok":true}"#
         } else {
@@ -943,9 +1164,20 @@ async fn write_http(
     content_type: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
+    write_status(stream, "200 OK", content_type, body).await
+}
+
+async fn write_status(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
     let head = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\ncache-control: no-store\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\ncontent-type: {}\r\ncontent-length: {}\r\ncache-control: no-store\r\n\
+         x-content-type-options: nosniff\r\ncontent-security-policy: frame-ancestors 'none'\r\n\
+         connection: close\r\n\r\n",
         content_type,
         body.len()
     );
@@ -1126,9 +1358,10 @@ pub fn router(app: Arc<App>) -> Router {
         .with_state(app)
 }
 
-/// Baseline security headers on every response. Deliberately no CSP: app pages
-/// run their own JS/styles by design, so a restrictive policy would break them
-/// — origin isolation of untrusted apps is a separate, larger change.
+/// Baseline security headers on every response. App pages get no script
+/// policy: they run their own JS/styles by design, so a restrictive one would
+/// break them (origin isolation of untrusted apps is a separate, larger
+/// change; see docs/design/app-isolation.md). They do get frame-ancestors.
 ///
 /// A public site that opted in (`--coi`) gets COOP/COEP on its documents so
 /// the editing chrome is cross-origin isolated from birth (SharedArrayBuffer
@@ -1146,6 +1379,14 @@ async fn security_headers(State(app): State<Arc<App>>, mut resp: Response) -> Re
         header::X_CONTENT_TYPE_OPTIONS,
         header::HeaderValue::from_static("nosniff"),
     );
+    // Nothing here may be framed by another origin: the shell (clickjacking
+    // its Allow buttons) least of all. The shell sets a full policy of its own.
+    if !h.contains_key(header::CONTENT_SECURITY_POLICY) {
+        h.insert(
+            header::CONTENT_SECURITY_POLICY,
+            header::HeaderValue::from_static("frame-ancestors 'self'"),
+        );
+    }
     match app.public {
         None => {
             h.insert(
@@ -1262,9 +1503,11 @@ pub(crate) fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Read one archive entry by its EXACT name. `store::sqlar_read` is the wrong
-/// tool for an anonymous request — see the module header.
-fn read_exact(db: &rusqlite::Connection, name: &str) -> Option<Vec<u8>> {
+/// Read one archive entry by its EXACT name, still compressed: `(sz, data)`
+/// as stored, inflated by the caller outside the engine lock.
+/// `store::sqlar_read` is the wrong tool for an anonymous request — see the
+/// module header.
+fn read_exact_raw(db: &rusqlite::Connection, name: &str) -> Option<(Option<i64>, Vec<u8>)> {
     let mut stmt = db
         .prepare("SELECT sz, data FROM sqlar WHERE name=?1")
         .ok()?;
@@ -1272,14 +1515,14 @@ fn read_exact(db: &rusqlite::Connection, name: &str) -> Option<Vec<u8>> {
     let row = rows.next().ok()??;
     let sz: Option<i64> = row.get(0).ok()?;
     let data: Option<Vec<u8>> = row.get(1).ok()?; // NULL = directory entry
-    crate::store::sqlar_inflate(sz, data?, name).ok()
+    Some((sz, data?))
 }
 
 /// Map a request path to an `app/` name the way a static host would: `/` and
 /// `/posts/` get `index.html`, and an extensionless path tries `<p>.html`
 /// then `<p>/index.html`, so posts can be linked as `/posts/hello` as well as
 /// `/posts/hello.html`.
-fn resolve_public(db: &rusqlite::Connection, path: &str) -> Option<(String, Vec<u8>)> {
+fn resolve_public(db: &rusqlite::Connection, path: &str) -> Option<(String, Option<i64>, Vec<u8>)> {
     let p = path.trim_start_matches('/');
     if p.contains("..") || p.contains('\\') {
         return None;
@@ -1296,7 +1539,7 @@ fn resolve_public(db: &rusqlite::Connection, path: &str) -> Option<(String, Vec<
     }
     tries
         .into_iter()
-        .find_map(|name| read_exact(db, &name).map(|b| (name, b)))
+        .find_map(|name| read_exact_raw(db, &name).map(|(sz, b)| (name, sz, b)))
 }
 
 /// Add `<meta name="viewport">` when the document lacks one, and — when the
@@ -1379,26 +1622,16 @@ fn strip_wasm_marker(text: &str) -> String {
 }
 
 /// An anonymous visitor's view of the site: one `app/` page (or the site's
-/// `404.html`), with cache validators so a CDN or browser can revalidate.
+/// `404.html`), with cache validators so a CDN or browser can revalidate, and
+/// byte ranges so media can seek.
 fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
     let opts = app.public.unwrap_or_default();
-    let found = {
-        let eng = app.engine.lock().unwrap();
-        resolve_public(&eng.db, path).or_else(|| {
-            read_exact(&eng.db, "app/404.html").map(|b| ("app/404.html".to_string(), b))
-        })
-    };
-    let Some((name, bytes)) = found else {
+    let Some(page) = public_lookup(app, path) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    let is_404 = name == "app/404.html" && path.trim_start_matches('/') != "404.html";
-    let ctype = content_type_for(&name);
+    let is_404 = page.name == "app/404.html" && path.trim_start_matches('/') != "404.html";
+    let ctype = content_type_for(&page.name);
     let is_html = ctype.starts_with("text/html");
-    let bytes = if is_html {
-        inject_chrome(bytes, app.chrome.as_ref().map(|c| c.version.as_str()))
-    } else {
-        bytes
-    };
     let cache = if is_html {
         // Always revalidate: a reload must get the server's authoritative copy.
         "public, max-age=0, must-revalidate".to_string()
@@ -1414,7 +1647,7 @@ fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
             format!("public, max-age={}", opts.asset_max_age)
         }
     };
-    let etag = etag_for(&bytes);
+    let etag = page.etag.clone();
     if !is_404 && if_none_match(headers, &etag) {
         return (
             StatusCode::NOT_MODIFIED,
@@ -1422,30 +1655,139 @@ fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
         )
             .into_response();
     }
-    (
-        if is_404 {
-            StatusCode::NOT_FOUND
-        } else {
-            StatusCode::OK
-        },
-        [
-            (header::CONTENT_TYPE, ctype.to_string()),
-            (header::ETAG, etag),
-            (header::CACHE_CONTROL, cache),
-        ],
-        bytes,
-    )
-        .into_response()
+    let total = page.body.len() as u64;
+    // The cached page itself becomes the body: no copy per request.
+    let body = axum::body::Bytes::from_owner(SharedBody(page));
+    let range = if is_404 {
+        None
+    } else {
+        parse_range(headers, total)
+    };
+    match range {
+        Some(Ok((start, end))) => (
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (header::CONTENT_TYPE, ctype.to_string()),
+                (header::ETAG, etag),
+                (header::CACHE_CONTROL, cache),
+                (header::ACCEPT_RANGES, "bytes".to_string()),
+                (
+                    header::CONTENT_RANGE,
+                    format!("bytes {start}-{end}/{total}"),
+                ),
+            ],
+            body.slice(start as usize..=end as usize),
+        )
+            .into_response(),
+        Some(Err(())) => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [(header::CONTENT_RANGE, format!("bytes */{total}"))],
+            "range not satisfiable",
+        )
+            .into_response(),
+        None => (
+            if is_404 {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            },
+            [
+                (header::CONTENT_TYPE, ctype.to_string()),
+                (header::ETAG, etag),
+                (header::CACHE_CONTROL, cache),
+                (header::ACCEPT_RANGES, "bytes".to_string()),
+            ],
+            body,
+        )
+            .into_response(),
+    }
 }
 
-/// When the site's content last changed (unix seconds); a HEAD is enough to
-/// read it. The editing chrome compares it with the copy it downloaded.
+/// A shared, immutable response body (cached page or archive) handed to the
+/// HTTP layer without copying it.
+struct SharedBody<T>(Arc<T>);
+
+impl<T: AsRef<[u8]>> AsRef<[u8]> for SharedBody<T> {
+    fn as_ref(&self) -> &[u8] {
+        (*self.0).as_ref()
+    }
+}
+
+/// Pages bigger than this are served but not kept (a video can be huge), and
+/// the whole cache is dropped when it would grow past the total.
+const PAGE_CACHE_ENTRY_MAX: usize = 8 * 1024 * 1024;
+const PAGE_CACHE_TOTAL_MAX: usize = 64 * 1024 * 1024;
+/// The site's 404 page is cached once under this key, not once per missing
+/// path (which anyone could use to fill the cache).
+const NOT_FOUND_KEY: &str = ":404"; // request paths all start with '/'
+
+/// The page for `path`, from the cache when nothing was written since it was
+/// built. On a miss the engine lock is held only to read the stored
+/// (compressed) rows; inflating and injecting happen after it is released.
+fn public_lookup(app: &App, path: &str) -> Option<Arc<crate::app::CachedPage>> {
+    let writes = app.eng().writes;
+    {
+        let c = crate::app::lock(&app.page_cache);
+        if c.writes == writes {
+            if let Some(p) = c.pages.get(path) {
+                return Some(p.clone());
+            }
+        }
+    }
+    let (found, not_found, writes) = {
+        let eng = app.eng();
+        let found = resolve_public(&eng.db, path);
+        let cached_404 = {
+            let c = crate::app::lock(&app.page_cache);
+            (c.writes == eng.writes)
+                .then(|| c.pages.get(NOT_FOUND_KEY).cloned())
+                .flatten()
+        };
+        let not_found = match (&found, cached_404) {
+            (Some(_), _) => None,
+            (None, Some(p)) => return Some(p),
+            (None, None) => read_exact_raw(&eng.db, "app/404.html"),
+        };
+        (found, not_found, eng.writes)
+    };
+    let (key, name, sz, data) = match (found, not_found) {
+        (Some((name, sz, data)), _) => (path.to_string(), name, sz, data),
+        (None, Some((sz, data))) => (NOT_FOUND_KEY.to_string(), "app/404.html".into(), sz, data),
+        (None, None) => return None,
+    };
+    let bytes = crate::store::sqlar_inflate(sz, data, &name).ok()?;
+    let body = if content_type_for(&name).starts_with("text/html") {
+        inject_chrome(bytes, app.chrome.as_ref().map(|c| c.version.as_str()))
+    } else {
+        bytes
+    };
+    let page = Arc::new(crate::app::CachedPage {
+        etag: etag_for(&body),
+        name,
+        body,
+    });
+    let len = page.body.len();
+    if len <= PAGE_CACHE_ENTRY_MAX {
+        let mut c = crate::app::lock(&app.page_cache);
+        if c.writes != writes || c.bytes + len > PAGE_CACHE_TOTAL_MAX {
+            *c = crate::app::PageCache {
+                writes,
+                ..Default::default()
+            };
+        }
+        if let Some(old) = c.pages.insert(key, page.clone()) {
+            c.bytes -= old.body.len();
+        }
+        c.bytes += len;
+    }
+    Some(page)
+}
 
 /// The current `/site.uapp`, rebuilt only when something was written since.
 fn current_archive(app: &App) -> anyhow::Result<Arc<crate::app::PublicArchive>> {
     let opts = app.public.unwrap_or_default();
-    let eng = app.engine.lock().unwrap();
-    let mut cache = app.archive_cache.lock().unwrap();
+    let eng = app.eng();
+    let mut cache = crate::app::lock(&app.archive_cache);
     if let Some((gen, arc)) = cache.as_ref() {
         if *gen == eng.writes {
             return Ok(arc.clone());
@@ -1496,7 +1838,7 @@ async fn site_archive(State(app): State<Arc<App>>, headers: HeaderMap) -> Respon
                 "public, max-age=0, must-revalidate".to_string(),
             ),
         ],
-        arc.bytes.clone(),
+        axum::body::Bytes::from_owner(SharedBody(arc)),
     )
         .into_response()
 }
@@ -1540,7 +1882,7 @@ async fn site_publish(
             }
         }
         // Rescue point before a whole-site change, like a template update.
-        if let Err(e) = app.engine.lock().unwrap().snapshot() {
+        if let Err(e) = app.eng().snapshot() {
             eprintln!("uapp: snapshot before publish failed: {e:#}");
         }
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body);

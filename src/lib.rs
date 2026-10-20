@@ -23,6 +23,7 @@ pub mod prefs;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod registry;
 pub mod rpc;
+pub mod secrets;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 #[cfg(not(target_arch = "wasm32"))]
@@ -147,7 +148,7 @@ mod native_serve {
             }
         };
 
-        let token: String = (0..32).map(|_| fastrand::alphanumeric()).collect();
+        let token = secrets::new_token();
         let rt = tokio::runtime::Runtime::new()?;
         let mut passphrase = passphrase;
         let mut on_ready = Some(on_ready);
@@ -165,7 +166,7 @@ mod native_serve {
         if store::is_encrypted_file(&path) {
             let have_valid = passphrase
                 .as_deref()
-                .map_or(false, |pw| crate::cipher::open_file(&path, pw).is_ok());
+                .is_some_and(|pw| crate::cipher::open_file(&path, pw).is_ok());
             if !have_valid {
                 // Already open (and unlocked) on this machine? Redirect to it
                 // instead of prompting a second time.
@@ -228,6 +229,11 @@ mod native_serve {
             }
         };
         let app = Arc::new(app::App::new(eng, token.clone(), unsaved));
+        // Keys and credentials an older build kept in the file move to this
+        // machine (see secrets.rs) before anything can read them.
+        if let Err(e) = secrets::migrate(&app) {
+            eprintln!("uapp: could not move saved keys out of the file: {e:#}");
+        }
 
         // Native window only: forward OS file drops to the shell (see native.rs +
         // App::native_drop). The webview never gets HTML5 drop events for them, so
@@ -243,9 +249,7 @@ mod native_serve {
         // reachable from the page is reachable from untrusted app code.
         {
             let id_app = app.clone();
-            permissions::install_app_id(Box::new(move || {
-                id_app.engine.lock().unwrap().app_id.clone()
-            }));
+            permissions::install_app_id(Box::new(move || id_app.eng().app_id.clone()));
         }
 
         rt.block_on(async move {
@@ -257,7 +261,7 @@ mod native_serve {
             // Advertise for double-open reuse (rewritten by app.save when the
             // backing file changes — see rpc.rs).
             {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 registry::write_addr(&eng.path, port, &token);
             }
 
@@ -271,7 +275,7 @@ mod native_serve {
                         tick.tick().await;
                         let app2 = app.clone();
                         let _ = tokio::task::spawn_blocking(move || {
-                            app2.engine.lock().unwrap().maybe_snapshot();
+                            app2.eng().maybe_snapshot();
                         })
                         .await;
                     }
@@ -322,6 +326,7 @@ mod native_serve {
                 }
             }
 
+            let stop = crate::shutdown_signal();
             if let Some(or) = on_ready {
                 or(&url, port, false);
             }
@@ -337,9 +342,10 @@ mod native_serve {
             let shutdown_app = app.clone();
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
-                    let _ = tokio::signal::ctrl_c().await;
+                    stop.await;
                     shutdown_app.graceful_cleanup();
                     eprintln!("uapp: shutting down");
+                    crate::exit_soon();
                 })
                 .await?;
             Ok::<(), anyhow::Error>(())
@@ -405,7 +411,13 @@ mod native_serve {
         )
         .with_context(|| format!("opening {}", path.display()))?;
         let generated = token.is_none();
-        let token = token.unwrap_or_else(|| (0..32).map(|_| fastrand::alphanumeric()).collect());
+        if let Some(t) = &token {
+            secrets::check_token(t).context("--token / UAPP_TOKEN")?;
+            if t.len() < 16 {
+                eprintln!("uapp: warning: the token is short ({} characters); anyone who guesses it can edit and publish this site", t.len());
+            }
+        }
+        let token = token.unwrap_or_else(secrets::new_token);
         let mut app = app::App::new(eng, token.clone(), false);
         app.public = Some(opts);
         app.chrome = match &chrome_dir {
@@ -413,9 +425,15 @@ mod native_serve {
             None => None,
         };
         let app = Arc::new(app);
+        // An MCP token left in the file would otherwise be published with
+        // /site.uapp.
+        if let Err(e) = secrets::migrate(&app) {
+            eprintln!("uapp: could not move saved keys out of the file: {e:#}");
+        }
 
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(async move {
+        let stop = crate::shutdown_signal();
         let listener = tokio::net::TcpListener::bind((bind, port)).await?;
         let addr = listener.local_addr()?;
         app.port.store(addr.port(), std::sync::atomic::Ordering::Relaxed);
@@ -442,7 +460,7 @@ mod native_serve {
                     tick.tick().await;
                     let app2 = app.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        app2.engine.lock().unwrap().maybe_snapshot();
+                        app2.eng().maybe_snapshot();
                     })
                     .await;
                 }
@@ -451,8 +469,10 @@ mod native_serve {
         let shutdown_app = app.clone();
         axum::serve(listener, server::router(app))
             .with_graceful_shutdown(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                stop.await;
                 shutdown_app.graceful_cleanup();
+                eprintln!("uapp: shutting down");
+                crate::exit_soon();
             })
             .await?;
         Ok::<_, anyhow::Error>(())
@@ -482,6 +502,7 @@ mod native_serve {
         });
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(async move {
+        let stop = crate::shutdown_signal();
         let listener = tokio::net::TcpListener::bind((bind, port)).await?;
         let addr = listener.local_addr()?;
         eprintln!("uapp: serving the browser build ({}) at http://{}/", chrome_dir.display(), addr);
@@ -490,7 +511,10 @@ mod native_serve {
             None => eprintln!("uapp: a bare visit opens the launcher; ?open=<url> opens an archive from a URL"),
         }
         axum::serve(listener, webhost::router(host))
-            .with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; })
+            .with_graceful_shutdown(async {
+                stop.await;
+                eprintln!("uapp: shutting down");
+            })
             .await?;
         Ok::<_, anyhow::Error>(())
     })
@@ -498,3 +522,52 @@ mod native_serve {
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_serve::*;
+
+/// Resolves when the process is asked to stop: Ctrl-C, or SIGTERM (what
+/// `docker stop`, systemd and most supervisors send). Without a SIGTERM
+/// handler `serve` died without its cleanup, and as a container's PID 1 it
+/// ignored the signal until the SIGKILL ten seconds later.
+///
+/// The handlers are installed when this is CALLED (inside the runtime), not
+/// when the future is first polled, so call it before announcing the server:
+/// a signal that arrives in between is then still a clean stop.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn shutdown_signal() -> impl std::future::Future<Output = ()> + Send {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let int = signal(SignalKind::interrupt()).ok();
+        let term = signal(SignalKind::terminate()).ok();
+        async move {
+            let wait = |s: Option<tokio::signal::unix::Signal>| async move {
+                match s {
+                    Some(mut s) => {
+                        s.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                _ = wait(int) => {}
+                _ = wait(term) => {}
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// After a stop signal the server waits for open connections to finish, and a
+/// WebSocket never does on its own. Everything durable is already committed
+/// (and the cleanup has run), so give in-flight requests a moment and go.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn exit_soon() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::process::exit(0);
+    });
+}

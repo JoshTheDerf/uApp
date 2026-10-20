@@ -16,9 +16,10 @@
 #   docker run -v /path/to/dist-web:/opt/uapp-web:ro -e UAPP_SITE= \
 #              -e UAPP_SERVE_FLAGS="--open /uapp/apps/launcher.uapp" uapp-serve
 #
-# Library (src/library.rs) — override the command:
-#   docker run -v /path/to/apps:/apps -e UAPP_TOKEN=... uapp-serve \
-#              uapp-library /apps --bind 0.0.0.0 --port 8090
+# Library (src/library.rs): override the command, and set UAPP_PORT to its
+# port so the health check probes the right one:
+#   docker run -v /path/to/apps:/apps -e UAPP_TOKEN=... -e UAPP_PORT=8090 \
+#              uapp-serve sh -c 'exec uapp-library /apps --bind 0.0.0.0 --port "$UAPP_PORT"'
 #
 # The mounts must be writable by the container user for publishing to work
 # (run with --user <uid> of the files' owner, or chown them); a read-only mount
@@ -61,7 +62,9 @@ COPY --from=build /src/target/release/uapp-library /usr/local/bin/uapp-library
 RUN mkdir -p /opt/uapp-web
 
 # The engine keeps its per-user state (crash-rescue snapshots, the registry
-# lock) under HOME; world-writable so `--user <any uid>` works too.
+# lock, and an API key or MCP credentials moved out of the served file, see
+# src/secrets.rs) under HOME; world-writable so `--user <any uid>` works too.
+# Mount a volume here if any of that should outlive the container.
 RUN mkdir -p /var/lib/uapp && chmod 1777 /var/lib/uapp
 ENV HOME=/var/lib/uapp
 # An unprivileged user means a bug can't reach anything but the site.
@@ -74,11 +77,20 @@ ENV UAPP_PORT=8080
 # printed to the log — fine for a read-mostly site, useless for publishing.
 EXPOSE 8080
 
+# `docker stop` sends SIGTERM, which the servers handle (cleanup, then exit),
+# so the sh below execs them as PID 1 rather than staying in between.
+#
 # Defaults suit a hosted site that wants the in-browser editor:
-#   --publish-data  ship data/ (content sources) inside /site.uapp so a visitor
-#                   can re-run the site's build pipeline. That archive is public.
 #   --chrome        serve the browser build, enabling the "Edit this site" pill.
 #   --coi           COOP/COEP on documents, so the editor is cross-origin
 #                   isolated with no reload and the AI's run_js bridge works.
 #                   Drop it if the site embeds cross-origin iframes.
-CMD ["sh", "-c", "exec uapp-server serve $UAPP_SITE --bind 0.0.0.0 --port \"$UAPP_PORT\" --chrome /opt/uapp-web ${UAPP_SERVE_FLAGS-${UAPP_SITE:+--publish-data --coi}}"]
+# Not on by default: --publish-data, which ships data/ (content sources)
+# inside the PUBLIC /site.uapp so a visitor can re-run the site's build
+# pipeline. Opt in with UAPP_SERVE_FLAGS="--publish-data --coi".
+CMD ["sh", "-c", "exec uapp-server serve $UAPP_SITE --bind 0.0.0.0 --port \"$UAPP_PORT\" --chrome /opt/uapp-web ${UAPP_SERVE_FLAGS-${UAPP_SITE:+--coi}}"]
+
+# /health answers in every mode (site, web host, library). No curl in the
+# slim image, so bash's /dev/tcp makes the request.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${UAPP_PORT:-8080} && printf 'GET /health HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
