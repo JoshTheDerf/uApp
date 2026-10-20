@@ -156,28 +156,53 @@ pub fn install() -> Result<()> {
 /// this executable, then the PATH — the same order the CLI's --window
 /// delegation uses (main.rs).
 fn find_desktop_bin(exe: &std::path::Path) -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("UAPP_DESKTOP_BIN") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Some(p);
+    desktop_bin_candidates(exe).into_iter().next()
+}
+
+/// Names the native window goes by: `uapp` in release bundles, and
+/// `uapp-desktop` beside a dev-installed CLI (scripts/install-local.sh puts
+/// the CLI at `uapp`). The window names come first so a sibling CLI never
+/// shadows them.
+const DESKTOP_NAMES: [&str; 6] = [
+    "uapp-desktop",
+    "uapp-desktop.exe",
+    "uapp",
+    "uapp.exe",
+    "UApp",
+    "UApp.exe",
+];
+
+/// Existing native-window binaries, best first: `UAPP_DESKTOP_BIN`, then
+/// siblings of `exe`, then PATH. Anything that resolves to the running
+/// binary itself is skipped. A CLI that "delegates" to itself re-execs in a
+/// loop (thousands of processes a second when the CLI is installed as `uapp`).
+pub fn desktop_bin_candidates(exe: &std::path::Path) -> Vec<PathBuf> {
+    let me = std::fs::canonicalize(exe).ok();
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut consider = |p: PathBuf| {
+        if !p.is_file() {
+            return;
         }
+        let canon = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        if Some(&canon) == me.as_ref() || found.iter().any(|f| f == &canon) {
+            return;
+        }
+        found.push(canon);
+    };
+    if let Some(p) = std::env::var_os("UAPP_DESKTOP_BIN").filter(|p| !p.is_empty()) {
+        consider(PathBuf::from(p));
     }
     if let Some(dir) = exe.parent() {
-        for n in ["uapp", "uapp.exe", "UApp", "UApp.exe"] {
-            let p = dir.join(n);
-            if p.is_file() {
-                return Some(p);
+        for n in DESKTOP_NAMES {
+            consider(dir.join(n));
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            for n in DESKTOP_NAMES {
+                consider(dir.join(n));
             }
         }
     }
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        for n in ["uapp", "UApp"] {
-            let p = dir.join(n);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
-    None
+    found
 }

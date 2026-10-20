@@ -444,26 +444,17 @@ fn launch(
 /// forwards the scratch flag so the native window shows the "Save…" banner.
 /// Returns Ok(true) if one was launched.
 fn delegate_to_desktop(path: &Path, unsaved: bool) -> Result<bool> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = std::env::var("UAPP_DESKTOP_BIN") {
-        if !p.is_empty() {
-            candidates.push(PathBuf::from(p));
-        }
+    // A process we started ourselves must never hand off again: whatever
+    // it found as "the desktop app" was apparently another CLI.
+    if std::env::var_os(DELEGATED_ENV).is_some() {
+        return Ok(false);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for n in ["uapp", "uapp.exe", "UApp", "UApp.exe"] {
-                candidates.push(dir.join(n));
-            }
-        }
-    }
-    // Bare names fall through to a PATH lookup.
-    for n in ["uapp", "UApp"] {
-        candidates.push(PathBuf::from(n));
-    }
-    for c in candidates {
+    let Ok(exe) = std::env::current_exe() else {
+        return Ok(false);
+    };
+    for c in install::desktop_bin_candidates(&exe) {
         let mut cmd = std::process::Command::new(&c);
-        cmd.arg(path);
+        cmd.arg(path).env(DELEGATED_ENV, "1");
         if unsaved {
             cmd.arg("--unsaved");
         }
@@ -473,6 +464,10 @@ fn delegate_to_desktop(path: &Path, unsaved: bool) -> Result<bool> {
     }
     Ok(false)
 }
+
+/// Set on a process the CLI launched as "the desktop app" (see
+/// `delegate_to_desktop`).
+const DELEGATED_ENV: &str = "UAPP_DELEGATED";
 
 /// Build the right "ready" behaviour for the CLI and hand off to the library.
 fn run_serve(
