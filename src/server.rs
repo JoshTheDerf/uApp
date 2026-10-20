@@ -44,6 +44,7 @@ const SHELL_CSS: &str = include_str!("shell/shell.css");
 include!(concat!(env!("OUT_DIR"), "/shell_modules.rs"));
 
 const UAPP_JS: &str = include_str!("shell/uapp.js");
+const UAPP_DTS: &str = include_str!("shell/uapp.d.ts");
 const ICONS_JS: &str = include_str!("shell/icons.js");
 const SCRATCH_HTML: &str = include_str!("shell/scratch.html");
 
@@ -1099,6 +1100,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route(
             "/uapp.js",
             get(|| async { static_asset(UAPP_JS, "text/javascript; charset=utf-8") }),
+        )
+        .route(
+            "/uapp.d.ts",
+            get(|| async { static_asset(UAPP_DTS, "text/plain; charset=utf-8") }),
         )
         .route(
             "/icons.js",

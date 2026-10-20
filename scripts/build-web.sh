@@ -18,7 +18,7 @@ mkdir -p dist-web/shell/lang
 cp src/shell/js/*.js dist-web/shell/
 cp src/shell/js/lang/*.js dist-web/shell/lang/
 cp src/shell/shell.css dist-web/shell.css
-cp src/shell/uapp.js src/shell/icons.js src/shell/scratch.html dist-web/
+cp src/shell/uapp.js src/shell/uapp.d.ts src/shell/icons.js src/shell/scratch.html dist-web/
 cp assets/uapp-256.png dist-web/icon-256.png 2>/dev/null || true
 cp web/boot.js web/worker.js web/sw.js web/uapp_glue.js web/site-chrome.js web/sync-pill.js dist-web/
 # Demo .uapp files are generated fresh — never ship a real local .uapp (they

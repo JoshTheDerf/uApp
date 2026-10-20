@@ -2,8 +2,14 @@
  * Usage:
  *   <script src="/uapp.js"></script>
  *   const r = await uapp.query("SELECT * FROM jobs WHERE status=?", ["open"]);
+ *   const job = await uapp.get("SELECT * FROM jobs WHERE id=?", [id]); // row or null
  *   await uapp.exec("INSERT INTO jobs(title, created) VALUES(?,?)", [t, Date.now()]);
- *   uapp.onChange(() => refresh());   // fires when this app's data changes
+ *   const stop = uapp.onChange(() => refresh()); // fires when this app's data changes
+ *   stop();                                        // ...until you unsubscribe
+ *
+ * Failed calls reject with a uapp.UappError: `.method` names the call and
+ * `.code` says why when known ("timeout", "disconnected", "no_host", or a
+ * code the server sent). Types for editors: /uapp.d.ts.
  *
  * ACTIONS — shared business logic (REQUIRED pattern for uapp apps):
  *   uapp.action("add_employee", {
@@ -56,7 +62,8 @@
   // it, and the editing shell is about to take this document over anyway. Do
   // not open a socket — the retry loop would otherwise hammer /ws every second
   // for as long as the tab lives. The API stays defined so the page's own
-  // `uapp.onChange(...)`-style calls do not throw; RPCs simply never settle.
+  // `uapp.onChange(...)`-style calls do not throw; RPCs reject at once with a
+  // UappError whose code is "no_host".
   const hostedTop = !wasmMode && window.top === window
     && !!document.querySelector('script[src^="/chrome.js"]');
   let ws, nextId = 1, openp;
@@ -67,6 +74,21 @@
     return false;
   };
   const pending = new Map();
+  /// Every failed call rejects with one of these. `method` is the call that
+  /// failed; `code` is set when the reason is known.
+  class UappError extends Error {
+    constructor(message, { code, method, name } = {}) {
+      super(message);
+      this.name = name || "UappError";
+      if (code !== undefined && code !== null) this.code = code;
+      if (method) this.method = method;
+    }
+  }
+  /// Subscribe `cb` to a list; the returned function unsubscribes it.
+  const subscribe = (list) => (cb) => {
+    list.push(cb);
+    return () => { const i = list.indexOf(cb); if (i >= 0) list.splice(i, 1); };
+  };
   const changeCbs = [];
   const fileCbs = [];
   const presentCbs = [];
@@ -378,7 +400,9 @@
   // Reject in-flight calls when their socket dies — otherwise `await
   // uapp.query(...)` hangs forever after a background/resume drop.
   function failPending(why) {
-    for (const [, pr] of pending) { try { pr.reject(new Error(why)); } catch {} }
+    for (const [, pr] of pending) {
+      try { pr.reject(new UappError(`uapp: ${pr.method || "call"} failed: ${why}`, { code: "disconnected", method: pr.method })); } catch {}
+    }
     pending.clear();
   }
   function onTransportMessage(m) {
@@ -394,7 +418,9 @@
     const pr = pending.get(m.id);
     if (!pr) return;
     pending.delete(m.id);
-    m.error ? pr.reject(new Error(m.error.message)) : pr.resolve(m.result);
+    if (!m.error) return pr.resolve(m.result);
+    const err = typeof m.error === "object" ? m.error : { message: String(m.error) };
+    pr.reject(new UappError(err.message || "uapp: call failed", { code: err.code, method: pr.method }));
   }
   // "This page has finished loading" (window load, or right away on a
   // reconnect of a page that already had). ctx.register goes out from the
@@ -410,8 +436,8 @@
     if (hostedTop) {
       // The server's plain page (no editor around it): there is no host to
       // talk to, so every call fails at once — never a silent forever-pending.
-      const e = new Error("uapp: this page is not running inside the uapp editor/shell, so uapp.* calls are unavailable here");
-      e.name = "UappNoHost";
+      const e = new UappError("uapp: this page is not running inside the uapp editor/shell, so uapp.* calls are unavailable here",
+        { code: "no_host", name: "UappNoHost" });
       openp = Promise.reject(e);
       openp.catch(() => {});
       return;
@@ -473,11 +499,13 @@
       const timer = setTimeout(() => {
         if (!pending.has(id)) return;
         pending.delete(id);
-        const e = new Error(`uapp: ${method} (call #${id}) got no reply within ${Math.round(ms / 1000)}s — the host may be busy or the reply was lost; retrying is safe for reads`);
-        e.name = "UappTimeout"; e.method = method; e.callId = id;
+        const e = new UappError(`uapp: ${method} (call #${id}) got no reply within ${Math.round(ms / 1000)}s — the host may be busy or the reply was lost; retrying is safe for reads`,
+          { code: "timeout", method, name: "UappTimeout" });
+        e.callId = id;
         reject(e);
       }, ms);
       pending.set(id, {
+        method,
         resolve: (v) => { clearTimeout(timer); resolve(v); },
         reject: (e) => { clearTimeout(timer); reject(e); },
       });
@@ -535,8 +563,14 @@
   }
 
   const api = {
+    UappError,
     rpc,
     query: async (sql, params = []) => shapeRows(await rpc("sql.query", { sql, params })),
+    /// The first row of a query as an object, or null when there is none.
+    get: async (sql, params = []) => {
+      const r = shapeRows(await rpc("sql.query", { sql, params }));
+      return (r && r.rows && r.rows[0]) || null;
+    },
     exec: async (sql, params = []) => {
       const r = shapeRows(await rpc("sql.exec", { sql, params }));
       // The server reports the rowid a write created (null when it didn't),
@@ -558,19 +592,20 @@
     /// Call one of this app's own actions locally (same code the AI calls).
     call: async (name, input = {}) => {
       const def = actions.get(name);
-      if (!def) throw new Error(`unknown action ${name}`);
+      if (!def) throw new UappError(`unknown action ${name}`, { code: "unknown_action", method: "call" });
       return def.handler(input);
     },
     /// Call any tool the AI has: builtins (sql_query, import_csv, download_lib…),
     /// MCP tools (mcp__server__tool), or app actions (app__name).
     tool: (name, input = {}) => rpc("tools.call", { name, input }),
     tools: () => rpc("tools.list"),
-    onChange: (cb) => changeCbs.push(cb),
+    /// Every on* subscription returns a function that unsubscribes it.
+    onChange: subscribe(changeCbs),
     /// Run `cb` just before this page goes away (an edit reloads it). Dispose
     /// renderers here — `renderer.dispose()` for three.js — so the GPU
     /// resources go with the page instead of outliving it; the WebGL context
     /// itself is released for you either way.
-    onTeardown: (cb) => teardownCbs.push(cb),
+    onTeardown: subscribe(teardownCbs),
     /// Run `cb` as soon as `el` is actually visible (right away if it already
     /// is). Use this before initializing grid/table/chart widgets: most of
     /// them (Tabulator included) compute sizes at init and silently render 0
@@ -583,12 +618,12 @@
       });
       io.observe(el);
     },
-    onFilesChange: (cb) => fileCbs.push(cb),
+    onFilesChange: subscribe(fileCbs),
     /// Ask every open shell to show a file from the archive (the shell opens its
     /// viewer). mode: "auto" | "raw" | "pretty" | "edit".
     presentFile: (name, mode) => rpc("files.present", { name, mode }),
     /// Observe presents — an app can react instead of leaving it to the shell.
-    onPresent: (cb) => presentCbs.push(cb),
+    onPresent: subscribe(presentCbs),
     /// The toolbar uapp wraps around this app: the bar with the app's name,
     /// Files, Database, Tools, Settings and chat. Hidden, this page fills the
     /// window.
@@ -633,5 +668,8 @@
       return info;
     })(),
   };
+  // Awaiting it still sees the rejection; nobody awaiting it (a hosted site's
+  // plain page, where it fails at once) must not log an unhandled one.
+  api.ready.catch(() => {});
   window.uapp = api;
 })();

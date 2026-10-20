@@ -27,11 +27,19 @@ Then open with `uapp open <file>.uapp` to test.
 <script src="/uapp.js"></script>
 ```
 
-- `await uapp.query(sql, params)` — read
-- `await uapp.exec(sql, params)` — write
+- `await uapp.query(sql, params)` — read; `{columns, rows}` with rows as objects
+- `await uapp.get(sql, params)` — the first row, or `null`
+- `await uapp.exec(sql, params)` — write; `{changes, insertId}`
 - `uapp.action(name, {description, params}, handler)` — register business logic
-- `uapp.onChange(cb)` — re-render on changes
+- `uapp.onChange(cb)` — re-render on changes. Returns a function that
+  unsubscribes (so do `onFilesChange`, `onPresent`, `onTeardown`)
 - `await uapp.ready` — `{user, device, …}`
+
+Failed calls reject with `uapp.UappError`: `.method` is the call, `.code` is
+`"timeout"`, `"disconnected"`, `"no_host"` or a server code when known.
+
+The full API with types and doc comments is `/uapp.d.ts` (read it with
+`fetch("/uapp.d.ts")`, or reference it from an editor).
 
 ### The toolbar
 
