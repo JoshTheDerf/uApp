@@ -35,7 +35,7 @@ const TPL = /* html */ `
 
 const CSS = /* css */ `
 #toolspanel { width: var(--panel-w-s); background: var(--surface); }
-.toolrow { padding: var(--sp-2) 2px; border-bottom: 1px solid var(--line-soft); }
+.toolrow { padding: 10px 2px; border-bottom: 1px solid var(--line-soft); }
 .toolrow-head { display: flex; gap: var(--sp-3); align-items: center; }
 .toolrow-label { display: flex; gap: 6px; align-items: center; font-size: var(--fs-md); min-width: 0; }
 .toolrow-label b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -44,7 +44,7 @@ const CSS = /* css */ `
 
 /* toggle switch: a real (visually hidden) checkbox, so it is focusable,
    named, and reads as a switch; the ring sits on the track */
-.sw { position: relative; display: inline-block; width: 34px; height: 20px; flex: 0 0 auto; }
+.sw, .panel-body .sw { position: relative; display: inline-block; width: 34px; height: 20px; flex: 0 0 auto; margin: 0; }
 .sw span {
   position: absolute; inset: 0; border-radius: var(--r-pill); background: var(--line-strong);
   transition: background var(--dur-1) var(--ease); cursor: pointer;
