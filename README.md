@@ -14,7 +14,9 @@ Revision history, AI chat logs, and such are integrated into the `.uapp`, allowi
 
 *An example employee-leave tracking app built with GLM 5.3 and Vanilla JS inside a .uapp. (Names and data are made up)*
 
-**Installation**: The desktop and Android apps can be installed from [GitHub releases](https://github.com/JoshTheDerf/uApp/releases), but nothing is code-signed yet, so installation on Windows, macOS, and Android will be a pain.
+## Installation
+
+Grab a build from [GitHub releases](https://github.com/JoshTheDerf/uApp/releases): the `.deb` or `.AppImage` for Linux, the `-setup.exe` installer for Windows, the `.dmg` for macOS (untested), or `uapp-android-universal.apk` for Android. They register `.uapp` files, so you can double-click one to open it (except on macOS for now, see below). Nothing is code-signed yet, so installation on Windows, macOS, and Android will be a pain. To build it yourself, see [BUILDING.md](BUILDING.md).
 
 ## Online demo
 
@@ -32,7 +34,7 @@ How to use:
 
 *The demo launcher itself is a .uapp*
 
-Most desktop features are available in the web demo apart from database encryption.
+Most desktop features are available in the web demo apart from database encryption and crash snapshots.
 
 **Note:** You can use the .uapp files from the web demo with the desktop and Android programs for system integration. With them installed, you can double click/open a .uapp file with full read-write capability.
 
@@ -52,7 +54,7 @@ A .uapp file is simply a SQLite database containing:
 1. Compressed web app files in [sqlar](https://sqlite.org/sqlar.html) archive format + some housekeeping tables.
 2. Whatever other tables and data the user wants to store.
 
-When a .uapp file is opened, a built-in web server serves the files in the `/app` folder inside the archive, and injects some plumbing to allow the application to read and write back to the `.uapp` database.
+When a .uapp file is opened, a built-in web server serves the files in the `app/` folder inside the archive, and injects some plumbing to allow the application to read and write back to the `.uapp` database. The full layout is in [docs/FORMAT.md](docs/FORMAT.md), if you want to read or write .uapp files with your own tools.
 
 On top of that, a number of internal utilities are exposed:
 1. An embedded AI chat window with tools to allow building out a frontend and database. Sub-agents, multiple chats, and file revision history are supported. Chats are stored inside the `.uapp`.
@@ -71,6 +73,18 @@ On top of that, a number of internal utilities are exposed:
 
 Saving a copy of the running .uapp is supported, as well as saving a "template" copy that contains app code and tables without user data.
 
+## The command line
+
+It's all one program, `uapp`. Run it with no arguments to open your scratch app, or give it a file:
+
+```sh
+uapp notes.uapp                    # open an app (created if it doesn't exist)
+uapp export notes.uapp -o tpl.uapp --template
+uapp update notes.uapp v2.uapp     # take v2's code, keep notes' data
+```
+
+Every command and option is in [docs/CLI.md](docs/CLI.md).
+
 ## Design choices
 
 ### API
@@ -88,11 +102,13 @@ Embedded apps use a tiny client and vanilla JS:
 </script>
 ```
 
+The whole API, and the SQL an app isn't allowed to run, is in [docs/APP-API.md](docs/APP-API.md).
+
 ### App actions
 
 AI designed `.uapp`s are *encouraged* by the system prompt to expose their business logic as named actions, which in turn exposes them to the AI chat as well, allowing the AI chat window to function both as an app architect and as a "copilot".
 
-Correspondingly, apps can call every tool the AI models have access to.
+Correspondingly, apps can call every tool the AI models have access to (the ones that change things ask you first).
 
 ```js
 uapp.action("add_employee", {
@@ -106,28 +122,17 @@ uapp.action("add_employee", {
 
 ### The toolbar
 
-The bar around the app — name, file browser, SQL browser, tools, settings, chat
-— is the app's *editing* surface, and an app being used rather than built does
-not want it. Each `.uapp` stores whether it opens with the toolbar shown or
-hidden, and the keystroke that toggles it (`F9` by default), so an app can be
-handed to someone as a plain-looking app.
+The bar around the app (name, files, database, tools, settings, chat) is for building the app, and someone who just uses it usually doesn't need it. Each `.uapp` stores whether it opens with the toolbar hidden, and the key that toggles it (`F9` by default), so you can hand an app to someone as a plain-looking app. Toggling it while the app is open isn't saved, and while it's hidden a small handle in the corner brings it back.
 
-Showing or hiding it is never saved: revealing a hidden toolbar to change one
-thing is not a decision about how the app opens, so every open starts from the
-stored setting again. Apps can drive it themselves
-(`uapp.toolbar.hide()`), and so can the AI chat (`show_toolbar`). Hidden, a
-small reveal handle sits in the corner — on a phone there is no keyboard, so
-there is always a way back.
+Apps can drive the toolbar and its panels themselves (`uapp.toolbar.hide()`, `uapp.panel.open("database")`), and so can the AI chat, so it can open whatever it just built for you.
 
-The panels the toolbar opens — chat, files, database, settings, tools — work
-the same way, from a click, `uapp.panel.open("database")`, or the chat's
-`show_panel`, so the assistant can put you in front of what it just built
-rather than telling you where to click.
+### API keys and approvals stay on your device
+
+Your AI API key, MCP server credentials and "always allow" answers are kept on your machine (`~/.config/uapp/secrets/` on Linux), never in the `.uapp`. So a copy you send someone doesn't carry your key, and a file you receive can't arrive with tools already approved. (The browser build keeps them in its own copy of the file and leaves them out of anything you download or publish.)
 
 ### "Installation" of uApps.
 
-The `install` button in the top bar provides a launcher entry for a given `.uapp` in the applications menu/Start Menu/Android Home Screen. It's possible to set custom app icons for this purpose.
-
+Settings > This device > Launcher adds a launcher entry for the open `.uapp` to your applications menu, Start Menu or Android home screen. It's possible to set custom app icons for this purpose.
 
 - **Linux**: A user-local .desktop file.
 - **Windows**: A Start Menu + Desktop shortcut
@@ -136,32 +141,19 @@ The `install` button in the top bar provides a launcher entry for a given `.uapp
 
 ## Hosting .uapp files on a server
 
-The same `uapp` binary does this. On a server, build it with
-`--no-default-features` (no Tauri or webview):
+The same `uapp` binary does this. On a server, build it with `--no-default-features` (no Tauri or webview):
 
-* **`uapp serve <file.uapp> --chrome dist-web`** serves ONE .uapp as a
-  website: its `app/` pages at real URLs for everyone, plus an in-browser
-  editor on a local copy. `PUT /site.uapp` with the token publishes an edited
-  copy back.
-* **`uapp serve --chrome dist-web [--open <url>]`**, with no file, hosts
-  the browser build alone. What the page opens is in its URL:
-  `?open=<url>` fetches any .uapp on the origin (or a CORS-enabled one) and
-  keeps your edits in the browser, `?app=<id>` opens one of the visitor's own
-  stored apps, and a bare visit opens `--open` (or the launcher). Edits can be
-  published back to the URL they came from. Put such a page in an `<iframe>`
-  and you have a window that runs one .uapp; several on one page each get
-  their own engine.
-* **`uapp library <dir>`** serves a directory of .uapp files: `GET /` lists
-  them as JSON, `GET /<name>.uapp` fetches one (ETag), `PUT` and `DELETE`
-  (token) publish and remove. Every stored file is sanitized like `/site.uapp`
-  is: app files and user tables travel, chat, history and API keys never do.
+* **`uapp serve site.uapp --chrome dist-web`** serves one .uapp as a website. Its `app/` pages are public at real URLs, and an "Edit this site" button opens an in-browser editor on a local copy. With the token, that copy can be published back (`PUT /site.uapp`).
+* **`uapp serve --chrome dist-web [--open <url>]`**, with no file, hosts the browser build alone. `?open=<url>` opens a .uapp from that URL, `?app=<id>` one of the visitor's stored apps, and a bare visit opens `--open` or the launcher. Edits stay in the visitor's browser and can be published back. Put such a page in an `<iframe>` to embed one app in another page.
+* **`uapp library ./apps`** serves a folder of .uapp files. `GET /` lists them as JSON, `GET /<name>.uapp` fetches one, and `PUT` and `DELETE` (with the token) publish and remove. Uploads are stored without chat, file history or anything secret.
 
-`dist-web` is `scripts/build-web.sh` output. `Dockerfile.serve` builds `uapp`
-into an image; mount `dist-web` at `/opt/uapp-web`. All commands and options
-are in [docs/CLI.md](docs/CLI.md).
+`dist-web` is what `scripts/build-web.sh` builds. `Dockerfile.serve` builds an image with `uapp` in it (mount `dist-web` at `/opt/uapp-web`).
 
 ## Known limitations
 
-* **Multiple concurrent users** are not explicitly supported yet. It will probably work on the same system, writing over a network drive will likely cause corruption.
-* **Cloud sync may cause issues** - A sync with the sqlite file mid-transaction may cause all sorts of issues. Odds are it will probably work, but there's a nonzero chance you may encounter corruption.
-* **macOS and iOS untested** - I have neither a macOS nor an iOS device, so I can't test on those platforms. It should at least function on macOS, but not sure about iOS.
+* **Multiple concurrent users** aren't supported. A second window on the same machine reuses the one that has the file open, but two machines writing to the same file on a network drive will likely corrupt it.
+* **Cloud sync** of a file that's open still isn't recommended. A crash mid-write is rolled back now (the rollback journal stays on disk next to the file), but a sync tool can still copy the file halfway through a write. If a copy does end up damaged, uApp can usually restore the newest snapshot it took on your machine.
+* **Apps run on the same origin as the editor around them**, so an app's code can do anything you can do in the shell, including answering its own approval prompts. Open a `.uapp` from someone you don't trust the way you'd run a program from them. See [docs/design/app-isolation.md](docs/design/app-isolation.md) for the details and the plan to fix it.
+* **macOS and iOS are untested.** I have neither a macOS nor an iOS device, so I can't test on those platforms. It should at least function on macOS, but double-clicking a `.uapp` in Finder opens your scratch app instead of the file (the macOS open-file event isn't handled yet). Not sure about iOS.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) to help out, [SECURITY.md](SECURITY.md) to report a vulnerability and [CHANGELOG.md](CHANGELOG.md) for what changed.
