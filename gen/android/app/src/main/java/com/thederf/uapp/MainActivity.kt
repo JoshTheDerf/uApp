@@ -354,8 +354,7 @@ class MainActivity : TauriActivity() {
   // names the Rust core checks at startup (see resolve_app_path in gui.rs).
   // Returns true if a document was staged.
   private fun handleViewIntent(intent: Intent?): Boolean {
-    if (intent?.action != Intent.ACTION_VIEW || intent.data == null) return false
-    val uri: Uri = intent.data ?: return false
+    val uri: Uri = documentUri(intent) ?: return false
     return try {
       // Prefer the provider's display name: many providers (system Downloads
       // among them) use opaque numeric document ids in the URI path, so
@@ -405,6 +404,17 @@ class MainActivity : TauriActivity() {
       Toast.makeText(this, "Could not open document: ${e.message}", Toast.LENGTH_LONG).show()
       false
     }
+  }
+
+  /// The document an "open with" (VIEW) or a share to uApp (SEND, or the
+  /// first file of SEND_MULTIPLE) hands us, if any.
+  @Suppress("DEPRECATION")
+  private fun documentUri(intent: Intent?): Uri? = when (intent?.action) {
+    Intent.ACTION_VIEW -> intent.data
+    Intent.ACTION_SEND -> intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+    Intent.ACTION_SEND_MULTIPLE ->
+      intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.firstOrNull()
+    else -> null
   }
 
   // ---- install to launcher (home-screen shortcut for one .uapp) ----

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app's UI is served by its own embedded server on this device, over
+     plain HTTP: the shell on 127.0.0.1 and each app on localhost (its own
+     origin, see docs/design/app-isolation.md). Release builds turn cleartext
+     off (usesCleartextTraffic=false), and older WebViews (seen on Android 12,
+     WebView 102) then refuse even loopback, so the app couldn't load its own
+     UI. Allow cleartext to exactly those two hosts and nowhere else. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>
