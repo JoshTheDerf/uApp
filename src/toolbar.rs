@@ -34,7 +34,10 @@ const MAX_ALTERNATIVES: usize = 4;
 /// Keys that may be a shortcut all by themselves. Everything else needs a
 /// modifier: a bare letter would fire on every `b` typed into the app.
 fn standalone(key: &str) -> bool {
-    matches!(key.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()), Some(1..=24))
+    matches!(
+        key.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()),
+        Some(1..=24)
+    )
 }
 
 /// Named keys, lowercase input -> the canonical spelling we store and the
@@ -124,7 +127,13 @@ fn normalize_combo(combo: &str) -> Result<String> {
     }
     // Fixed order, so the same shortcut always reads and compares the same way.
     let mut s = String::new();
-    for (on, name) in [(m, "Mod"), (c, "Ctrl"), (me, "Meta"), (a, "Alt"), (sh, "Shift")] {
+    for (on, name) in [
+        (m, "Mod"),
+        (c, "Ctrl"),
+        (me, "Meta"),
+        (a, "Alt"),
+        (sh, "Shift"),
+    ] {
         if on {
             s.push_str(name);
             s.push('+');
@@ -165,12 +174,16 @@ pub fn merge(stored: Option<&Value>, patch: &Value) -> Result<Value> {
     }
     let mut touched = false;
     if let Some(h) = patch.get("hidden") {
-        let h = h.as_bool().ok_or_else(|| anyhow::anyhow!("hidden must be true or false"))?;
+        let h = h
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("hidden must be true or false"))?;
         out["hidden"] = json!(h);
         touched = true;
     }
     if let Some(s) = patch.get("shortcut") {
-        let s = s.as_str().ok_or_else(|| anyhow::anyhow!("shortcut must be a string"))?;
+        let s = s
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("shortcut must be a string"))?;
         out["shortcut"] = json!(normalize_shortcut(s)?);
         touched = true;
     }
@@ -272,11 +285,11 @@ mod tests {
     #[test]
     fn junk_is_reported_not_stored() {
         for bad in [
-            "ctrl+",             // modifiers, no key
-            "hyper+b",           // not a modifier
-            "mod+notakey",       // not a key
-            "mod++b",            // empty part
-            "f9, f8, f7, f6, f5" // more than we accept
+            "ctrl+",              // modifiers, no key
+            "hyper+b",            // not a modifier
+            "mod+notakey",        // not a key
+            "mod++b",             // empty part
+            "f9, f8, f7, f6, f5", // more than we accept
         ] {
             assert!(normalize_shortcut(bad).is_err(), "{bad:?} was accepted");
         }

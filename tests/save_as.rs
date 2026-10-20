@@ -26,8 +26,11 @@ fn save_as_rehomes_and_persists() {
         json!({"sql": "CREATE TABLE t(x INTEGER)", "params": []}),
     )
     .unwrap();
-    eng.local_op("sql", json!({"sql": "INSERT INTO t VALUES (1)", "params": []}))
-        .unwrap();
+    eng.local_op(
+        "sql",
+        json!({"sql": "INSERT INTO t VALUES (1)", "params": []}),
+    )
+    .unwrap();
     assert_eq!(q_i64(&eng, "SELECT sum(x) FROM t"), 1, "data before save");
 
     // Save As → new file. The engine must re-home onto it.
@@ -38,12 +41,23 @@ fn save_as_rehomes_and_persists() {
         !saved.with_extension("uapp.sync").exists(),
         "no sidecar appears next to the saved file"
     );
-    assert_eq!(q_i64(&eng, "SELECT sum(x) FROM t"), 1, "data survived the re-home");
+    assert_eq!(
+        q_i64(&eng, "SELECT sum(x) FROM t"),
+        1,
+        "data survived the re-home"
+    );
 
     // A post-save edit must land in the NEW file's log/checkpoint.
-    eng.local_op("sql", json!({"sql": "INSERT INTO t VALUES (40)", "params": []}))
-        .unwrap();
-    assert_eq!(q_i64(&eng, "SELECT sum(x) FROM t"), 41, "edit after save applies");
+    eng.local_op(
+        "sql",
+        json!({"sql": "INSERT INTO t VALUES (40)", "params": []}),
+    )
+    .unwrap();
+    assert_eq!(
+        q_i64(&eng, "SELECT sum(x) FROM t"),
+        41,
+        "edit after save applies"
+    );
     drop(eng);
 
     // Reopen the saved file fresh: every op (pre- and post-save) is durable.

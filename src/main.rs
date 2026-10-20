@@ -37,7 +37,9 @@ fn get_password(flag: Option<String>, confirm: bool) -> Result<String> {
     }
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
-        anyhow::bail!("no terminal available for a password prompt — pass --password or set UAPP_PASSWORD");
+        anyhow::bail!(
+            "no terminal available for a password prompt — pass --password or set UAPP_PASSWORD"
+        );
     }
     let p = rpassword::prompt_password("master password: ")?;
     if p.is_empty() {
@@ -142,16 +144,27 @@ fn run() -> Result<()> {
         }
     }
     let open_path = |positional: &[String], idx: usize| -> PathBuf {
-        positional.get(idx).map(PathBuf::from).unwrap_or_else(|| usage())
+        positional
+            .get(idx)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| usage())
     };
     match positional.first().map(|s| s.as_str()) {
         // No file: host the browser build alone (webhost.rs). What opens is
         // in the URL, so this process needs no archive and no token.
         Some("serve") if positional.len() == 1 => {
             let Some(dir) = chrome_dir else {
-                anyhow::bail!("serve without a file needs --chrome <dist-web> (the browser build to host)");
+                anyhow::bail!(
+                    "serve without a file needs --chrome <dist-web> (the browser build to host)"
+                );
             };
-            uapp::serve_web(&bind, if port == 0 { 8080 } else { port }, &dir, !no_coi, open_url)
+            uapp::serve_web(
+                &bind,
+                if port == 0 { 8080 } else { port },
+                &dir,
+                !no_coi,
+                open_url,
+            )
         }
         Some("serve") => {
             let f = open_path(&positional, 1);
@@ -198,13 +211,19 @@ fn run() -> Result<()> {
             let f = open_path(&positional, 1);
             let len = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
             if len == 0 {
-                anyhow::bail!("{} is empty — use `uapp new --encrypt` to create it", f.display());
+                anyhow::bail!(
+                    "{} is empty — use `uapp new --encrypt` to create it",
+                    f.display()
+                );
             }
             if !store::looks_like_sqlite(&f) {
                 // Already encrypted (verify with the password) or foreign.
                 let pw = get_password(password_flag, false)?;
                 uapp::cipher::open_file(&f, &pw)?;
-                anyhow::bail!("{} is already encrypted (use `uapp passwd` to change it)", f.display());
+                anyhow::bail!(
+                    "{} is already encrypted (use `uapp passwd` to change it)",
+                    f.display()
+                );
             }
             let pw = get_password(password_flag, true)?;
             uapp::cipher::encrypt_file_in_place(&f, &pw)?;
@@ -269,24 +288,26 @@ fn run() -> Result<()> {
             let device = device_id().unwrap_or_else(|_| "cli".into());
             let user = {
                 let real = whoami::realname();
-                if real.trim().is_empty() { whoami::username() } else { real }
+                if real.trim().is_empty() {
+                    whoami::username()
+                } else {
+                    real
+                }
             };
             // A normal open: it takes the registry lock (so this refuses to run
             // while the app is open elsewhere) and snapshots first, which is
             // the undo path if an update turns out wrong.
-            let mut eng = uapp::engine::Engine::open_with_passphrase(
-                target.clone(), device, user, pw,
-            )
-            .with_context(|| {
-                format!(
-                    "opening {} (if it's open in a window, close it first — or just \
+            let mut eng =
+                uapp::engine::Engine::open_with_passphrase(target.clone(), device, user, pw)
+                    .with_context(|| {
+                        format!(
+                            "opening {} (if it's open in a window, close it first — or just \
                      drag the template onto that window)",
-                    target.display()
-                )
-            })?;
+                            target.display()
+                        )
+                    })?;
             if dry_run {
-                let src = uapp::template::Source::from_bytes(
-                    &bytes, template_password.as_deref())?;
+                let src = uapp::template::Source::from_bytes(&bytes, template_password.as_deref())?;
                 let plan = uapp::template::plan(&eng.db, src.conn())?;
                 println!("{}", serde_json::to_string_pretty(&plan)?);
                 return Ok(());
@@ -305,8 +326,11 @@ fn run() -> Result<()> {
                 "{}: {} file(s) written, {} removed, {} table(s) created, {} column(s) added, \
                  {} view/index/trigger(s) updated",
                 target.display(),
-                a["filesWritten"], a["filesRemoved"], a["tablesCreated"],
-                a["columnsAdded"], a["objectsUpdated"],
+                a["filesWritten"],
+                a["filesRemoved"],
+                a["tablesCreated"],
+                a["columnsAdded"],
+                a["objectsUpdated"],
             );
             for w in result["warnings"].as_array().cloned().unwrap_or_default() {
                 eprintln!("uapp: note: {}", w.as_str().unwrap_or_default());
@@ -330,7 +354,9 @@ fn run() -> Result<()> {
             // stem becomes the app name and the download filename).
             let dir = std::env::temp_dir().join(format!(
                 "uapp-scratch-{}",
-                (0..10).map(|_| fastrand::alphanumeric()).collect::<String>()
+                (0..10)
+                    .map(|_| fastrand::alphanumeric())
+                    .collect::<String>()
             ));
             std::fs::create_dir_all(&dir)?;
             launch(dir.join("Untitled.uapp"), headless, port, true, shell, None)
@@ -352,7 +378,11 @@ fn resolve_open_password(
     if !store::is_encrypted_file(path) {
         return Ok(None);
     }
-    let provided = flag.or_else(|| std::env::var("UAPP_PASSWORD").ok().filter(|p| !p.is_empty()));
+    let provided = flag.or_else(|| {
+        std::env::var("UAPP_PASSWORD")
+            .ok()
+            .filter(|p| !p.is_empty())
+    });
     match provided {
         Some(pw) => {
             // Verify now so a wrong password fails clearly here rather than

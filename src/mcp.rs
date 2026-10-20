@@ -11,7 +11,11 @@ use std::sync::Mutex;
 static SESSIONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 fn get_session(url: &str) -> Option<String> {
-    SESSIONS.lock().unwrap().as_ref().and_then(|m| m.get(url).cloned())
+    SESSIONS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(url).cloned())
 }
 
 fn set_session(url: &str, sid: Option<String>) {
@@ -28,10 +32,15 @@ fn set_session(url: &str, sid: Option<String>) {
 }
 
 fn post(server: &Value, body: &Value, session: Option<&str>) -> Result<(Value, Option<String>)> {
-    let url = server["url"].as_str().ok_or_else(|| anyhow!("mcp server missing url"))?;
+    let url = server["url"]
+        .as_str()
+        .ok_or_else(|| anyhow!("mcp server missing url"))?;
     let mut headers: Vec<(String, String)> = vec![
         ("Content-Type".into(), "application/json".into()),
-        ("Accept".into(), "application/json, text/event-stream".into()),
+        (
+            "Accept".into(),
+            "application/json, text/event-stream".into(),
+        ),
         ("MCP-Protocol-Version".into(), "2025-03-26".into()),
     ];
     if let Some(h) = server["headers"].as_object() {
@@ -44,7 +53,10 @@ fn post(server: &Value, body: &Value, session: Option<&str>) -> Result<(Value, O
     if let Some(sid) = session {
         headers.push(("Mcp-Session-Id".into(), sid.to_string()));
     }
-    let hdrs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let hdrs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let resp = crate::net::request("POST", url, &hdrs, Some(&body.to_string()), 20, 60)
         .map_err(|e| anyhow!("MCP request failed: {e}"))?;
     if resp.status >= 400 {
@@ -86,11 +98,19 @@ fn post(server: &Value, body: &Value, session: Option<&str>) -> Result<(Value, O
     }
 }
 
-fn rpc(server: &Value, session: Option<&str>, method: &str, params: Value) -> Result<(Value, Option<String>)> {
+fn rpc(
+    server: &Value,
+    session: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Result<(Value, Option<String>)> {
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
     let (resp, sid) = post(server, &body, session)?;
     if let Some(err) = resp.get("error") {
-        bail!("MCP {method} error: {}", err["message"].as_str().unwrap_or("unknown"));
+        bail!(
+            "MCP {method} error: {}",
+            err["message"].as_str().unwrap_or("unknown")
+        );
     }
     Ok((resp["result"].clone(), sid))
 }

@@ -13,7 +13,11 @@ fn fake_bundle() -> std::path::PathBuf {
     std::fs::write(dir.join("boot.js"), "// boot").unwrap();
     std::fs::write(dir.join("sw.js"), "// sw").unwrap();
     std::fs::write(dir.join("site-chrome.js"), "// chrome").unwrap();
-    std::fs::write(dir.join("index.html"), "<!doctype html><html><head><title>uapp</title></head><body></body></html>").unwrap();
+    std::fs::write(
+        dir.join("index.html"),
+        "<!doctype html><html><head><title>uapp</title></head><body></body></html>",
+    )
+    .unwrap();
     std::fs::write(dir.join("launcher.uapp"), b"SQLite format 3\0fake").unwrap();
     std::fs::write(dir.join("shell/main.js"), "// main").unwrap();
     std::fs::write(dir.join("examples/x.uapp"), b"nope").unwrap();
@@ -23,12 +27,21 @@ fn fake_bundle() -> std::path::PathBuf {
 
 fn spawn(dir: &std::path::Path, coi: bool, open: Option<&str>) -> String {
     let chrome = uapp::server::load_bundle(dir, true).unwrap();
-    let host = Arc::new(WebHost { chrome, coi, open: open.map(String::from) });
+    let host = Arc::new(WebHost {
+        chrome,
+        coi,
+        open: open.map(String::from),
+    });
     let (tx, rx) = std::sync::mpsc::channel::<u16>();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
             tx.send(listener.local_addr().unwrap().port()).unwrap();
             axum::serve(listener, router(host)).await.unwrap();
         });
@@ -62,18 +75,35 @@ fn serves_the_bundle_with_index_and_launcher_and_nothing_else() {
     let (st, h, body) = get(&format!("{base}/"));
     assert_eq!(st, 200);
     assert!(header(&h, "content-type").unwrap().starts_with("text/html"));
-    assert!(body.contains(r#"<meta name="uapp-open" content="/uapp/apps/launcher.uapp">"#), "{body}");
-    assert!(body.find("uapp-open").unwrap() < body.find("<title>").unwrap(), "meta goes at the top of head");
-    assert_eq!(header(&h, "cross-origin-opener-policy"), Some("same-origin"));
-    assert_eq!(header(&h, "cross-origin-embedder-policy"), Some("credentialless"));
-    assert_eq!(header(&h, "cache-control"), Some("public, max-age=0, must-revalidate"));
+    assert!(
+        body.contains(r#"<meta name="uapp-open" content="/uapp/apps/launcher.uapp">"#),
+        "{body}"
+    );
+    assert!(
+        body.find("uapp-open").unwrap() < body.find("<title>").unwrap(),
+        "meta goes at the top of head"
+    );
+    assert_eq!(
+        header(&h, "cross-origin-opener-policy"),
+        Some("same-origin")
+    );
+    assert_eq!(
+        header(&h, "cross-origin-embedder-policy"),
+        Some("credentialless")
+    );
+    assert_eq!(
+        header(&h, "cache-control"),
+        Some("public, max-age=0, must-revalidate")
+    );
     let etag = header(&h, "etag").unwrap().to_string();
 
     // /index.html is the same document; a matching validator is a 304.
     let (st, _, body2) = get(&format!("{base}/index.html"));
     assert_eq!(st, 200);
     assert_eq!(body, body2);
-    let r = ureq::get(&format!("{base}/")).set("If-None-Match", &etag).call();
+    let r = ureq::get(&format!("{base}/"))
+        .set("If-None-Match", &etag)
+        .call();
     assert_eq!(r.as_ref().map(|r| r.status()).ok(), Some(304), "{r:?}");
 
     // The bundle, launcher included; non-HTML gets no COI headers.

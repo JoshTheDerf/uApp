@@ -26,7 +26,8 @@ fn probe_backup_modes() {
 
     // encrypted source with data
     let src = open_keyed(f.to_str().unwrap(), pw);
-    src.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (42);").unwrap();
+    src.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (42);")
+        .unwrap();
 
     // 1) encrypted src -> plain :memory:
     let mut mem = Connection::open_in_memory().unwrap();
@@ -40,7 +41,9 @@ fn probe_backup_modes() {
     match mem2.pragma_update(None, "key", format!("'{}'", pw)) {
         Ok(()) => match do_backup(&src, &mut mem2) {
             Ok(()) => {
-                let v: i64 = mem2.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap_or(-1);
+                let v: i64 = mem2
+                    .query_row("SELECT x FROM t", [], |r| r.get(0))
+                    .unwrap_or(-1);
                 println!("PROBE enc->keyed-mem: ok, data={v}");
             }
             Err(e) => println!("PROBE enc->keyed-mem: BACKUP ERR {e}"),
@@ -51,11 +54,14 @@ fn probe_backup_modes() {
     // 3) plain src -> encrypted dst file (encrypt-in-place path)
     let plain = dir.join("p.db");
     let psrc = Connection::open(&plain).unwrap();
-    psrc.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (7);").unwrap();
+    psrc.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (7);")
+        .unwrap();
     let mut dst = open_keyed(dir.join("e2.db").to_str().unwrap(), pw);
     match do_backup(&psrc, &mut dst) {
         Ok(()) => {
-            let v: i64 = dst.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap_or(-1);
+            let v: i64 = dst
+                .query_row("SELECT x FROM t", [], |r| r.get(0))
+                .unwrap_or(-1);
             println!("PROBE plain->enc-file: ok, data={v}");
         }
         Err(e) => println!("PROBE plain->enc-file: ERR {e}"),
@@ -65,7 +71,9 @@ fn probe_backup_modes() {
     let mut dst2 = open_keyed(dir.join("e3.db").to_str().unwrap(), pw);
     match do_backup(&src, &mut dst2) {
         Ok(()) => {
-            let v: i64 = dst2.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap_or(-1);
+            let v: i64 = dst2
+                .query_row("SELECT x FROM t", [], |r| r.get(0))
+                .unwrap_or(-1);
             println!("PROBE enc->enc-file: ok, data={v}");
         }
         Err(e) => println!("PROBE enc->enc-file: ERR {e}"),

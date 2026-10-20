@@ -61,25 +61,45 @@ fn run() -> Result<()> {
         }
     }
     let dir = dir.unwrap_or_else(|| usage());
-    let dir = if dir.is_absolute() { dir } else { std::env::current_dir()?.join(dir) };
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        std::env::current_dir()?.join(dir)
+    };
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let generated = token.is_none();
     let token = token.unwrap_or_else(|| (0..32).map(|_| fastrand::alphanumeric()).collect());
-    let lib = Arc::new(uapp::library::Library { dir: dir.clone(), token: token.clone(), max_bytes: max_mb * 1024 * 1024 });
+    let lib = Arc::new(uapp::library::Library {
+        dir: dir.clone(),
+        token: token.clone(),
+        max_bytes: max_mb * 1024 * 1024,
+    });
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
         let addr = listener.local_addr()?;
-        eprintln!("uapp-library: serving {} at http://{}/", dir.display(), addr);
+        eprintln!(
+            "uapp-library: serving {} at http://{}/",
+            dir.display(),
+            addr
+        );
         if generated {
             eprintln!("uapp-library: token (pass --token or set UAPP_TOKEN to fix it): {token}");
         }
-        if std::fs::metadata(&dir).map(|m| m.permissions().readonly()).unwrap_or(true) {
-            eprintln!("uapp-library: {} is not writable — PUT will fail", dir.display());
+        if std::fs::metadata(&dir)
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(true)
+        {
+            eprintln!(
+                "uapp-library: {} is not writable — PUT will fail",
+                dir.display()
+            );
         }
         axum::serve(listener, uapp::library::router(lib))
-            .with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; })
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
             .await?;
         Ok::<_, anyhow::Error>(())
     })

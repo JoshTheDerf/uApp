@@ -42,12 +42,15 @@ fn dir() -> PathBuf {
 /// file may not exist yet (fresh scratch), so fall back to canonicalizing the
 /// parent and re-joining the file name.
 pub fn key(path: &Path) -> String {
-    let canon = path.canonicalize().unwrap_or_else(|_| {
-        match (path.parent(), path.file_name()) {
-            (Some(p), Some(f)) => p.canonicalize().map(|p| p.join(f)).unwrap_or_else(|_| path.to_path_buf()),
+    let canon = path
+        .canonicalize()
+        .unwrap_or_else(|_| match (path.parent(), path.file_name()) {
+            (Some(p), Some(f)) => p
+                .canonicalize()
+                .map(|p| p.join(f))
+                .unwrap_or_else(|_| path.to_path_buf()),
             _ => path.to_path_buf(),
-        }
-    });
+        });
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in canon.to_string_lossy().as_bytes() {
         h ^= u64::from(*b);

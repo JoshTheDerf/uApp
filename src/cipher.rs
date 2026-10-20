@@ -45,7 +45,9 @@ fn apply_key(conn: &Connection, passphrase: &str) -> Result<()> {
 /// deep inside a backup or query later.
 fn apply_and_verify(conn: &Connection, passphrase: &str, what: &str) -> Result<()> {
     apply_key(conn, passphrase)?;
-    match conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0)) {
+    match conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    }) {
         Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(e, _))
             if e.code == rusqlite::ErrorCode::NotADatabase =>
@@ -173,6 +175,8 @@ pub fn rekey_file(path: &Path, old: &str, new: &str) -> Result<()> {
         .context("rekeying database")?;
     // Force a write so the rekeyed pages are durable before we report done.
     conn.pragma_update(None, "synchronous", "FULL")?;
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS uapp_rekey_stamp(x); DROP TABLE uapp_rekey_stamp;")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS uapp_rekey_stamp(x); DROP TABLE uapp_rekey_stamp;",
+    )?;
     Ok(())
 }

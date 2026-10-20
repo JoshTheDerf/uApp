@@ -49,7 +49,12 @@ async fn health() -> Response {
     ([("x-uapp-version", env!("CARGO_PKG_VERSION"))], "ok").into_response()
 }
 
-async fn serve(State(host): State<Arc<WebHost>>, method: Method, uri: Uri, headers: HeaderMap) -> Response {
+async fn serve(
+    State(host): State<Arc<WebHost>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
     if method != Method::GET && method != Method::HEAD {
         return (StatusCode::METHOD_NOT_ALLOWED, "GET only").into_response();
     }
@@ -77,7 +82,10 @@ async fn serve(State(host): State<Arc<WebHost>>, method: Method, uri: Uri, heade
             (header::ETAG, etag),
             // Changes only with a deploy, but must never outlive one:
             // revalidate, and let the ETag make that cheap.
-            (header::CACHE_CONTROL, "public, max-age=0, must-revalidate".to_string()),
+            (
+                header::CACHE_CONTROL,
+                "public, max-age=0, must-revalidate".to_string(),
+            ),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
         ],
         body,
@@ -85,8 +93,14 @@ async fn serve(State(host): State<Arc<WebHost>>, method: Method, uri: Uri, heade
         .into_response();
     if host.coi && is_html {
         let h = resp.headers_mut();
-        h.insert("cross-origin-opener-policy", header::HeaderValue::from_static("same-origin"));
-        h.insert("cross-origin-embedder-policy", header::HeaderValue::from_static("credentialless"));
+        h.insert(
+            "cross-origin-opener-policy",
+            header::HeaderValue::from_static("same-origin"),
+        );
+        h.insert(
+            "cross-origin-embedder-policy",
+            header::HeaderValue::from_static("credentialless"),
+        );
     }
     resp
 }
@@ -96,11 +110,16 @@ async fn serve(State(host): State<Arc<WebHost>>, method: Method, uri: Uri, heade
 /// nothing). A page that already carries one keeps its own.
 fn inject_default_open(bytes: Vec<u8>, open: Option<&str>) -> Vec<u8> {
     let Some(open) = open else { return bytes };
-    let Ok(html) = String::from_utf8(bytes) else { return Vec::new() };
+    let Ok(html) = String::from_utf8(bytes) else {
+        return Vec::new();
+    };
     if html.contains("name=\"uapp-open\"") || html.contains("name='uapp-open'") {
         return html.into_bytes();
     }
-    let tag = format!(r#"<meta name="uapp-open" content="{}">"#, crate::server::html_escape(open));
+    let tag = format!(
+        r#"<meta name="uapp-open" content="{}">"#,
+        crate::server::html_escape(open)
+    );
     let lower = html.to_lowercase();
     if let Some(pos) = lower.find("<head") {
         if let Some(gt) = html[pos..].find('>') {
@@ -117,10 +136,17 @@ mod tests {
 
     #[test]
     fn default_open_lands_in_head_escaped() {
-        let html = b"<!doctype html><html><head><title>x</title></head><body></body></html>".to_vec();
-        let out = String::from_utf8(inject_default_open(html, Some("/apps/a.uapp?x=\"1\""))).unwrap();
-        assert!(out.contains(r#"<head>
-<meta name="uapp-open" content="/apps/a.uapp?x=&quot;1&quot;"><title>"#), "{out}");
+        let html =
+            b"<!doctype html><html><head><title>x</title></head><body></body></html>".to_vec();
+        let out =
+            String::from_utf8(inject_default_open(html, Some("/apps/a.uapp?x=\"1\""))).unwrap();
+        assert!(
+            out.contains(
+                r#"<head>
+<meta name="uapp-open" content="/apps/a.uapp?x=&quot;1&quot;"><title>"#
+            ),
+            "{out}"
+        );
     }
 
     #[test]

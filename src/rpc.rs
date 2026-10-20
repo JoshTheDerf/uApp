@@ -74,7 +74,11 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             }
         }
         "sql.exec" => {
-            let r = local_op(app, "sql", json!({"sql": need_str(&p, "sql")?, "params": p["params"]}))?;
+            let r = local_op(
+                app,
+                "sql",
+                json!({"sql": need_str(&p, "sql")?, "params": p["params"]}),
+            )?;
             Ok(r)
         }
         "sql.batch" => local_op(app, "batch", json!({"sql": need_str(&p, "sql")?})),
@@ -133,8 +137,9 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             let name = {
                 let eng = app.engine.lock().unwrap();
                 let asked = need_str(&p, "name")?;
-                store::resolve_name(&eng.db, asked)?
-                    .ok_or_else(|| anyhow!("no file named '{asked}' (list_files shows the archive's names)"))?
+                store::resolve_name(&eng.db, asked)?.ok_or_else(|| {
+                    anyhow!("no file named '{asked}' (list_files shows the archive's names)")
+                })?
             };
             local_op(app, "file_del", json!({"name": name}))
         }
@@ -212,8 +217,8 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "files.history" => {
             let eng = app.engine.lock().unwrap();
             let name = need_str(&p, "name")?;
-            let name = store::resolve_name(&eng.db, name)?
-                .unwrap_or_else(|| store::canon_name(name));
+            let name =
+                store::resolve_name(&eng.db, name)?.unwrap_or_else(|| store::canon_name(name));
             store::query(
                 &eng.db,
                 "SELECT id, ts, device, user, action, COALESCE(sz, length(data)) AS size
@@ -222,15 +227,17 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             )
         }
         "files.revert" => {
-            let id = p["id"].as_i64().ok_or_else(|| anyhow!("files.revert needs id"))?;
+            let id = p["id"]
+                .as_i64()
+                .ok_or_else(|| anyhow!("files.revert needs id"))?;
             let mut name = need_str(&p, "name")?.to_string();
             let (sz, data): (Option<i64>, Option<Vec<u8>>) = {
                 let eng = app.engine.lock().unwrap();
                 name = store::resolve_name(&eng.db, &name)?
                     .unwrap_or_else(|| store::canon_name(&name));
-                let mut stmt = eng.db.prepare(
-                    "SELECT sz, data FROM uapp_file_history WHERE id=?1 AND name=?2",
-                )?;
+                let mut stmt = eng
+                    .db
+                    .prepare("SELECT sz, data FROM uapp_file_history WHERE id=?1 AND name=?2")?;
                 let mut rows = stmt.query(rusqlite::params![id, name])?;
                 match rows.next()? {
                     Some(row) => (row.get(0)?, row.get(1)?),
@@ -291,7 +298,11 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 let eng = app.engine.lock().unwrap();
                 crate::toolbar::merge(store::config_get(&eng.db, "toolbar")?.as_ref(), &p)?
             };
-            local_op(app, "config_set", json!({"key": "toolbar", "value": merged.clone()}))?;
+            local_op(
+                app,
+                "config_set",
+                json!({"key": "toolbar", "value": merged.clone()}),
+            )?;
             app.notify("toolbar", json!({"default": merged.clone()}));
             Ok(merged)
         }
@@ -327,9 +338,17 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "sessions.create" => {
             let id = format!("s-{}-{}", crate::store::now_ms(), fastrand::u32(..));
             let title = p["title"].as_str().unwrap_or("New chat").trim().to_string();
-            let title = if title.is_empty() { "New chat".to_string() } else { title };
-            local_op(app, "session_meta", json!({"id": id, "title": title, "kind": "chat",
-                                                 "created": crate::store::now_ms()}))?;
+            let title = if title.is_empty() {
+                "New chat".to_string()
+            } else {
+                title
+            };
+            local_op(
+                app,
+                "session_meta",
+                json!({"id": id, "title": title, "kind": "chat",
+                                                 "created": crate::store::now_ms()}),
+            )?;
             Ok(json!({"id": id, "title": title}))
         }
         "sessions.rename" => {
@@ -338,15 +357,23 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             if title.is_empty() || title.len() > 200 {
                 bail!("chat title must be 1-200 characters");
             }
-            local_op(app, "session_meta", json!({"id": id, "title": title,
-                                                 "created": crate::store::now_ms()}))?;
+            local_op(
+                app,
+                "session_meta",
+                json!({"id": id, "title": title,
+                                                 "created": crate::store::now_ms()}),
+            )?;
             Ok(json!({"ok": true, "id": id, "title": title}))
         }
         "sessions.archive" => {
             let id = session_id(need_str(&p, "id")?)?;
             let archived = p["archived"].as_bool().unwrap_or(true);
-            local_op(app, "session_meta", json!({"id": id, "archived": archived,
-                                                 "created": crate::store::now_ms()}))?;
+            local_op(
+                app,
+                "session_meta",
+                json!({"id": id, "archived": archived,
+                                                 "created": crate::store::now_ms()}),
+            )?;
             Ok(json!({"ok": true, "id": id, "archived": archived}))
         }
         "sessions.delete" => {
@@ -402,9 +429,11 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             let disabled = crate::tools::disabled_set(app);
             let mut out: Vec<Value> = crate::tools::registry()
                 .iter()
-                .map(|t| json!({"name": t.name, "description": t.description,
+                .map(|t| {
+                    json!({"name": t.name, "description": t.description,
                     "gated": t.gated, "kind": "builtin",
-                    "enabled": !disabled.contains(t.name)}))
+                    "enabled": !disabled.contains(t.name)})
+                })
                 .collect();
             for (name, a) in app.actions_snapshot() {
                 let tool_name = format!("app__{name}");
@@ -414,8 +443,11 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                     "enabled": !disabled.contains(&tool_name)}));
             }
             for t in crate::mcp::list_all_tools(&mcp_servers_enabled(app)) {
-                let name = format!("mcp__{}__{}",
-                    t["server"].as_str().unwrap_or(""), t["name"].as_str().unwrap_or(""));
+                let name = format!(
+                    "mcp__{}__{}",
+                    t["server"].as_str().unwrap_or(""),
+                    t["name"].as_str().unwrap_or("")
+                );
                 out.push(json!({"name": name,
                     "description": t["description"], "gated": true,
                     "kind": "mcp", "server": t["server"],
@@ -456,10 +488,14 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             if name.is_empty() || name.len() > 80 {
                 bail!("app name must be 1-80 characters");
             }
-            local_op(app, "sql", json!({
-                "sql": "INSERT OR REPLACE INTO uapp_meta(key,value) VALUES('name',?1)",
-                "params": [name]
-            }))?;
+            local_op(
+                app,
+                "sql",
+                json!({
+                    "sql": "INSERT OR REPLACE INTO uapp_meta(key,value) VALUES('name',?1)",
+                    "params": [name]
+                }),
+            )?;
             app.notify("renamed", json!({"name": name}));
             Ok(json!({"ok": true, "name": name}))
         }
@@ -509,7 +545,10 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             let enabled = p["enabled"].as_bool().unwrap_or(true);
             mcp_mutate(app, &name, |servers| {
                 let mut n = 0;
-                for s in servers.iter_mut().filter(|s| s["name"].as_str() == Some(&name)) {
+                for s in servers
+                    .iter_mut()
+                    .filter(|s| s["name"].as_str() == Some(&name))
+                {
                     s["enabled"] = json!(enabled);
                     n += 1;
                 }
@@ -584,9 +623,13 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // Install this app as a launcher/start-menu entry on the machine the
         // server runs on: `uapp <file>` launched directly, no browser needed.
         #[cfg(target_arch = "wasm32")]
-        "app.installShortcut" | "app.removeShortcut" => bail!("shortcuts are not available in the browser demo"),
+        "app.installShortcut" | "app.removeShortcut" => {
+            bail!("shortcuts are not available in the browser demo")
+        }
         #[cfg(target_arch = "wasm32")]
-        "app.shortcutStatus" => Ok(json!({"supported": false, "installed": false, "detail": Value::Null})),
+        "app.shortcutStatus" => {
+            Ok(json!({"supported": false, "installed": false, "detail": Value::Null}))
+        }
         #[cfg(not(target_arch = "wasm32"))]
         "app.installShortcut" => {
             if app.unsaved.load(Ordering::Relaxed) {
@@ -616,7 +659,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             };
             crate::shortcut::install(&app_id, &name, &path, icon.as_deref())
                 .map(|msg| json!({ "ok": true, "message": msg }))
-        },
+        }
         // Is a launcher entry installed for this app on this machine? The
         // settings UI drives its install/remove buttons off this.
         #[cfg(not(target_arch = "wasm32"))]
@@ -653,8 +696,10 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "app.export" => {
             let eng = app.engine.lock().unwrap();
             let bytes = eng.serialize_bytes()?;
-            Ok(json!({"b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                      "bytes": bytes.len()}))
+            Ok(
+                json!({"b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                      "bytes": bytes.len()}),
+            )
         }
         // Template export works on wasm too (in-memory build).
         #[cfg(target_arch = "wasm32")]
@@ -662,8 +707,10 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             let eng = app.engine.lock().unwrap();
             let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "app".into());
             let bytes = store::export_template(&eng.db, &name)?;
-            Ok(json!({"b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                      "bytes": bytes.len(), "name": name}))
+            Ok(
+                json!({"b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                      "bytes": bytes.len(), "name": name}),
+            )
         }
         // Liveness probe for the shell/app clients (background/resume recovery).
         "ping" => Ok(json!({ "ok": true })),
@@ -746,11 +793,18 @@ fn app_save(app: &Arc<App>) -> Result<Value> {
         let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "app".into());
         let safe: String = name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         format!("{}.uapp", safe.trim())
     };
-    let path = match crate::native::dispatch(crate::native::NativeReq::SaveDialog { default_name }) {
+    let path = match crate::native::dispatch(crate::native::NativeReq::SaveDialog { default_name })
+    {
         Some(p) => std::path::PathBuf::from(p),
         None => return Ok(json!({"saved": false})), // user cancelled
     };
@@ -760,11 +814,7 @@ fn app_save(app: &Arc<App>) -> Result<Value> {
         let mut eng = app.engine.lock().unwrap();
         let old_path = eng.path.clone();
         eng.save_as(path.clone())?;
-        crate::registry::write_addr(
-            &eng.path,
-            app.port.load(Ordering::Relaxed),
-            &app.token,
-        );
+        crate::registry::write_addr(&eng.path, app.port.load(Ordering::Relaxed), &app.token);
         old_path
     };
     // A scratch / default document is CONSUMED by Save As: its content now
@@ -914,21 +964,35 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
         let name = att["name"].as_str().unwrap_or("upload.bin");
         let safe: String = name
             .chars()
-            .map(|c| if c.is_alphanumeric() || ".-_ ".contains(c) { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || ".-_ ".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         // Chat uploads are user content, so they land in the data/ tree.
         let path = format!("{}{}", store::DATA_DIR, safe.trim());
-        let b64 = att["b64"].as_str().ok_or_else(|| anyhow!("attachment missing b64"))?;
+        let b64 = att["b64"]
+            .as_str()
+            .ok_or_else(|| anyhow!("attachment missing b64"))?;
         if b64.len() > MAX_UPLOAD_B64 {
-            bail!("attachment too large ({}MB limit)", MAX_UPLOAD_BYTES / 1024 / 1024);
+            bail!(
+                "attachment too large ({}MB limit)",
+                MAX_UPLOAD_BYTES / 1024 / 1024
+            );
         }
         local_op(app, "file_put", json!({"name": path, "data": b64}))?;
         stored.push(json!({"name": path, "bytes": b64.len() * 3 / 4}));
     }
     let mid = format!("{}-{}", crate::store::now_ms(), fastrand::u32(..));
     let content = json!({"text": text, "attachments": stored});
-    local_op(app, "chat",
-        json!({"mid": mid, "role": "user", "content": content, "session": session}))?;
+    local_op(
+        app,
+        "chat",
+        json!({"mid": mid, "role": "user", "content": content, "session": session}),
+    )?;
     spawn_ai(app.clone(), session.clone());
     Ok(json!({"ok": true, "mid": mid, "session": session}))
 }
@@ -948,7 +1012,10 @@ pub fn finish_run(app: &Arc<App>, session: &str, result: Result<()>, stopped: bo
             }
         }
         Err(e) => {
-            app.notify("ai", json!({"state": "error", "message": e.to_string(), "session": session}));
+            app.notify(
+                "ai",
+                json!({"state": "error", "message": e.to_string(), "session": session}),
+            );
             // Also surface it in chat so it syncs to everyone.
             let _ = local_op(
                 app,
@@ -973,7 +1040,10 @@ pub fn spawn_ai(app: Arc<App>, session: String) {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         runs.insert(
             session.clone(),
-            crate::app::RunHandle { stop: stop.clone(), started: crate::store::now_ms() },
+            crate::app::RunHandle {
+                stop: stop.clone(),
+                started: crate::store::now_ms(),
+            },
         );
         stop
     };
@@ -991,11 +1061,19 @@ pub fn spawn_ai(app: Arc<App>, session: String) {
         let ctx = crate::ai::RunCtx::root(session.clone(), stop);
         // A panic must not leave the run registered — that would silently
         // ignore every later chat.send on this session until a restart.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::ai::run(&app, &ctx)
-        }))
-        .unwrap_or_else(|_| Err(anyhow!("the assistant crashed (internal error) — please try again")));
-        finish_run(&app, &session, result, ctx.stop.load(std::sync::atomic::Ordering::Relaxed));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::ai::run(&app, &ctx)))
+                .unwrap_or_else(|_| {
+                    Err(anyhow!(
+                        "the assistant crashed (internal error) — please try again"
+                    ))
+                });
+        finish_run(
+            &app,
+            &session,
+            result,
+            ctx.stop.load(std::sync::atomic::Ordering::Relaxed),
+        );
     });
 }
 
@@ -1011,8 +1089,11 @@ pub fn session_arg(p: &Value) -> Result<String> {
 /// shapes we mint ('main', s-*, ag-*) plus anything plainly safe.
 pub fn session_id(s: &str) -> Result<String> {
     let s = s.trim();
-    if s.is_empty() || s.len() > 64
-        || !s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    if s.is_empty()
+        || s.len() > 64
+        || !s
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
         bail!("bad session id (1-64 chars, letters/digits/-/_)");
     }
@@ -1048,12 +1129,19 @@ pub fn sessions_list(app: &Arc<App>) -> Result<Value> {
     }
     let mut out: Vec<Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let push = |id: String, title: Option<String>, kind: &str, parent: Value,
-                    archived: bool, created: i64, out: &mut Vec<Value>| {
+    let push = |id: String,
+                title: Option<String>,
+                kind: &str,
+                parent: Value,
+                archived: bool,
+                created: i64,
+                out: &mut Vec<Value>| {
         let (messages, last_ts) = counts.get(&id).copied().unwrap_or((0, 0));
-        out.push(json!({"id": id, "title": title, "kind": kind, "parent": parent,
+        out.push(
+            json!({"id": id, "title": title, "kind": kind, "parent": parent,
                         "archived": archived, "created": created,
-                        "messages": messages, "last_ts": last_ts}));
+                        "messages": messages, "last_ts": last_ts}),
+        );
     };
     for row in metas["rows"].as_array().cloned().unwrap_or_default() {
         let id = row[0].as_str().unwrap_or("").to_string();
@@ -1079,8 +1167,16 @@ pub fn sessions_list(app: &Arc<App>) -> Result<Value> {
         if !seen.insert(id.clone()) {
             continue;
         }
-        let title = if id == "main" { Some("Main chat".to_string()) } else { None };
-        let kind = if id.starts_with("ag-") { "agent" } else { "chat" };
+        let title = if id == "main" {
+            Some("Main chat".to_string())
+        } else {
+            None
+        };
+        let kind = if id.starts_with("ag-") {
+            "agent"
+        } else {
+            "chat"
+        };
         let created = counts.get(&id).map(|(_, t)| *t).unwrap_or(0);
         push(id, title, kind, Value::Null, false, created, &mut out);
     }
@@ -1088,7 +1184,10 @@ pub fn sessions_list(app: &Arc<App>) -> Result<Value> {
         let key = |v: &Value| {
             (
                 v["archived"].as_bool().unwrap_or(false),
-                -(v["last_ts"].as_i64().unwrap_or(0).max(v["created"].as_i64().unwrap_or(0))),
+                -(v["last_ts"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .max(v["created"].as_i64().unwrap_or(0))),
                 v["id"].as_str().unwrap_or("").to_string(),
             )
         };
@@ -1116,7 +1215,9 @@ fn strip_html(html: &str) -> (String, String) {
             // ASCII lowering keeps byte offsets valid in `s`; full Unicode
             // lowercasing can change the length and panic on hostile HTML.
             let lower = s.to_ascii_lowercase();
-            let Some(start) = lower.find(&format!("<{tag}")) else { break };
+            let Some(start) = lower.find(&format!("<{tag}")) else {
+                break;
+            };
             let Some(end) = lower[start..].find(&format!("</{tag}>")) else {
                 s.truncate(start);
                 break;
@@ -1195,55 +1296,61 @@ pub(crate) fn check_public_url(url: &str) -> Result<()> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-    if std::env::var("UAPP_ALLOW_LOCAL_FETCH").map(|v| v == "1").unwrap_or(false) {
-        return Ok(());
-    }
-    let host = url
-        .split("//")
-        .nth(1)
-        .and_then(|r| r.split(['/', '?', '#']).next())
-        .map(|a| a.rsplit('@').next().unwrap_or(a))
-        .map(|a| {
-            if let Some(h) = a.strip_prefix('[') {
-                h.split(']').next().unwrap_or(h).to_string()
-            } else {
-                a.split(':').next().unwrap_or(a).to_string()
-            }
-        })
-        .unwrap_or_default();
-    if host.is_empty() {
-        bail!("could not parse the URL host");
-    }
-    fn is_local(ip: std::net::IpAddr) -> bool {
-        match ip {
-            std::net::IpAddr::V4(v4) => {
-                let o = v4.octets();
-                v4.is_loopback() || v4.is_private() || v4.is_link_local()
-                    || v4.is_unspecified() || v4.is_broadcast()
-                    || (o[0] == 100 && (o[1] & 0xc0) == 64) // CGNAT 100.64/10
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback()
+        if std::env::var("UAPP_ALLOW_LOCAL_FETCH")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let host = url
+            .split("//")
+            .nth(1)
+            .and_then(|r| r.split(['/', '?', '#']).next())
+            .map(|a| a.rsplit('@').next().unwrap_or(a))
+            .map(|a| {
+                if let Some(h) = a.strip_prefix('[') {
+                    h.split(']').next().unwrap_or(h).to_string()
+                } else {
+                    a.split(':').next().unwrap_or(a).to_string()
+                }
+            })
+            .unwrap_or_default();
+        if host.is_empty() {
+            bail!("could not parse the URL host");
+        }
+        fn is_local(ip: std::net::IpAddr) -> bool {
+            match ip {
+                std::net::IpAddr::V4(v4) => {
+                    let o = v4.octets();
+                    v4.is_loopback()
+                        || v4.is_private()
+                        || v4.is_link_local()
+                        || v4.is_unspecified()
+                        || v4.is_broadcast()
+                        || (o[0] == 100 && (o[1] & 0xc0) == 64) // CGNAT 100.64/10
+                }
+                std::net::IpAddr::V6(v6) => {
+                    v6.is_loopback()
                     || v6.is_unspecified()
                     || (v6.segments()[0] & 0xfe00) == 0xfc00 // ULA
                     || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local
                     || v6.to_ipv4_mapped().map_or(false, |v4| is_local(std::net::IpAddr::V4(v4)))
+                }
             }
         }
-    }
-    let addrs: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse() {
-        vec![ip]
-    } else {
-        use std::net::ToSocketAddrs;
-        (host.as_str(), 80)
-            .to_socket_addrs()
-            .map(|it| it.map(|a| a.ip()).collect())
-            .unwrap_or_default() // unresolvable: let the fetch report the error
-    };
-    if addrs.iter().any(|ip| is_local(*ip)) {
-        bail!("refusing to fetch {host}: it resolves to a local/private address");
-    }
-    Ok(())
+        let addrs: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse() {
+            vec![ip]
+        } else {
+            use std::net::ToSocketAddrs;
+            (host.as_str(), 80)
+                .to_socket_addrs()
+                .map(|it| it.map(|a| a.ip()).collect())
+                .unwrap_or_default() // unresolvable: let the fetch report the error
+        };
+        if addrs.iter().any(|ip| is_local(*ip)) {
+            bail!("refusing to fetch {host}: it resolves to a local/private address");
+        }
+        Ok(())
     }
 }
 
@@ -1297,7 +1404,11 @@ fn web_search(p: Value) -> Result<Value> {
         if results.len() >= count {
             break;
         }
-        let Some(href) = chunk.split("href=\"").nth(1).and_then(|s| s.split('"').next()) else {
+        let Some(href) = chunk
+            .split("href=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+        else {
             continue;
         };
         // DDG wraps targets: //duckduckgo.com/l/?uddg=<encoded>&...
@@ -1365,7 +1476,11 @@ fn web_fetch(p: Value) -> Result<Value> {
 /// Change the MCP server list; `f` returns how many entries it touched, and
 /// touching none is an error — "removed" must mean gone (same rule as
 /// files.delete).
-fn mcp_mutate(app: &Arc<App>, name: &str, f: impl FnOnce(&mut Vec<Value>) -> usize) -> Result<Value> {
+fn mcp_mutate(
+    app: &Arc<App>,
+    name: &str,
+    f: impl FnOnce(&mut Vec<Value>) -> usize,
+) -> Result<Value> {
     let mut servers = mcp_servers(app);
     if f(&mut servers) == 0 {
         bail!("no MCP server named '{name}' (mcp.status lists them)");
@@ -1479,7 +1594,10 @@ fn files_fetch(app: &Arc<App>, p: Value) -> Result<Value> {
     let ctype = resp.content_type.clone();
     let data = resp.into_bytes_capped((FETCH_LIMIT + 1) as u64)?;
     if data.len() > FETCH_LIMIT {
-        bail!("file exceeds the {}MB vendoring limit", FETCH_LIMIT / 1024 / 1024);
+        bail!(
+            "file exceeds the {}MB vendoring limit",
+            FETCH_LIMIT / 1024 / 1024
+        );
     }
     if data.is_empty() {
         bail!("downloaded 0 bytes from {url}");
@@ -1538,15 +1656,27 @@ fn read_dropped(path: &std::path::Path) -> Result<Vec<u8>> {
 /// Store dropped files in the archive under `dir` (an archive folder, e.g.
 /// "data/"). This is the native window's equivalent of the browser's upload.
 fn drop_ingest(app: &Arc<App>, p: Value) -> Result<Value> {
-    let dir = p["dir"].as_str().unwrap_or(store::DATA_DIR).trim().to_string();
+    let dir = p["dir"]
+        .as_str()
+        .unwrap_or(store::DATA_DIR)
+        .trim()
+        .to_string();
     if dir.contains("..") {
         bail!("bad target folder");
     }
-    let dir = if dir.is_empty() || dir.ends_with('/') { dir } else { format!("{dir}/") };
+    let dir = if dir.is_empty() || dir.ends_with('/') {
+        dir
+    } else {
+        format!("{dir}/")
+    };
     let (files, mut skipped) = take_drop(app, &p)?;
     let mut stored = Vec::new();
     for path in files {
-        let base = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let base = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let name = store::canon_name(&format!("{dir}{base}"));
         match read_dropped(&path) {
             Ok(data) => {
@@ -1577,7 +1707,10 @@ const TEMPLATE_TTL_MS: u64 = 15 * 60 * 1000;
 fn template_bytes(app: &Arc<App>, p: &Value) -> Result<(Vec<u8>, String)> {
     if let Some(b64) = p["b64"].as_str() {
         if b64.len() > MAX_UPLOAD_B64 {
-            bail!("that file is over the {}MB limit", MAX_UPLOAD_BYTES / 1024 / 1024);
+            bail!(
+                "that file is over the {}MB limit",
+                MAX_UPLOAD_BYTES / 1024 / 1024
+            );
         }
         let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
         let label = p["name"].as_str().unwrap_or("template.uapp").to_string();
@@ -1588,7 +1721,11 @@ fn template_bytes(app: &Arc<App>, p: &Value) -> Result<(Vec<u8>, String)> {
         let [path] = &files[..] else {
             bail!("drop a single .uapp file to update this app from it");
         };
-        let label = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let label = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         return Ok((read_dropped(path)?, label));
     }
     bail!("template.inspect needs the file (b64) or a native drop id");
@@ -1597,7 +1734,10 @@ fn template_bytes(app: &Arc<App>, p: &Value) -> Result<(Vec<u8>, String)> {
 /// Stage a template and report what updating from it would change. Read-only:
 /// nothing is written until `template.apply` runs with the token.
 fn template_inspect(app: &Arc<App>, p: Value) -> Result<Value> {
-    let password = p["password"].as_str().filter(|s| !s.is_empty()).map(String::from);
+    let password = p["password"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let (bytes, label) = template_bytes(app, &p)?;
     let plan = {
         let src = crate::template::Source::from_bytes(&bytes, password.as_deref())?;
@@ -1623,7 +1763,12 @@ fn template_inspect(app: &Arc<App>, p: Value) -> Result<Value> {
         }
         staged.insert(
             token.clone(),
-            crate::app::StagedTemplate { ts: now, label, bytes, password },
+            crate::app::StagedTemplate {
+                ts: now,
+                label,
+                bytes,
+                password,
+            },
         );
     }
     Ok(json!({"token": token, "plan": plan}))
@@ -1695,8 +1840,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
     if !from_raw.ends_with('/') {
         let from = {
             let eng = app.engine.lock().unwrap();
-            store::resolve_name(&eng.db, &from_raw)?
-                .unwrap_or_else(|| store::canon_name(&from_raw))
+            store::resolve_name(&eng.db, &from_raw)?.unwrap_or_else(|| store::canon_name(&from_raw))
         };
         let to = store::canon_name(&to_raw);
         if to.ends_with('/') {
@@ -1712,12 +1856,18 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
                 store::sqlar_read(&eng.db, &to)?.is_some(),
             )
         };
-        let Some(data) = data else { bail!("no such file: {from}") };
+        let Some(data) = data else {
+            bail!("no such file: {from}")
+        };
         if taken {
             bail!("a file named {to} already exists");
         }
-        local_op(app, "file_put", json!({"name": to,
-            "data": base64::engine::general_purpose::STANDARD.encode(&data)}))?;
+        local_op(
+            app,
+            "file_put",
+            json!({"name": to,
+            "data": base64::engine::general_purpose::STANDARD.encode(&data)}),
+        )?;
         local_op(app, "file_del", json!({"name": from}))?;
         return Ok(json!({"ok": true, "from": from, "to": to}));
     }
@@ -1771,8 +1921,12 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
             store::sqlar_read(&eng.db, old)?
         };
         let Some(data) = data else { continue }; // vanished mid-move
-        local_op(app, "file_put", json!({"name": new,
-            "data": base64::engine::general_purpose::STANDARD.encode(&data)}))?;
+        local_op(
+            app,
+            "file_put",
+            json!({"name": new,
+            "data": base64::engine::general_purpose::STANDARD.encode(&data)}),
+        )?;
         local_op(app, "file_del", json!({"name": old}))?;
     }
     Ok(json!({"ok": true, "from": from, "to": to, "moved": moves.len()}))
@@ -1846,7 +2000,13 @@ fn ident(s: &str) -> String {
     let mut out: String = s
         .trim()
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     while out.contains("__") {
         out = out.replace("__", "_");
@@ -1864,21 +2024,29 @@ fn ident(s: &str) -> String {
 /// SQLite table, and the log carries a single compressed op.
 pub fn import_csv(app: &Arc<App>, p: Value) -> Result<Value> {
     let file = need_str(&p, "file")?;
-    let table = ident(p["table"].as_str().unwrap_or(
-        file.rsplit('/').next().unwrap_or("data").trim_end_matches(".csv"),
-    ));
+    let table = ident(
+        p["table"].as_str().unwrap_or(
+            file.rsplit('/')
+                .next()
+                .unwrap_or("data")
+                .trim_end_matches(".csv"),
+        ),
+    );
     let data = {
         let eng = app.engine.lock().unwrap();
         store::sqlar_read(&eng.db, file)?.ok_or_else(|| anyhow!("no such file: {file}"))?
     };
     let text = String::from_utf8_lossy(&data).to_string();
     let first_line = text.lines().next().unwrap_or("");
-    let delim = p["delimiter"].as_str().and_then(|s| s.chars().next()).unwrap_or_else(|| {
-        [',', ';', '\t', '|']
-            .into_iter()
-            .max_by_key(|d| first_line.matches(*d).count())
-            .unwrap_or(',')
-    });
+    let delim = p["delimiter"]
+        .as_str()
+        .and_then(|s| s.chars().next())
+        .unwrap_or_else(|| {
+            [',', ';', '\t', '|']
+                .into_iter()
+                .max_by_key(|d| first_line.matches(*d).count())
+                .unwrap_or(',')
+        });
     let mut rows = parse_csv(&text, delim);
     if rows.is_empty() {
         bail!("no rows found in {file}");

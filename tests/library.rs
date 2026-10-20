@@ -9,12 +9,21 @@ use uapp::library::{router, Library};
 const TOKEN: &str = "lib-token-0123456789";
 
 fn spawn(dir: &std::path::Path) -> String {
-    let lib = Arc::new(Library { dir: dir.to_path_buf(), token: TOKEN.into(), max_bytes: 8 * 1024 * 1024 });
+    let lib = Arc::new(Library {
+        dir: dir.to_path_buf(),
+        token: TOKEN.into(),
+        max_bytes: 8 * 1024 * 1024,
+    });
     let (tx, rx) = std::sync::mpsc::channel::<u16>();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
             tx.send(listener.local_addr().unwrap().port()).unwrap();
             axum::serve(listener, router(lib)).await.unwrap();
         });
@@ -50,7 +59,13 @@ fn sample_app(dir: &std::path::Path) -> Vec<u8> {
     bytes
 }
 
-fn req(method: &str, url: &str, token: Option<&str>, if_match: Option<&str>, body: Option<&[u8]>) -> (u16, Vec<(String, String)>, Vec<u8>) {
+fn req(
+    method: &str,
+    url: &str,
+    token: Option<&str>,
+    if_match: Option<&str>,
+    body: Option<&[u8]>,
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
     let mut r = ureq::request(method, url);
     if let Some(t) = token {
         r = r.set("Authorization", &format!("Bearer {t}"));
@@ -100,8 +115,28 @@ fn publish_fetch_conflict_delete() {
     assert_eq!(req("PUT", &url, None, None, Some(&upload)).0, 403);
     assert_eq!(req("PUT", &url, Some("wrong"), None, Some(&upload)).0, 403);
     assert_eq!(req("PUT", &url, Some(TOKEN), None, Some(b"<html>not sqlite</html> and some padding to pass the length check .................")).0, 400);
-    assert_eq!(req("PUT", &format!("{base}/a%20b.uapp"), Some(TOKEN), None, Some(&upload)).0, 400);
-    assert_eq!(req("PUT", &format!("{base}/notes.txt"), Some(TOKEN), None, Some(&upload)).0, 400);
+    assert_eq!(
+        req(
+            "PUT",
+            &format!("{base}/a%20b.uapp"),
+            Some(TOKEN),
+            None,
+            Some(&upload)
+        )
+        .0,
+        400
+    );
+    assert_eq!(
+        req(
+            "PUT",
+            &format!("{base}/notes.txt"),
+            Some(TOKEN),
+            None,
+            Some(&upload)
+        )
+        .0,
+        400
+    );
     assert_eq!(req("GET", &url, None, None, None).0, 404);
 
     // A real publish.
@@ -112,7 +147,11 @@ fn publish_fetch_conflict_delete() {
     let etag = header(&h, "etag").unwrap().to_string();
     assert_eq!(j["etag"], etag);
     // No temp files left behind.
-    let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
     assert_eq!(leftovers, vec!["kanban.uapp".to_string()], "{leftovers:?}");
 
     // Anyone can fetch it — and what they get is SANITIZED.
@@ -126,14 +165,35 @@ fn publish_fetch_conflict_delete() {
     let conn = rusqlite::Connection::open(&check).unwrap();
     let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
     // Config travels minus secrets: the provider choice stays, the key goes.
-    let ai: String = conn.query_row("SELECT value FROM uapp_config WHERE key='ai'", [], |r| r.get(0)).unwrap();
-    assert!(ai.contains("anthropic") && !ai.contains("sk-SECRET") && !ai.contains("api_key"), "{ai}");
-    assert!(!String::from_utf8_lossy(&got).contains("sk-SECRET"), "the API key must not be on the shelf");
+    let ai: String = conn
+        .query_row("SELECT value FROM uapp_config WHERE key='ai'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(
+        ai.contains("anthropic") && !ai.contains("sk-SECRET") && !ai.contains("api_key"),
+        "{ai}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&got).contains("sk-SECRET"),
+        "the API key must not be on the shelf"
+    );
     assert_eq!(n("SELECT count(*) FROM uapp_chat"), 0, "chat is private");
     assert_eq!(n("SELECT count(*) FROM cards"), 2, "user rows travel");
-    assert_eq!(n("SELECT count(*) FROM sqlar WHERE name='app/index.html'"), 1);
-    assert_eq!(n("SELECT count(*) FROM sqlar WHERE name='data/notes.csv'"), 1, "data/ travels (a library is a public shelf)");
-    let name: String = conn.query_row("SELECT value FROM uapp_meta WHERE key='name'", [], |r| r.get(0)).unwrap();
+    assert_eq!(
+        n("SELECT count(*) FROM sqlar WHERE name='app/index.html'"),
+        1
+    );
+    assert_eq!(
+        n("SELECT count(*) FROM sqlar WHERE name='data/notes.csv'"),
+        1,
+        "data/ travels (a library is a public shelf)"
+    );
+    let name: String = conn
+        .query_row("SELECT value FROM uapp_meta WHERE key='name'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     assert_eq!(name, "Kanban");
     drop(conn);
     let _ = std::fs::remove_file(&check);
@@ -151,10 +211,24 @@ fn publish_fetch_conflict_delete() {
     // A publish from a copy that is not the current one is a conflict — and
     // the shelf is untouched by it.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let (st, h, b) = req("PUT", &url, Some(TOKEN), Some("\"stale-etag\""), Some(&upload));
+    let (st, h, b) = req(
+        "PUT",
+        &url,
+        Some(TOKEN),
+        Some("\"stale-etag\""),
+        Some(&upload),
+    );
     assert_eq!(st, 409, "{}", String::from_utf8_lossy(&b));
     assert_eq!(header(&h, "etag"), Some(etag.as_str()));
-    assert_eq!(req("GET", &url, None, None, None).1.iter().find(|(k, _)| k == "etag").unwrap().1, etag);
+    assert_eq!(
+        req("GET", &url, None, None, None)
+            .1
+            .iter()
+            .find(|(k, _)| k == "etag")
+            .unwrap()
+            .1,
+        etag
+    );
     // From the current copy it goes through, and the ETag moves on.
     let (st, h, _) = req("PUT", &url, Some(TOKEN), Some(&etag), Some(&upload));
     assert_eq!(st, 200);
@@ -175,12 +249,29 @@ fn the_query_token_works_too_and_hidden_files_are_invisible() {
     let upload = sample_app(&dir);
     std::fs::write(dir.join(".secret.uapp"), &upload).unwrap();
     std::fs::write(dir.join("README.md"), "not an app").unwrap();
-    let (st, _, _) = req("PUT", &format!("{base}/todo.uapp?t={TOKEN}"), None, None, Some(&upload));
+    let (st, _, _) = req(
+        "PUT",
+        &format!("{base}/todo.uapp?t={TOKEN}"),
+        None,
+        None,
+        Some(&upload),
+    );
     assert_eq!(st, 200);
     let (_, _, b) = req("GET", &format!("{base}/"), None, None, None);
-    let names: Vec<String> = json(&b)["apps"].as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap().to_string()).collect();
+    let names: Vec<String> = json(&b)["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(names, vec!["todo.uapp".to_string()]);
-    assert_eq!(req("GET", &format!("{base}/.secret.uapp"), None, None, None).0, 404);
-    assert_eq!(req("GET", &format!("{base}/README.md"), None, None, None).0, 404);
+    assert_eq!(
+        req("GET", &format!("{base}/.secret.uapp"), None, None, None).0,
+        404
+    );
+    assert_eq!(
+        req("GET", &format!("{base}/README.md"), None, None, None).0,
+        404
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

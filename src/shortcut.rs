@@ -63,7 +63,10 @@ pub fn install(app_id: &str, name: &str, path: &Path, icon_png: Option<&[u8]>) -
 pub fn status(app_id: &str, name: &str) -> (bool, Option<String>) {
     if let Some((files, detail)) = record(app_id) {
         if files.iter().any(|f| f.exists()) {
-            return (true, detail.or_else(|| files.first().map(|f| f.display().to_string())));
+            return (
+                true,
+                detail.or_else(|| files.first().map(|f| f.display().to_string())),
+            );
         }
     }
     if let Some(p) = default_entry(display_name(name)) {
@@ -102,23 +105,31 @@ pub fn remove(app_id: &str, name: &str) -> Result<String> {
 /// Names may come in blank (a brand-new app); the entry still needs one.
 fn display_name(name: &str) -> &str {
     let t = name.trim();
-    if t.is_empty() { "uapp" } else { t }
+    if t.is_empty() {
+        "uapp"
+    } else {
+        t
+    }
 }
 
 /// Where an install of the *current* name would land — the status/remove
 /// fallback when no record survives.
 fn default_entry(name: &str) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
-    return dirs::data_dir()
-        .map(|d| d.join("applications").join(format!("uapp-{}.desktop", slug(name).to_lowercase())));
+    return dirs::data_dir().map(|d| {
+        d.join("applications")
+            .join(format!("uapp-{}.desktop", slug(name).to_lowercase()))
+    });
     #[cfg(windows)]
     return dirs::data_dir().map(|d| {
         d.join("Microsoft\\Windows\\Start Menu\\Programs\\uapp")
             .join(format!("{}.lnk", sanitize_win(name)))
     });
     #[cfg(target_os = "macos")]
-    return dirs::home_dir()
-        .map(|h| h.join("Applications").join(format!("{}.app", sanitize_mac(name))));
+    return dirs::home_dir().map(|h| {
+        h.join("Applications")
+            .join(format!("{}.app", sanitize_mac(name)))
+    });
     #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
     {
         let _ = name;
@@ -166,10 +177,20 @@ fn record_set(app_id: &str, entry: Option<Value>) -> Result<()> {
 fn slug(name: &str) -> String {
     let s: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let s = s.trim_matches('-').to_string();
-    if s.is_empty() { "app".into() } else { s }
+    if s.is_empty() {
+        "app".into()
+    } else {
+        s
+    }
 }
 
 /// Wrap one PNG as a minimal .icns: modern icns entries (10.7+) may hold raw
@@ -213,7 +234,10 @@ fn png_to_icns(png: &[u8]) -> Vec<u8> {
 /// this must exist everywhere too — dead on platforms that never call it.
 #[allow(dead_code)]
 fn icon_path(name: &str, ext: &str) -> Result<PathBuf> {
-    let dir = dirs::data_dir().context("no data dir")?.join("uapp").join("icons");
+    let dir = dirs::data_dir()
+        .context("no data dir")?
+        .join("uapp")
+        .join("icons");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join(format!("{}.{ext}", slug(name).to_lowercase())))
 }
@@ -237,7 +261,10 @@ fn desktop_exec_arg(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars().filter(|c| !c.is_control()) {
         match c {
-            '"' | '`' | '$' => { out.push_str("\\\\"); out.push(c); }
+            '"' | '`' | '$' => {
+                out.push_str("\\\\");
+                out.push(c);
+            }
             '\\' => out.push_str("\\\\\\\\"),
             '%' => out.push_str("%%"),
             c => out.push(c),
@@ -247,7 +274,11 @@ fn desktop_exec_arg(s: &str) -> String {
     out
 }
 
-fn linux(name: &str, path: &Path, icon_png: Option<&[u8]>) -> Result<(String, String, Vec<PathBuf>)> {
+fn linux(
+    name: &str,
+    path: &Path,
+    icon_png: Option<&[u8]>,
+) -> Result<(String, String, Vec<PathBuf>)> {
     let exe = std::env::current_exe().context("resolve current executable")?;
     let apps = dirs::data_dir()
         .context("no data dir")?
@@ -280,7 +311,10 @@ fn linux(name: &str, path: &Path, icon_png: Option<&[u8]>) -> Result<(String, St
         .arg(&apps)
         .status();
     Ok((
-        format!("Added “{name}” to your applications menu ({})", file.display()),
+        format!(
+            "Added “{name}” to your applications menu ({})",
+            file.display()
+        ),
         format!("applications menu ({})", file.display()),
         created,
     ))
@@ -288,7 +322,11 @@ fn linux(name: &str, path: &Path, icon_png: Option<&[u8]>) -> Result<(String, St
 
 // ---- Windows: Start Menu .lnk via the WScript.Shell COM object -------------
 #[cfg(windows)]
-fn windows(name: &str, path: &Path, icon_png: Option<&[u8]>) -> Result<(String, String, Vec<PathBuf>)> {
+fn windows(
+    name: &str,
+    path: &Path,
+    icon_png: Option<&[u8]>,
+) -> Result<(String, String, Vec<PathBuf>)> {
     let exe = std::env::current_exe().context("resolve current executable")?;
     let dir = dirs::data_dir()
         .context("no data dir")?
@@ -335,11 +373,20 @@ fn windows(name: &str, path: &Path, icon_png: Option<&[u8]>) -> Result<(String, 
         .output()
         .context("run powershell")?;
     if !out.status.success() {
-        bail!("powershell failed: {}", String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "powershell failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     Ok((
-        format!("Added “{name}” to the Start Menu (uapp folder){}",
-            if desktop.is_some() { " and your desktop" } else { "" }),
+        format!(
+            "Added “{name}” to the Start Menu (uapp folder){}",
+            if desktop.is_some() {
+                " and your desktop"
+            } else {
+                ""
+            }
+        ),
         format!("Start Menu ({})", lnk.display()),
         created,
     ))
@@ -356,7 +403,13 @@ fn png_to_ico(png: &[u8]) -> Vec<u8> {
             .map(u32::from_be_bytes)
             .unwrap_or(0)
     };
-    let dim = |v: u32| -> u8 { if v == 0 || v >= 256 { 0 } else { v as u8 } };
+    let dim = |v: u32| -> u8 {
+        if v == 0 || v >= 256 {
+            0
+        } else {
+            v as u8
+        }
+    };
     let mut ico = Vec::with_capacity(22 + png.len());
     ico.extend_from_slice(&[0, 0, 1, 0, 1, 0]); // reserved, type=icon, count=1
     ico.push(dim(be(16))); // width
@@ -374,7 +427,9 @@ fn png_to_ico(png: &[u8]) -> Vec<u8> {
 /// Control chars are dropped so a hostile name can't smuggle line breaks in.
 #[cfg(windows)]
 fn ps_quote(s: &str) -> String {
-    let body: String = s.chars().filter(|c| !c.is_control())
+    let body: String = s
+        .chars()
+        .filter(|c| !c.is_control())
         .flat_map(|c| if c == '\'' { vec!['\'', '\''] } else { vec![c] })
         .collect();
     format!("'{body}'")
@@ -382,18 +437,29 @@ fn ps_quote(s: &str) -> String {
 
 #[cfg(windows)]
 fn sanitize_win(name: &str) -> String {
-    let s: String = name.chars().map(|c| match c {
-        '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
-        c if c.is_control() => '-',
-        c => c,
-    }).collect();
+    let s: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
     let s = s.trim().trim_matches('.').to_string();
-    if s.is_empty() { "app".into() } else { s }
+    if s.is_empty() {
+        "app".into()
+    } else {
+        s
+    }
 }
 
 // ---- macOS: ~/Applications/<Name>.app wrapping `uapp <file>` ---------------
 #[cfg(target_os = "macos")]
-fn macos(name: &str, path: &Path, icon_png: Option<&[u8]>) -> Result<(String, String, Vec<PathBuf>)> {
+fn macos(
+    name: &str,
+    path: &Path,
+    icon_png: Option<&[u8]>,
+) -> Result<(String, String, Vec<PathBuf>)> {
     let exe = std::env::current_exe().context("resolve current executable")?;
     let home = dirs::home_dir().context("no home dir")?;
     let apps = home.join("Applications");
@@ -403,9 +469,11 @@ fn macos(name: &str, path: &Path, icon_png: Option<&[u8]>) -> Result<(String, St
     let script = macos_dir.join("uapp-launch");
     std::fs::write(
         &script,
-        format!("#!/bin/sh\nexec {} {}\n",
+        format!(
+            "#!/bin/sh\nexec {} {}\n",
             sh_quote(&exe.display().to_string()),
-            sh_quote(&path.display().to_string())),
+            sh_quote(&path.display().to_string())
+        ),
     )?;
     set_executable(&script)?;
     // Custom icon: PNG wrapped as .icns inside the bundle (removed with it).
@@ -444,13 +512,20 @@ fn macos(name: &str, path: &Path, icon_png: Option<&[u8]>) -> Result<(String, St
 
 #[cfg(target_os = "macos")]
 fn sanitize_mac(name: &str) -> String {
-    let s: String = name.chars().map(|c| match c {
-        '/' | ':' => '-',
-        c if c.is_control() => '-',
-        c => c,
-    }).collect();
+    let s: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | ':' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
     let s = s.trim().to_string();
-    if s.is_empty() { "app".into() } else { s }
+    if s.is_empty() {
+        "app".into()
+    } else {
+        s
+    }
 }
 
 /// POSIX-shell single-quoted literal ('' has no escapes; a literal quote is
@@ -462,12 +537,15 @@ fn sh_quote(s: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn xml_escape(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).map(|c| match c {
-        '&' => "&amp;".to_string(),
-        '<' => "&lt;".to_string(),
-        '>' => "&gt;".to_string(),
-        c => c.to_string(),
-    }).collect()
+    s.chars()
+        .filter(|c| !c.is_control())
+        .map(|c| match c {
+            '&' => "&amp;".to_string(),
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -480,7 +558,9 @@ fn set_executable(p: &Path) -> Result<()> {
 }
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
-fn set_executable(_p: &Path) -> Result<()> { Ok(()) }
+fn set_executable(_p: &Path) -> Result<()> {
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -502,15 +582,28 @@ mod tests {
         let png = fake_png(256, 256);
         let icns = png_to_icns(&png);
         assert_eq!(&icns[0..4], b"icns");
-        assert_eq!(u32::from_be_bytes(icns[4..8].try_into().unwrap()) as usize, icns.len());
+        assert_eq!(
+            u32::from_be_bytes(icns[4..8].try_into().unwrap()) as usize,
+            icns.len()
+        );
         assert_eq!(&icns[8..12], b"ic08"); // 256px type
-        assert_eq!(u32::from_be_bytes(icns[12..16].try_into().unwrap()) as usize, 8 + png.len());
+        assert_eq!(
+            u32::from_be_bytes(icns[12..16].try_into().unwrap()) as usize,
+            8 + png.len()
+        );
         assert_eq!(&icns[16..], &png[..]);
     }
 
     #[test]
     fn icns_type_by_size() {
-        for (side, kind) in [(1024, b"ic10"), (512, b"ic09"), (128, b"ic07"), (64, b"ic12"), (32, b"ic11"), (16, b"ic11")] {
+        for (side, kind) in [
+            (1024, b"ic10"),
+            (512, b"ic09"),
+            (128, b"ic07"),
+            (64, b"ic12"),
+            (32, b"ic11"),
+            (16, b"ic11"),
+        ] {
             let icns = png_to_icns(&fake_png(side, side));
             assert_eq!(&icns[8..12], kind, "side {side}");
         }

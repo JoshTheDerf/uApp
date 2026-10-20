@@ -31,7 +31,13 @@ extern "C" {
     /// when the page isn't cross-origin isolated (no SharedArrayBuffer) and
     /// a sync XHR had to be used, the whole body too as `bodyB64` — or
     /// {error}.
-    pub fn js_http_open(method: &str, url: &str, headers_json: &str, body: Option<String>, connect_timeout_ms: f64) -> String;
+    pub fn js_http_open(
+        method: &str,
+        url: &str,
+        headers_json: &str,
+        body: Option<String>,
+        connect_timeout_ms: f64,
+    ) -> String;
     /// Next body chunk of an open request (empty = end of body). Blocks —
     /// servicing page RPCs meanwhile — until data arrives or the read timeout
     /// passes. Throws on a transport failure.
@@ -76,8 +82,20 @@ pub fn forward_event(v: &Value) {
     js_notify(&v.to_string());
 }
 
-pub fn http_open(method: &str, url: &str, headers_json: &str, body: Option<&str>, connect_timeout_ms: u64) -> String {
-    js_http_open(method, url, headers_json, body.map(|s| s.to_string()), connect_timeout_ms as f64)
+pub fn http_open(
+    method: &str,
+    url: &str,
+    headers_json: &str,
+    body: Option<&str>,
+    connect_timeout_ms: u64,
+) -> String {
+    js_http_open(
+        method,
+        url,
+        headers_json,
+        body.map(|s| s.to_string()),
+        connect_timeout_ms as f64,
+    )
 }
 
 pub fn http_read(id: u32, read_timeout_ms: u64) -> std::io::Result<Vec<u8>> {
@@ -123,7 +141,11 @@ pub fn open_app(bytes: Option<Vec<u8>>, name: String, user: String) -> Result<St
             &name,
             bytes,
             "browser".to_string(),
-            if user.trim().is_empty() { "You".to_string() } else { user },
+            if user.trim().is_empty() {
+                "You".to_string()
+            } else {
+                user
+            },
         )?;
         let app = Arc::new(App::new(eng, String::new(), false));
         // The page is the one, always-connected client.
@@ -190,5 +212,10 @@ pub fn ai_tick(session: String) {
     };
     let ctx = crate::ai::RunCtx::root(session.clone(), stop.clone());
     let result = crate::ai::run(&app, &ctx);
-    crate::rpc::finish_run(&app, &session, result, stop.load(std::sync::atomic::Ordering::Relaxed));
+    crate::rpc::finish_run(
+        &app,
+        &session,
+        result,
+        stop.load(std::sync::atomic::Ordering::Relaxed),
+    );
 }

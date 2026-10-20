@@ -139,7 +139,9 @@ fn install_drop_forwarding<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
             crate::native::shutdown_server();
             return;
         }
-        let tauri::WindowEvent::DragDrop(drag) = event else { return };
+        let tauri::WindowEvent::DragDrop(drag) = event else {
+            return;
+        };
         // Positions arrive in physical pixels; the shell needs CSS pixels to
         // find the element under the cursor.
         let (phase, paths, pos) = match drag {
@@ -263,11 +265,10 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
     use webkit2gtk::glib::prelude::*;
     use webkit2gtk::glib::translate::ToGlibPtr;
     use webkit2gtk::{
-        DeviceInfoPermissionRequest, GeolocationPermissionRequest,
-        NotificationPermissionRequest, PermissionRequest, PermissionRequestExt,
-        PointerLockPermissionRequest, SettingsExt, UserMediaPermissionRequest,
-        UserMediaPermissionRequestExt, WebViewExt, WebsiteDataAccessPermissionRequest,
-        WebsiteDataAccessPermissionRequestExt,
+        DeviceInfoPermissionRequest, GeolocationPermissionRequest, NotificationPermissionRequest,
+        PermissionRequest, PermissionRequestExt, PointerLockPermissionRequest, SettingsExt,
+        UserMediaPermissionRequest, UserMediaPermissionRequestExt, WebViewExt,
+        WebsiteDataAccessPermissionRequest, WebsiteDataAccessPermissionRequestExt,
     };
 
     // Requests waiting on the user. WebKit hands them to us on the GTK main
@@ -300,7 +301,11 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
             // Device labels are not a question of their own: browsers expose
             // them once a capture permission exists, so answer from the
             // standing grant and never raise a dialog for enumerateDevices.
-            if req.clone().downcast::<DeviceInfoPermissionRequest>().is_ok() {
+            if req
+                .clone()
+                .downcast::<DeviceInfoPermissionRequest>()
+                .is_ok()
+            {
                 if crate::permissions::any_allowed(&[Feature::Camera, Feature::Microphone]) {
                     req.allow();
                 } else {
@@ -331,22 +336,37 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
                     }
                     Ask::new(f)
                 }
-            } else if req.clone().downcast::<GeolocationPermissionRequest>().is_ok() {
-                Ask::one(Feature::Location)
-            } else if req.clone().downcast::<NotificationPermissionRequest>().is_ok() {
-                Ask::one(Feature::Notifications)
-            } else if req.clone().downcast::<PointerLockPermissionRequest>().is_ok() {
-                Ask::one(Feature::PointerLock)
-            } else if let Ok(sa) = req
+            } else if req
                 .clone()
-                .downcast::<WebsiteDataAccessPermissionRequest>()
+                .downcast::<GeolocationPermissionRequest>()
+                .is_ok()
             {
+                Ask::one(Feature::Location)
+            } else if req
+                .clone()
+                .downcast::<NotificationPermissionRequest>()
+                .is_ok()
+            {
+                Ask::one(Feature::Notifications)
+            } else if req
+                .clone()
+                .downcast::<PointerLockPermissionRequest>()
+                .is_ok()
+            {
+                Ask::one(Feature::PointerLock)
+            } else if let Ok(sa) = req.clone().downcast::<WebsiteDataAccessPermissionRequest>() {
                 // An embedded third-party frame asking for its own cookies.
                 // "This app wants storage access" would be meaningless, so the
                 // prompt names both sides, and the decision is remembered
                 // against the requesting domain rather than the app as a whole.
-                let requesting = sa.requesting_domain().map(|d| d.to_string()).unwrap_or_default();
-                let current = sa.current_domain().map(|d| d.to_string()).unwrap_or_default();
+                let requesting = sa
+                    .requesting_domain()
+                    .map(|d| d.to_string())
+                    .unwrap_or_default();
+                let current = sa
+                    .current_domain()
+                    .map(|d| d.to_string())
+                    .unwrap_or_default();
                 if requesting.is_empty() {
                     return false; // nothing to name, nothing to scope: deny
                 }
@@ -626,58 +646,64 @@ fn resolve_app_path(mobile_data: Option<&std::path::Path>) -> (std::path::PathBu
         // "open with" (which is exactly how the original bug presented).
         let candidates = [data_root.to_path_buf(), data_root.join("files")];
         for dir in candidates.iter().filter(|d| d.exists()) {
-        // Launched from a pinned launcher shortcut (shell → Install button):
-        // the marker holds the absolute path of the exact .uapp to open.
-        let marker = dir.join("shortcut_open.path");
-        if let Ok(p) = std::fs::read_to_string(&marker) {
-            let _ = std::fs::remove_file(&marker);
-            let p = std::path::PathBuf::from(p.trim());
-            if p.is_absolute() && p.exists() {
-                return (p, false);
+            // Launched from a pinned launcher shortcut (shell → Install button):
+            // the marker holds the absolute path of the exact .uapp to open.
+            let marker = dir.join("shortcut_open.path");
+            if let Ok(p) = std::fs::read_to_string(&marker) {
+                let _ = std::fs::remove_file(&marker);
+                let p = std::path::PathBuf::from(p.trim());
+                if p.is_absolute() && p.exists() {
+                    return (p, false);
+                }
             }
-        }
-        let pending = dir.join("pending_open.uapp");
-        if pending.exists() {
-            let name = std::fs::read_to_string(dir.join("pending_open.name"))
-                .ok()
-                .and_then(|s| {
-                    // The display name originates from the sending app's
-                    // intent — strip path separators/control chars so it
-                    // can't escape the documents dir when joined below.
-                    let s: String = s
-                        .trim()
-                        .chars()
-                        .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
-                        .collect();
-                    let s = s.trim_matches('.').trim().to_string();
-                    if s.is_empty() {
-                        None
-                    } else if s.ends_with(".uapp") {
-                        Some(s)
-                    } else {
-                        Some(format!("{s}.uapp"))
-                    }
-                })
-                .unwrap_or_else(|| "Shared App.uapp".into());
-            // The documents dir stays anchored at the data root even when the
-            // marker was found in the files/ fallback location.
-            let docs = data_root.join("UApp");
-            let _ = std::fs::create_dir_all(&docs);
-            let dest = docs.join(&name);
-            let _ = std::fs::remove_file(dir.join("pending_open.name"));
-            match import_pending(&pending, &dest) {
-                Ok(()) => return (dest, false),
-                Err(e) => {
-                    // The working copy (if any) is untouched; open it, or
-                    // fall through to the default document.
-                    eprintln!("uapp: not importing {name}: {e:#}");
-                    let _ = std::fs::remove_file(&pending);
-                    if dest.exists() {
-                        return (dest, false);
+            let pending = dir.join("pending_open.uapp");
+            if pending.exists() {
+                let name = std::fs::read_to_string(dir.join("pending_open.name"))
+                    .ok()
+                    .and_then(|s| {
+                        // The display name originates from the sending app's
+                        // intent — strip path separators/control chars so it
+                        // can't escape the documents dir when joined below.
+                        let s: String = s
+                            .trim()
+                            .chars()
+                            .map(|c| {
+                                if c == '/' || c == '\\' || c.is_control() {
+                                    '-'
+                                } else {
+                                    c
+                                }
+                            })
+                            .collect();
+                        let s = s.trim_matches('.').trim().to_string();
+                        if s.is_empty() {
+                            None
+                        } else if s.ends_with(".uapp") {
+                            Some(s)
+                        } else {
+                            Some(format!("{s}.uapp"))
+                        }
+                    })
+                    .unwrap_or_else(|| "Shared App.uapp".into());
+                // The documents dir stays anchored at the data root even when the
+                // marker was found in the files/ fallback location.
+                let docs = data_root.join("UApp");
+                let _ = std::fs::create_dir_all(&docs);
+                let dest = docs.join(&name);
+                let _ = std::fs::remove_file(dir.join("pending_open.name"));
+                match import_pending(&pending, &dest) {
+                    Ok(()) => return (dest, false),
+                    Err(e) => {
+                        // The working copy (if any) is untouched; open it, or
+                        // fall through to the default document.
+                        eprintln!("uapp: not importing {name}: {e:#}");
+                        let _ = std::fs::remove_file(&pending);
+                        if dest.exists() {
+                            return (dest, false);
+                        }
                     }
                 }
             }
-        }
         }
     }
     #[cfg(desktop)]
@@ -713,7 +739,10 @@ fn import_pending(pending: &std::path::Path, dest: &std::path::Path) -> anyhow::
         let docs = dest.parent().unwrap_or(std::path::Path::new("."));
         let keep = docs.join(".replaced");
         std::fs::create_dir_all(&keep)?;
-        let stem = dest.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let stem = dest
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         let backup = keep.join(format!("{stem}-{}.uapp", crate::store::now_ms()));
         std::fs::rename(dest, &backup)?;
         // Rolling retention, per document name (now_ms sorts lexically).

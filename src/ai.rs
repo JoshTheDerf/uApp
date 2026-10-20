@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::rpc;
 use crate::app::App;
+use crate::rpc;
 use crate::store;
 
 const MAX_ITERATIONS: usize = 40;
@@ -52,7 +52,12 @@ pub struct RunCtx {
 
 impl RunCtx {
     pub fn root(session: String, stop: Arc<std::sync::atomic::AtomicBool>) -> Self {
-        RunCtx { root: session.clone(), session, stop, depth: 0 }
+        RunCtx {
+            root: session.clone(),
+            session,
+            stop,
+            depth: 0,
+        }
     }
     fn child(&self, session: String) -> Self {
         RunCtx {
@@ -99,7 +104,10 @@ impl Drop for CtxGuard {
 /// top-level ctx on the main session.
 fn current_ctx() -> RunCtx {
     CURRENT_RUN.with(|c| c.borrow().clone()).unwrap_or_else(|| {
-        RunCtx::root("main".to_string(), Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        RunCtx::root(
+            "main".to_string(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
     })
 }
 
@@ -145,7 +153,11 @@ fn default_max_tokens(provider: &str) -> u32 {
 /// Serialized-history budget for this provider: compaction trigger and the
 /// outgoing hard-trim ceiling.
 fn compact_bytes(cfg: &AiConfig) -> usize {
-    if cfg.provider == "local" { LOCAL_COMPACT_BYTES } else { AUTO_COMPACT_BYTES }
+    if cfg.provider == "local" {
+        LOCAL_COMPACT_BYTES
+    } else {
+        AUTO_COMPACT_BYTES
+    }
 }
 
 fn load_config(app: &Arc<App>) -> Result<AiConfig> {
@@ -182,7 +194,10 @@ fn system_prompt(app: &Arc<App>, ctx: &RunCtx) -> String {
         )
         .map(|v| v.to_string())
         .unwrap_or_default();
-        let name = store::meta_get(&eng.db, "name").ok().flatten().unwrap_or_default();
+        let name = store::meta_get(&eng.db, "name")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         (files, schema, name)
     };
     format!(
@@ -416,16 +431,22 @@ fn approval_gate(
     // thread shows the prompt and writes the decision back).
     #[cfg(target_arch = "wasm32")]
     {
-        let reply = crate::wasm::bridge_call("approval", &json!({
-            "id": id, "name": name, "input": input,
-            "note": forced.as_ref().map(|(_, r)| r.clone()),
-            "session": ctx.root,
-        }));
+        let reply = crate::wasm::bridge_call(
+            "approval",
+            &json!({
+                "id": id, "name": name, "input": input,
+                "note": forced.as_ref().map(|(_, r)| r.clone()),
+                "session": ctx.root,
+            }),
+        );
         return match reply {
             Ok(v) => {
                 let allow = v["allow"].as_bool().unwrap_or(false);
                 if allow && v["always"].as_bool().unwrap_or(false) {
-                    let key = forced.as_ref().map(|(k, _)| k.clone()).unwrap_or_else(|| name.to_string());
+                    let key = forced
+                        .as_ref()
+                        .map(|(k, _)| k.clone())
+                        .unwrap_or_else(|| name.to_string());
                     app.always_allow.lock().unwrap().insert(key);
                 }
                 allow
@@ -435,34 +456,37 @@ fn approval_gate(
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(bool, bool)>(1);
-    app.pending.lock().unwrap().insert(
-        id.to_string(),
-        crate::app::PendingApproval {
-            name: name.to_string(),
-            // The RUN's session (not a sub-agent's), so ai.stop on the chat the
-            // user is looking at resolves prompts raised deep inside it.
-            session: ctx.root.clone(),
-            input: input.clone(),
-            created: crate::store::now_ms(),
-            note: forced.as_ref().map(|(_, reason)| reason.clone()),
-            tx,
-        },
-    );
-    app.notify_pending();
-    let decision = rx.recv_timeout(std::time::Duration::from_secs(300));
-    app.pending.lock().unwrap().remove(id);
-    app.notify_pending();
-    match decision {
-        Ok((allow, always)) => {
-            if allow && always {
-                let key = forced.as_ref().map(|(k, _)| k.clone()).unwrap_or_else(|| name.to_string());
-                app.always_allow.lock().unwrap().insert(key);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(bool, bool)>(1);
+        app.pending.lock().unwrap().insert(
+            id.to_string(),
+            crate::app::PendingApproval {
+                name: name.to_string(),
+                // The RUN's session (not a sub-agent's), so ai.stop on the chat the
+                // user is looking at resolves prompts raised deep inside it.
+                session: ctx.root.clone(),
+                input: input.clone(),
+                created: crate::store::now_ms(),
+                note: forced.as_ref().map(|(_, reason)| reason.clone()),
+                tx,
+            },
+        );
+        app.notify_pending();
+        let decision = rx.recv_timeout(std::time::Duration::from_secs(300));
+        app.pending.lock().unwrap().remove(id);
+        app.notify_pending();
+        match decision {
+            Ok((allow, always)) => {
+                if allow && always {
+                    let key = forced
+                        .as_ref()
+                        .map(|(k, _)| k.clone())
+                        .unwrap_or_else(|| name.to_string());
+                    app.always_allow.lock().unwrap().insert(key);
+                }
+                allow
             }
-            allow
+            Err(_) => false, // timeout or channel dropped => deny
         }
-        Err(_) => false, // timeout or channel dropped => deny
-    }
     }
 }
 
@@ -491,13 +515,16 @@ pub fn app_approval_gate(app: &Arc<App>, tool: &str, input: &Value) -> Result<bo
     #[cfg(target_arch = "wasm32")]
     {
         // wasm: use the bridge to prompt
-        let reply = crate::wasm::bridge_call("approval.app", &json!({
-            "id": id,
-            "app": app_name,
-            "appId": app_id,
-            "tool": tool,
-            "input": input,
-        }));
+        let reply = crate::wasm::bridge_call(
+            "approval.app",
+            &json!({
+                "id": id,
+                "app": app_name,
+                "appId": app_id,
+                "tool": tool,
+                "input": input,
+            }),
+        );
         match reply {
             Ok(v) => {
                 let allow = v["allow"].as_bool().unwrap_or(false);
@@ -564,7 +591,13 @@ pub fn ask_user(app: &Arc<App>, input: &Value) -> Result<Value> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow!("every entry needs a non-empty 'question'"))?;
-        let header: String = q["header"].as_str().unwrap_or("").trim().chars().take(12).collect();
+        let header: String = q["header"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(12)
+            .collect();
         let options: Vec<Value> = q["options"]
             .as_array()
             .map(|a| {
@@ -596,9 +629,12 @@ pub fn ask_user(app: &Arc<App>, input: &Value) -> Result<Value> {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = &ctx;
-        let reply = crate::wasm::bridge_call("ask_user", &json!({
-            "id": id, "questions": questions, "session": ctx.root,
-        }));
+        let reply = crate::wasm::bridge_call(
+            "ask_user",
+            &json!({
+                "id": id, "questions": questions, "session": ctx.root,
+            }),
+        );
         let v = match reply {
             Ok(v) if v["answers"].is_array() => v,
             _ => {
@@ -616,7 +652,11 @@ pub fn ask_user(app: &Arc<App>, input: &Value) -> Result<Value> {
             let a = got.get(i).cloned().unwrap_or(json!({}));
             let choices: Vec<String> = a["choices"]
                 .as_array()
-                .map(|c| c.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                .map(|c| {
+                    c.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
             let other = a["other"].as_str().map(str::trim).filter(|s| !s.is_empty());
             any = any || !choices.is_empty() || other.is_some();
@@ -633,61 +673,67 @@ pub fn ask_user(app: &Arc<App>, input: &Value) -> Result<Value> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(1);
-    app.questions.lock().unwrap().insert(
-        id.clone(),
-        crate::app::PendingQuestion {
-            questions: questions.clone(),
-            session: ctx.root.clone(),
-            created: crate::store::now_ms(),
-            tx,
-        },
-    );
-    app.notify_questions();
-    let timeout_ms: u64 = std::env::var("UAPP_ASK_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300_000);
-    let answer = rx.recv_timeout(std::time::Duration::from_millis(timeout_ms));
-    app.questions.lock().unwrap().remove(&id);
-    app.notify_questions();
-    match answer {
-        Ok(v) if v["stopped"] == json!(true) => Ok(json!({
-            "answered": false,
-            "note": "the run was stopped before the user answered"
-        })),
-        Ok(v) => {
-            // Pair each answer with its question text so the transcript reads
-            // on its own; unanswered questions come back with empty fields.
-            let empty = Vec::new();
-            let got = v["answers"].as_array().unwrap_or(&empty);
-            let mut answers = Vec::new();
-            let mut any = false;
-            for (i, q) in questions.as_array().unwrap().iter().enumerate() {
-                let a = got.get(i).cloned().unwrap_or(json!({}));
-                let choices: Vec<String> = a["choices"]
-                    .as_array()
-                    .map(|c| c.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-                    .unwrap_or_default();
-                let other = a["other"].as_str().map(str::trim).filter(|s| !s.is_empty());
-                any = any || !choices.is_empty() || other.is_some();
-                let mut row = json!({"question": q["question"], "choices": choices});
-                if let Some(o) = other {
-                    row["other"] = json!(o);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(1);
+        app.questions.lock().unwrap().insert(
+            id.clone(),
+            crate::app::PendingQuestion {
+                questions: questions.clone(),
+                session: ctx.root.clone(),
+                created: crate::store::now_ms(),
+                tx,
+            },
+        );
+        app.notify_questions();
+        let timeout_ms: u64 = std::env::var("UAPP_ASK_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300_000);
+        let answer = rx.recv_timeout(std::time::Duration::from_millis(timeout_ms));
+        app.questions.lock().unwrap().remove(&id);
+        app.notify_questions();
+        match answer {
+            Ok(v) if v["stopped"] == json!(true) => Ok(json!({
+                "answered": false,
+                "note": "the run was stopped before the user answered"
+            })),
+            Ok(v) => {
+                // Pair each answer with its question text so the transcript reads
+                // on its own; unanswered questions come back with empty fields.
+                let empty = Vec::new();
+                let got = v["answers"].as_array().unwrap_or(&empty);
+                let mut answers = Vec::new();
+                let mut any = false;
+                for (i, q) in questions.as_array().unwrap().iter().enumerate() {
+                    let a = got.get(i).cloned().unwrap_or(json!({}));
+                    let choices: Vec<String> = a["choices"]
+                        .as_array()
+                        .map(|c| {
+                            c.iter()
+                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let other = a["other"].as_str().map(str::trim).filter(|s| !s.is_empty());
+                    any = any || !choices.is_empty() || other.is_some();
+                    let mut row = json!({"question": q["question"], "choices": choices});
+                    if let Some(o) = other {
+                        row["other"] = json!(o);
+                    }
+                    answers.push(row);
                 }
-                answers.push(row);
+                if !any {
+                    return Ok(
+                        json!({"answered": false, "note": "the user submitted an empty answer"}),
+                    );
+                }
+                Ok(json!({"answered": true, "answers": answers}))
             }
-            if !any {
-                return Ok(json!({"answered": false, "note": "the user submitted an empty answer"}));
-            }
-            Ok(json!({"answered": true, "answers": answers}))
+            Err(_) => Ok(json!({
+                "answered": false,
+                "note": "no answer within the wait window — proceed on your best judgment \
+                         and say what you assumed"
+            })),
         }
-        Err(_) => Ok(json!({
-            "answered": false,
-            "note": "no answer within the wait window — proceed on your best judgment \
-                     and say what you assumed"
-        })),
-    }
     }
 }
 
@@ -744,7 +790,9 @@ fn build_messages(app: &Arc<App>, session: &str, cap: usize) -> Result<Vec<(Stri
                         let name = a["name"].as_str().unwrap_or("");
                         if is_image(name) {
                             if let Some(b) = read_b64(app, name) {
-                                blocks.push(json!({"type": "image", "media": media_type(name), "b64": b}));
+                                blocks.push(
+                                    json!({"type": "image", "media": media_type(name), "b64": b}),
+                                );
                             }
                         }
                         txt.push_str(&format!("\n[attached file stored in archive at: {name}]"));
@@ -769,7 +817,8 @@ fn build_messages(app: &Arc<App>, session: &str, cap: usize) -> Result<Vec<(Stri
                 }
             }
             "tool" => {
-                let results: Vec<Value> = content["results"].as_array().cloned().unwrap_or_default();
+                let results: Vec<Value> =
+                    content["results"].as_array().cloned().unwrap_or_default();
                 for r in &results {
                     let id = r["id"].as_str().unwrap_or("");
                     open_tool_ids.retain(|(i, _)| i != id);
@@ -790,7 +839,11 @@ fn build_messages(app: &Arc<App>, session: &str, cap: usize) -> Result<Vec<(Stri
                     "[Conversation summary — earlier messages were compacted]\n{}",
                     content["text"].as_str().unwrap_or("")
                 );
-                push_msg(&mut msgs, "user", vec![json!({"type": "text", "text": text})]);
+                push_msg(
+                    &mut msgs,
+                    "user",
+                    vec![json!({"type": "text", "text": text})],
+                );
             }
             _ => {} // system/error rows are not sent to the model
         }
@@ -896,15 +949,22 @@ fn push_msg(msgs: &mut Vec<(String, Vec<Value>)>, role: &str, blocks: Vec<Value>
 
 fn is_image(name: &str) -> bool {
     let n = name.to_lowercase();
-    [".png", ".jpg", ".jpeg", ".gif", ".webp"].iter().any(|e| n.ends_with(e))
+    [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|e| n.ends_with(e))
 }
 
 fn media_type(name: &str) -> &'static str {
     let n = name.to_lowercase();
-    if n.ends_with(".png") { "image/png" }
-    else if n.ends_with(".gif") { "image/gif" }
-    else if n.ends_with(".webp") { "image/webp" }
-    else { "image/jpeg" }
+    if n.ends_with(".png") {
+        "image/png"
+    } else if n.ends_with(".gif") {
+        "image/gif"
+    } else if n.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    }
 }
 
 fn read_b64(app: &Arc<App>, name: &str) -> Option<String> {
@@ -955,14 +1015,21 @@ fn call_provider_retrying(
                 // The request is re-sent from scratch, so it retries cleanly.
                 let transient = msg.starts_with("provider request failed")
                     || msg.starts_with("stream read failed")
-                    || ["provider returned 408", "provider returned 429", "provider returned 5"]
-                        .iter()
-                        .any(|p| msg.starts_with(p));
+                    || [
+                        "provider returned 408",
+                        "provider returned 429",
+                        "provider returned 5",
+                    ]
+                    .iter()
+                    .any(|p| msg.starts_with(p));
                 if !transient || attempt >= DELAYS_MS.len() || ctx.stopped() {
                     return Err(e);
                 }
-                app.notify("ai", json!({"state": "retry", "session": ctx.session,
-                    "message": format!("{msg} — retrying in {}s", DELAYS_MS[attempt] / 1000)}));
+                app.notify(
+                    "ai",
+                    json!({"state": "retry", "session": ctx.session,
+                    "message": format!("{msg} — retrying in {}s", DELAYS_MS[attempt] / 1000)}),
+                );
                 let _ = app.wait_until(DELAYS_MS[attempt], 250, || ctx.stopped());
                 attempt += 1;
             }
@@ -991,7 +1058,9 @@ fn call_provider(
         "openrouter" | "local" => call_openai_compat(app, session, cfg, system, msgs, tools),
         // Direct OpenAI gets their newer Responses API (see call_openai_responses).
         "openai" => call_openai_responses(cfg, system, msgs, tools),
-        other => bail!("unknown provider '{other}' (use anthropic, zai, openrouter, openai or local)"),
+        other => {
+            bail!("unknown provider '{other}' (use anthropic, zai, openrouter, openai or local)")
+        }
     }
 }
 
@@ -1017,7 +1086,12 @@ fn provider_error(resp: crate::net::Resp) -> anyhow::Error {
     let body = resp.into_string().unwrap_or_default();
     let msg = serde_json::from_str::<Value>(&body)
         .ok()
-        .and_then(|v| v["error"]["message"].as_str().or(v["message"].as_str()).map(String::from))
+        .and_then(|v| {
+            v["error"]["message"]
+                .as_str()
+                .or(v["message"].as_str())
+                .map(String::from)
+        })
         .unwrap_or_else(|| body.chars().take(400).collect());
     anyhow!("provider returned {code}: {msg}")
 }
@@ -1031,7 +1105,9 @@ fn system_blocks(system: &str, cache: bool) -> Value {
     if !cache {
         return json!(system);
     }
-    let split = system.find("\n\nCURRENT APP FILES:").unwrap_or(system.len());
+    let split = system
+        .find("\n\nCURRENT APP FILES:")
+        .unwrap_or(system.len());
     let (stable, volatile) = system.split_at(split);
     let mut blocks = vec![json!({
         "type": "text", "text": stable,
@@ -1072,11 +1148,23 @@ fn cache_last_message(messages: &[Value], cache: bool) -> Value {
     json!(out)
 }
 
-fn http_post(url: &str, headers: &[(&str, &str)], body: Value, timeout: std::time::Duration) -> Result<Value> {
+fn http_post(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Value,
+    timeout: std::time::Duration,
+) -> Result<Value> {
     let mut hdrs = headers.to_vec();
     hdrs.push(("content-type", "application/json"));
-    let resp = crate::net::request("POST", url, &hdrs, Some(&body.to_string()), 20, timeout.as_secs())
-        .map_err(|e| anyhow!("provider request failed: {e}"))?;
+    let resp = crate::net::request(
+        "POST",
+        url,
+        &hdrs,
+        Some(&body.to_string()),
+        20,
+        timeout.as_secs(),
+    )
+    .map_err(|e| anyhow!("provider request failed: {e}"))?;
     if resp.status >= 400 {
         return Err(provider_error(resp));
     }
@@ -1099,7 +1187,10 @@ fn parse_anthropic_message(resp: &Value) -> Vec<Value> {
             _ => {}
         }
     }
-    if !out.iter().any(|b| b["type"] == "text" || b["type"] == "tool_use") {
+    if !out
+        .iter()
+        .any(|b| b["type"] == "text" || b["type"] == "tool_use")
+    {
         out.clear();
     }
     out
@@ -1131,20 +1222,27 @@ fn read_anthropic_sse(
     use std::io::BufRead as _;
     for line in reader.lines() {
         let line = line.map_err(|e| anyhow!("stream read failed: {e}"))?;
-        let Some(data) = line.strip_prefix("data:") else { continue };
-        let Ok(ev) = serde_json::from_str::<Value>(data.trim()) else { continue };
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let Ok(ev) = serde_json::from_str::<Value>(data.trim()) else {
+            continue;
+        };
         match ev["type"].as_str().unwrap_or("") {
             "content_block_start" => {
                 let idx = ev["index"].as_u64().unwrap_or(0);
                 let cb = &ev["content_block"];
-                blks.insert(idx, Blk {
-                    typ: cb["type"].as_str().unwrap_or("").to_string(),
-                    text: cb["text"].as_str().unwrap_or("").to_string(),
-                    id: cb["id"].as_str().unwrap_or("").to_string(),
-                    name: cb["name"].as_str().unwrap_or("").to_string(),
-                    start_input: cb["input"].clone(),
-                    ..Default::default()
-                });
+                blks.insert(
+                    idx,
+                    Blk {
+                        typ: cb["type"].as_str().unwrap_or("").to_string(),
+                        text: cb["text"].as_str().unwrap_or("").to_string(),
+                        id: cb["id"].as_str().unwrap_or("").to_string(),
+                        name: cb["name"].as_str().unwrap_or("").to_string(),
+                        start_input: cb["input"].clone(),
+                        ..Default::default()
+                    },
+                );
             }
             "content_block_delta" => {
                 let idx = ev["index"].as_u64().unwrap_or(0);
@@ -1156,8 +1254,11 @@ fn read_anthropic_sse(
                         blk.text.push_str(t);
                         live_text.push_str(t);
                         if crate::store::now_ms().saturating_sub(last_push) > 250 {
-                            app.notify("ai", json!({"state": "streaming", "text": live_text,
-                                                    "session": session}));
+                            app.notify(
+                                "ai",
+                                json!({"state": "streaming", "text": live_text,
+                                                    "session": session}),
+                            );
                             last_push = crate::store::now_ms();
                         }
                     }
@@ -1167,13 +1268,18 @@ fn read_anthropic_sse(
                         think_chars += t.len();
                         // Heartbeat so long reasoning doesn't look stalled.
                         if crate::store::now_ms().saturating_sub(last_push) > 900 {
-                            app.notify("ai", json!({"state": "thinking", "chars": think_chars,
-                                                    "session": session}));
+                            app.notify(
+                                "ai",
+                                json!({"state": "thinking", "chars": think_chars,
+                                                    "session": session}),
+                            );
                             last_push = crate::store::now_ms();
                         }
                     }
                     "signature_delta" => blk.sig.push_str(d["signature"].as_str().unwrap_or("")),
-                    "input_json_delta" => blk.json.push_str(d["partial_json"].as_str().unwrap_or("")),
+                    "input_json_delta" => {
+                        blk.json.push_str(d["partial_json"].as_str().unwrap_or(""))
+                    }
                     _ => {}
                 }
             }
@@ -1182,24 +1288,35 @@ fn read_anthropic_sse(
                     stop_reason = sr.to_string();
                 }
             }
-            "error" => bail!("provider stream error: {}",
-                ev["error"]["message"].as_str().unwrap_or("unknown")),
+            "error" => bail!(
+                "provider stream error: {}",
+                ev["error"]["message"].as_str().unwrap_or("unknown")
+            ),
             "message_stop" => break,
             _ => {}
         }
     }
     if !live_text.is_empty() {
-        app.notify("ai", json!({"state": "streaming", "text": live_text, "session": session}));
+        app.notify(
+            "ai",
+            json!({"state": "streaming", "text": live_text, "session": session}),
+        );
     }
 
     let mut out = Vec::new();
     for (_, b) in blks {
         match b.typ.as_str() {
             "text" if !b.text.is_empty() => out.push(json!({"type": "text", "text": b.text})),
-            "thinking" => out.push(json!({"type": "thinking", "thinking": b.text, "signature": b.sig})),
+            "thinking" => {
+                out.push(json!({"type": "thinking", "thinking": b.text, "signature": b.sig}))
+            }
             "tool_use" => {
                 let input = if b.json.trim().is_empty() {
-                    if b.start_input.is_object() { b.start_input } else { json!({}) }
+                    if b.start_input.is_object() {
+                        b.start_input
+                    } else {
+                        json!({})
+                    }
                 } else {
                     tool_input(&b.json)
                 };
@@ -1219,10 +1336,13 @@ fn call_anthropic(
     msgs: &[(String, Vec<Value>)],
     tools: &[Value],
 ) -> Result<Vec<Value>> {
-    let base = cfg.base_url.clone().unwrap_or_else(|| match cfg.provider.as_str() {
-        "zai" => "https://api.z.ai/api/anthropic".into(),
-        _ => "https://api.anthropic.com".into(),
-    });
+    let base = cfg
+        .base_url
+        .clone()
+        .unwrap_or_else(|| match cfg.provider.as_str() {
+            "zai" => "https://api.z.ai/api/anthropic".into(),
+            _ => "https://api.anthropic.com".into(),
+        });
     let default_model = match cfg.provider.as_str() {
         "zai" => "glm-5.3",
         _ => "claude-sonnet-5",
@@ -1273,7 +1393,10 @@ fn call_anthropic(
     // thinking — so the retry only applies when a cap was requested.
     let mut budget = match cfg.provider.as_str() {
         "zai" => cfg.max_tokens, // None = omit the field entirely
-        _ => Some(cfg.max_tokens.unwrap_or_else(|| default_max_tokens(&cfg.provider))),
+        _ => Some(
+            cfg.max_tokens
+                .unwrap_or_else(|| default_max_tokens(&cfg.provider)),
+        ),
     };
     // Prompt caching pays off across a long tool loop, but only real
     // Anthropic is guaranteed to honour `cache_control`; z.ai's compatible
@@ -1301,7 +1424,14 @@ fn call_anthropic(
             ("Authorization", &auth),
             ("anthropic-version", "2023-06-01"),
             ("content-type", "application/json"),
-            ("accept", if stream { "text/event-stream" } else { "application/json" }),
+            (
+                "accept",
+                if stream {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                },
+            ),
         ];
         // Browser build: Anthropic requires this opt-in header before it
         // answers cross-origin requests from a page.
@@ -1331,12 +1461,18 @@ fn call_anthropic(
             // the provider ignored the stream flag.
             let v: Value = serde_json::from_str(&resp.into_string()?)?;
             if v.get("error").is_some() {
-                bail!("provider error: {}", v["error"]["message"].as_str().unwrap_or("unknown"));
+                bail!(
+                    "provider error: {}",
+                    v["error"]["message"].as_str().unwrap_or("unknown")
+                );
             }
             let stop = v["stop_reason"].as_str().unwrap_or("").to_string();
             (parse_anthropic_message(&v), stop, 0)
         };
-        if out.iter().any(|b| b["type"] == "text" || b["type"] == "tool_use") {
+        if out
+            .iter()
+            .any(|b| b["type"] == "text" || b["type"] == "tool_use")
+        {
             return Ok(out);
         }
         // Nothing usable. Thinking-only + max_tokens = an explicit budget was
@@ -1346,7 +1482,9 @@ fn call_anthropic(
             budget = Some(old.saturating_mul(2).min(131_072));
             eprintln!(
                 "uapp: model spent the whole {}-token budget thinking ({} chars); retrying with {}",
-                old, think_chars, budget.unwrap()
+                old,
+                think_chars,
+                budget.unwrap()
             );
             app.notify("ai", json!({"state": "running", "session": session,
                 "note": format!("model needed more room to think — retrying with {} tokens", budget.unwrap())}));
@@ -1393,12 +1531,16 @@ fn read_openai_sse(
     use std::io::BufRead as _;
     for line in reader.lines() {
         let line = line.map_err(|e| anyhow!("stream read failed: {e}"))?;
-        let Some(data) = line.strip_prefix("data:") else { continue };
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
         let data = data.trim();
         if data == "[DONE]" {
             break;
         }
-        let Ok(ev) = serde_json::from_str::<Value>(data) else { continue };
+        let Ok(ev) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
         // Some servers surface errors mid-stream as a JSON object with `error`.
         if let Some(msg) = ev["error"]["message"].as_str() {
             bail!("provider stream error: {msg}");
@@ -1419,8 +1561,11 @@ fn read_openai_sse(
                 think_chars += r.len();
                 // Heartbeat so long reasoning doesn't look stalled.
                 if crate::store::now_ms().saturating_sub(last_think_push) > 900 {
-                    app.notify("ai", json!({"state": "thinking", "chars": think_chars,
-                                            "session": session}));
+                    app.notify(
+                        "ai",
+                        json!({"state": "thinking", "chars": think_chars,
+                                            "session": session}),
+                    );
                     last_think_push = crate::store::now_ms();
                 }
             }
@@ -1430,7 +1575,10 @@ fn read_openai_sse(
                 text.push_str(t);
                 live_text.push_str(t);
                 if crate::store::now_ms().saturating_sub(last_push) > 250 {
-                    app.notify("ai", json!({"state": "streaming", "text": live_text, "session": session}));
+                    app.notify(
+                        "ai",
+                        json!({"state": "streaming", "text": live_text, "session": session}),
+                    );
                     last_push = crate::store::now_ms();
                 }
             }
@@ -1454,7 +1602,10 @@ fn read_openai_sse(
         }
     }
     if !live_text.is_empty() {
-        app.notify("ai", json!({"state": "streaming", "text": live_text, "session": session}));
+        app.notify(
+            "ai",
+            json!({"state": "streaming", "text": live_text, "session": session}),
+        );
     }
 
     let mut out = Vec::new();
@@ -1465,7 +1616,11 @@ fn read_openai_sse(
         let args = tool_input(&c.args);
         // A tool call needs an id for the follow-up tool_result to reference;
         // synthesize a stable one if the server omitted it.
-        let id = if c.id.is_empty() { format!("call_{i}") } else { c.id };
+        let id = if c.id.is_empty() {
+            format!("call_{i}")
+        } else {
+            c.id
+        };
         out.push(json!({"type": "tool_use", "id": id, "name": c.name, "input": args}));
     }
     Ok((out, finish, think_chars))
@@ -1479,15 +1634,18 @@ fn call_openai_compat(
     msgs: &[(String, Vec<Value>)],
     tools: &[Value],
 ) -> Result<Vec<Value>> {
-    let base = cfg.base_url.clone().unwrap_or_else(|| match cfg.provider.as_str() {
-        "zai" => "https://api.z.ai/api/paas/v4".into(),
-        "openrouter" => "https://openrouter.ai/api/v1".into(),
-        // Ollama's OpenAI-compatible endpoint, by far the most common local
-        // setup. LM Studio, llama.cpp's server, vLLM etc. all listen on a
-        // different port — Base URL in Settings overrides this.
-        "local" => "http://localhost:11434/v1".into(),
-        _ => "https://api.openai.com/v1".into(),
-    });
+    let base = cfg
+        .base_url
+        .clone()
+        .unwrap_or_else(|| match cfg.provider.as_str() {
+            "zai" => "https://api.z.ai/api/paas/v4".into(),
+            "openrouter" => "https://openrouter.ai/api/v1".into(),
+            // Ollama's OpenAI-compatible endpoint, by far the most common local
+            // setup. LM Studio, llama.cpp's server, vLLM etc. all listen on a
+            // different port — Base URL in Settings overrides this.
+            "local" => "http://localhost:11434/v1".into(),
+            _ => "https://api.openai.com/v1".into(),
+        });
     let default_model = match cfg.provider.as_str() {
         "zai" => "glm-4.6",
         "openrouter" => "anthropic/claude-sonnet-4.5",
@@ -1518,7 +1676,11 @@ fn call_openai_compat(
                 }
             }
             let mut m = json!({"role": "assistant"});
-            m["content"] = if text.is_empty() { Value::Null } else { json!(text) };
+            m["content"] = if text.is_empty() {
+                Value::Null
+            } else {
+                json!(text)
+            };
             if !tool_calls.is_empty() {
                 m["tool_calls"] = json!(tool_calls);
             }
@@ -1563,7 +1725,9 @@ fn call_openai_compat(
     // emitting any text or tool call. The Anthropic path already retries once
     // with a doubled budget for exactly that failure; do the same here, since
     // local servers run precisely those models (Qwen3, DeepSeek-R1, GLM).
-    let mut budget = cfg.max_tokens.unwrap_or_else(|| default_max_tokens(&cfg.provider));
+    let mut budget = cfg
+        .max_tokens
+        .unwrap_or_else(|| default_max_tokens(&cfg.provider));
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -1596,8 +1760,14 @@ fn call_openai_compat(
                 out.push(json!({"type": "tool_use", "id": tc["id"],
                     "name": tc["function"]["name"], "input": args}));
             }
-            let finish = resp["choices"][0]["finish_reason"].as_str().unwrap_or("").to_string();
-            let think = m["reasoning_content"].as_str().map(|t| t.len()).unwrap_or(0);
+            let finish = resp["choices"][0]["finish_reason"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let think = m["reasoning_content"]
+                .as_str()
+                .map(|t| t.len())
+                .unwrap_or(0);
             (out, finish, think)
         } else {
             body["stream"] = json!(true);
@@ -1664,7 +1834,10 @@ fn call_openai_responses(
     msgs: &[(String, Vec<Value>)],
     tools: &[Value],
 ) -> Result<Vec<Value>> {
-    let base = cfg.base_url.clone().unwrap_or_else(|| "https://api.openai.com/v1".into());
+    let base = cfg
+        .base_url
+        .clone()
+        .unwrap_or_else(|| "https://api.openai.com/v1".into());
     let default_model = "gpt-5.1";
 
     // Unlike chat/completions, the system prompt is its own top-level field
@@ -1719,8 +1892,10 @@ fn call_openai_responses(
     // chat/completions).
     let oa_tools: Vec<Value> = tools
         .iter()
-        .map(|t| json!({"type": "function", "name": t["name"],
-            "description": t["description"], "parameters": t["input_schema"]}))
+        .map(|t| {
+            json!({"type": "function", "name": t["name"],
+            "description": t["description"], "parameters": t["input_schema"]})
+        })
         .collect();
 
     let body = json!({
@@ -1743,7 +1918,10 @@ fn call_openai_responses(
         ai_timeout(cfg),
     )?;
     if resp["status"].as_str() == Some("failed") {
-        bail!("provider error: {}", resp["error"]["message"].as_str().unwrap_or("unknown"));
+        bail!(
+            "provider error: {}",
+            resp["error"]["message"].as_str().unwrap_or("unknown")
+        );
     }
     let mut out = Vec::new();
     for item in resp["output"].as_array().cloned().unwrap_or_default() {
@@ -1783,7 +1961,10 @@ fn call_openai_responses(
         }
     }
     if out.is_empty() {
-        bail!("empty response from provider: {}", resp.to_string().chars().take(300).collect::<String>());
+        bail!(
+            "empty response from provider: {}",
+            resp.to_string().chars().take(300).collect::<String>()
+        );
     }
     Ok(out)
 }
@@ -1859,9 +2040,12 @@ fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result<Outcome> {
             report = text;
         }
         let mid = format!("a-{}-{}", crate::store::now_ms(), fastrand::u32(..));
-        rpc::local_op(app, "chat",
+        rpc::local_op(
+            app,
+            "chat",
             json!({"mid": mid, "role": "assistant", "session": ctx.session,
-                   "content": {"blocks": blocks}}))?;
+                   "content": {"blocks": blocks}}),
+        )?;
         if tool_uses.is_empty() {
             // A message sent while this turn was in flight (this device or
             // another) would otherwise sit unanswered: chat.send sees the run
@@ -1899,7 +2083,10 @@ fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result<Outcome> {
                     "is_error": true, "denied": true}));
                 continue;
             }
-            app.notify("ai", json!({"state": "tool", "tool": name, "session": ctx.session}));
+            app.notify(
+                "ai",
+                json!({"state": "tool", "tool": name, "session": ctx.session}),
+            );
             let mut input = tu["input"].clone();
             if forced.is_some() {
                 // Marks the user's approval for the RPC layer; stripped from
@@ -1950,9 +2137,12 @@ fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result<Outcome> {
             }
         }
         let mid = format!("t-{}-{}", crate::store::now_ms(), fastrand::u32(..));
-        rpc::local_op(app, "chat",
+        rpc::local_op(
+            app,
+            "chat",
             json!({"mid": mid, "role": "tool", "session": ctx.session,
-                   "content": {"results": results}}))?;
+                   "content": {"results": results}}),
+        )?;
     }
     Ok(Outcome { steps, report })
 }
@@ -2000,10 +2190,17 @@ pub fn unanswered(app: &Arc<App>, session: &str) -> bool {
 /// schema so the next attempt can be well-formed.
 fn schema_hint(name: &str, err: &anyhow::Error) -> String {
     let msg = err.to_string().to_lowercase();
-    let schema_shaped = ["missing required", "must be", "expected", "invalid", "not an object",
-                         "unknown field", "needs "]
-        .iter()
-        .any(|k| msg.contains(k));
+    let schema_shaped = [
+        "missing required",
+        "must be",
+        "expected",
+        "invalid",
+        "not an object",
+        "unknown field",
+        "needs ",
+    ]
+    .iter()
+    .any(|k| msg.contains(k));
     if !schema_shaped {
         return String::new();
     }
@@ -2040,7 +2237,10 @@ fn transcript(rows: &[Value], cap: usize) -> String {
             serde_json::from_str(row[4].as_str().unwrap_or("{}")).unwrap_or(json!({}));
         let body = match role {
             "user" | "system" => content["text"].as_str().unwrap_or("").to_string(),
-            "summary" => format!("(earlier summary) {}", content["text"].as_str().unwrap_or("")),
+            "summary" => format!(
+                "(earlier summary) {}",
+                content["text"].as_str().unwrap_or("")
+            ),
             "assistant" => content["blocks"]
                 .as_array()
                 .map(|bs| {
@@ -2114,24 +2314,43 @@ pub fn compact_session(app: &Arc<App>, session: &str) -> Result<Value> {
         .map(|(i, _)| i)
         .collect();
     // Keep the last two exchanges; nothing older means nothing to do.
-    let keep_from = if user_at.len() >= 2 { user_at[user_at.len() - 2] } else { 0 };
+    let keep_from = if user_at.len() >= 2 {
+        user_at[user_at.len() - 2]
+    } else {
+        0
+    };
     if keep_from == 0 {
-        return Ok(json!({"ok": true, "kept": rows.len(), "summarized_bytes": 0,
-                         "note": "nothing old enough to compact"}));
+        return Ok(
+            json!({"ok": true, "kept": rows.len(), "summarized_bytes": 0,
+                         "note": "nothing old enough to compact"}),
+        );
     }
     let older = &rows[..keep_from];
-    let summarized_bytes: usize =
-        older.iter().map(|r| r[4].as_str().map(|s| s.len()).unwrap_or(0)).sum();
+    let summarized_bytes: usize = older
+        .iter()
+        .map(|r| r[4].as_str().map(|s| s.len()).unwrap_or(0))
+        .sum();
     let text = transcript(older, 300_000);
     if text.trim().is_empty() {
-        return Ok(json!({"ok": true, "kept": rows.len(), "summarized_bytes": 0,
-                         "note": "nothing to summarize"}));
+        return Ok(
+            json!({"ok": true, "kept": rows.len(), "summarized_bytes": 0,
+                         "note": "nothing to summarize"}),
+        );
     }
-    let msgs = vec![("user".to_string(), vec![json!({"type": "text", "text": text})])];
+    let msgs = vec![(
+        "user".to_string(),
+        vec![json!({"type": "text", "text": text})],
+    )];
     // Sentinel session: the summarizer's streamed deltas must not render as a
     // live draft bubble in the chat being compacted (no client shows this id).
-    let blocks =
-        call_provider(app, &format!("compact:{session}"), &cfg, COMPACT_PROMPT, &msgs, &[])?;
+    let blocks = call_provider(
+        app,
+        &format!("compact:{session}"),
+        &cfg,
+        COMPACT_PROMPT,
+        &msgs,
+        &[],
+    )?;
     let summary: String = blocks
         .iter()
         .filter_map(|b| b["text"].as_str().map(|t| t.to_string()))
@@ -2143,17 +2362,21 @@ pub fn compact_session(app: &Arc<App>, session: &str) -> Result<Value> {
         bail!("the summarizer returned no text — nothing was compacted");
     }
     let boundary = &rows[keep_from - 1];
-    rpc::local_op(app, "chat_compact", json!({
-        "session": session,
-        "upto_ts": boundary[1],
-        "upto_ctr": boundary[2],
-        // Tie-breaker matching the sort order: a concurrent row from another
-        // device with the same (ts,ctr) that sorts AFTER the boundary is part
-        // of the kept tail and must not be deleted.
-        "upto_dev": boundary[5],
-        "mid": format!("sum-{}-{}", crate::store::now_ms(), fastrand::u32(..)),
-        "summary": summary,
-    }))?;
+    rpc::local_op(
+        app,
+        "chat_compact",
+        json!({
+            "session": session,
+            "upto_ts": boundary[1],
+            "upto_ctr": boundary[2],
+            // Tie-breaker matching the sort order: a concurrent row from another
+            // device with the same (ts,ctr) that sorts AFTER the boundary is part
+            // of the kept tail and must not be deleted.
+            "upto_dev": boundary[5],
+            "mid": format!("sum-{}-{}", crate::store::now_ms(), fastrand::u32(..)),
+            "summary": summary,
+        }),
+    )?;
     Ok(json!({"ok": true, "kept": rows.len() - keep_from, "summarized_bytes": summarized_bytes}))
 }
 
@@ -2161,16 +2384,28 @@ pub fn compact_session(app: &Arc<App>, session: &str) -> Result<Value> {
 /// against looping: if the oldest row is ALREADY a summary, compacting again
 /// would just re-summarize a summary — the outgoing hard trim handles it.
 fn auto_compact(app: &Arc<App>, ctx: &RunCtx, cap: usize) {
-    let Ok(rows) = session_rows(app, &ctx.session) else { return };
-    let bytes: usize = rows.iter().map(|r| r[4].as_str().map(|s| s.len()).unwrap_or(0)).sum();
+    let Ok(rows) = session_rows(app, &ctx.session) else {
+        return;
+    };
+    let bytes: usize = rows
+        .iter()
+        .map(|r| r[4].as_str().map(|s| s.len()).unwrap_or(0))
+        .sum();
     if bytes <= cap {
         return;
     }
-    if rows.first().map(|r| r[3].as_str() == Some("summary")).unwrap_or(false) {
+    if rows
+        .first()
+        .map(|r| r[3].as_str() == Some("summary"))
+        .unwrap_or(false)
+    {
         return;
     }
-    app.notify("ai", json!({"state": "running", "session": ctx.session,
-                            "note": "summarizing the conversation so far…"}));
+    app.notify(
+        "ai",
+        json!({"state": "running", "session": ctx.session,
+                            "note": "summarizing the conversation so far…"}),
+    );
     if let Err(e) = compact_session(app, &ctx.session) {
         eprintln!("uapp: auto-compaction failed: {e}");
     }
@@ -2187,7 +2422,11 @@ pub fn agent_run(app: &Arc<App>, input: &Value) -> Result<Value> {
         bail!("sub-agents cannot start sub-agents");
     }
     let description = input["description"].as_str().unwrap_or("").trim();
-    let description = if description.is_empty() { "agent task" } else { description };
+    let description = if description.is_empty() {
+        "agent task"
+    } else {
+        description
+    };
     let prompt = input["prompt"]
         .as_str()
         .map(str::trim)
@@ -2200,10 +2439,14 @@ pub fn agent_run(app: &Arc<App>, input: &Value) -> Result<Value> {
     };
     let max_steps = input["max_steps"].as_u64().unwrap_or(12).clamp(1, 24) as usize;
     let session = format!("ag-{}-{}", crate::store::now_ms(), fastrand::u32(..));
-    rpc::local_op(app, "session_meta", json!({
-        "id": session, "title": clip(description, 200), "kind": "agent",
-        "parent": ctx.session, "created": crate::store::now_ms(),
-    }))?;
+    rpc::local_op(
+        app,
+        "session_meta",
+        json!({
+            "id": session, "title": clip(description, 200), "kind": "agent",
+            "parent": ctx.session, "created": crate::store::now_ms(),
+        }),
+    )?;
     let seed = if mode == "fork" {
         let digest = match build_messages(app, &ctx.session, AUTO_COMPACT_BYTES) {
             Ok(msgs) => clip(&json!(msgs).to_string(), FORK_DIGEST_BYTES),
@@ -2213,11 +2456,15 @@ pub fn agent_run(app: &Arc<App>, input: &Value) -> Result<Value> {
     } else {
         prompt.to_string()
     };
-    rpc::local_op(app, "chat", json!({
-        "mid": format!("{}-{}", crate::store::now_ms(), fastrand::u32(..)),
-        "role": "user", "session": session,
-        "content": {"text": seed, "attachments": []},
-    }))?;
+    rpc::local_op(
+        app,
+        "chat",
+        json!({
+            "mid": format!("{}-{}", crate::store::now_ms(), fastrand::u32(..)),
+            "role": "user", "session": session,
+            "content": {"text": seed, "attachments": []},
+        }),
+    )?;
     agent_loop(app, &ctx, session, max_steps)
 }
 
@@ -2228,7 +2475,9 @@ pub fn agent_send(app: &Arc<App>, input: &Value) -> Result<Value> {
         bail!("sub-agents cannot drive other sub-agents");
     }
     let session = rpc::session_id(
-        input["session"].as_str().ok_or_else(|| anyhow!("agent_send needs a session"))?,
+        input["session"]
+            .as_str()
+            .ok_or_else(|| anyhow!("agent_send needs a session"))?,
     )?;
     let message = input["message"]
         .as_str()
@@ -2249,21 +2498,20 @@ pub fn agent_send(app: &Arc<App>, input: &Value) -> Result<Value> {
         Some(other) => bail!("session {session} is a '{other}' chat, not an agent conversation"),
         None => bail!("no agent session named {session}"),
     }
-    rpc::local_op(app, "chat", json!({
-        "mid": format!("{}-{}", crate::store::now_ms(), fastrand::u32(..)),
-        "role": "user", "session": session,
-        "content": {"text": message, "attachments": []},
-    }))?;
+    rpc::local_op(
+        app,
+        "chat",
+        json!({
+            "mid": format!("{}-{}", crate::store::now_ms(), fastrand::u32(..)),
+            "role": "user", "session": session,
+            "content": {"text": message, "attachments": []},
+        }),
+    )?;
     agent_loop(app, &ctx, session, 12)
 }
 
 /// Run one sub-agent loop to completion and shape its tool result.
-fn agent_loop(
-    app: &Arc<App>,
-    parent: &RunCtx,
-    session: String,
-    max_steps: usize,
-) -> Result<Value> {
+fn agent_loop(app: &Arc<App>, parent: &RunCtx, session: String, max_steps: usize) -> Result<Value> {
     let child = parent.child(session.clone());
     let out = run_loop(app, &child, max_steps)?;
     let report = if out.report.trim().is_empty() {

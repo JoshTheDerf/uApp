@@ -5,10 +5,10 @@
 //! - templates/launcher.html - main launcher UI
 //! - templates/samples.json - catalog of demo apps
 
+use rusqlite::{params, Connection, OpenFlags};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use rusqlite::{params, Connection, OpenFlags};
 
 const STABLE_MS: i64 = 1_755_000_000_000;
 
@@ -27,8 +27,8 @@ fn main() -> std::io::Result<()> {
     // Read samples catalog
     let samples_content = fs::read_to_string(templates_dir.join("samples.json"))
         .expect("Failed to read templates/samples.json");
-    let samples: Vec<Sample> = serde_json::from_str(&samples_content)
-        .expect("Failed to parse templates/samples.json");
+    let samples: Vec<Sample> =
+        serde_json::from_str(&samples_content).expect("Failed to parse templates/samples.json");
 
     build_launcher(outdir, &samples, &launcher_html)?;
 
@@ -57,7 +57,8 @@ fn build_launcher(outdir: &str, samples: &[Sample], html: &str) -> std::io::Resu
     let conn = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-    ).unwrap();
+    )
+    .unwrap();
 
     conn.execute_batch(
         "CREATE TABLE sqlar(name TEXT PRIMARY KEY, mode INT, mtime INT, sz INT, data BLOB);
@@ -76,18 +77,43 @@ fn build_launcher(outdir: &str, samples: &[Sample], html: &str) -> std::io::Resu
          CREATE TABLE samples(
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            name TEXT NOT NULL, url TEXT NOT NULL, emoji TEXT, description TEXT, website TEXT,
-           size INTEGER, kind TEXT NOT NULL DEFAULT 'app');"
-    ).unwrap();
+           size INTEGER, kind TEXT NOT NULL DEFAULT 'app');",
+    )
+    .unwrap();
 
     let app_id = random_id();
-    conn.execute("INSERT INTO uapp_meta(key,value) VALUES(?,?)", params!["app_id", &app_id]).unwrap();
-    conn.execute("INSERT INTO uapp_meta(key,value) VALUES(?,?)", params!["name", "Apps"]).unwrap();
-    conn.execute("INSERT INTO uapp_meta(key,value) VALUES(?,?)", params!["format_version", "1"]).unwrap();
-    conn.execute("INSERT INTO uapp_meta(key,value) VALUES(?,?)", params!["created", &STABLE_MS.to_string()]).unwrap();
+    conn.execute(
+        "INSERT INTO uapp_meta(key,value) VALUES(?,?)",
+        params!["app_id", &app_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO uapp_meta(key,value) VALUES(?,?)",
+        params!["name", "Apps"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO uapp_meta(key,value) VALUES(?,?)",
+        params!["format_version", "1"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO uapp_meta(key,value) VALUES(?,?)",
+        params!["created", &STABLE_MS.to_string()],
+    )
+    .unwrap();
 
-    conn.execute("INSERT INTO sqlar(name,mode,mtime,sz,data) VALUES(?,?,?,?,?)", params![
-        "app/index.html", 420i32, STABLE_MS / 1000, html.len() as i64, html.as_bytes()
-    ]).unwrap();
+    conn.execute(
+        "INSERT INTO sqlar(name,mode,mtime,sz,data) VALUES(?,?,?,?,?)",
+        params![
+            "app/index.html",
+            420i32,
+            STABLE_MS / 1000,
+            html.len() as i64,
+            html.as_bytes()
+        ],
+    )
+    .unwrap();
 
     // Where the launcher fetches samples from: next to itself by default
     // (the static demo's examples/), or a uapp-library shelf — e.g.
@@ -111,20 +137,27 @@ fn build_launcher(outdir: &str, samples: &[Sample], html: &str) -> std::io::Resu
             &sample.website,
             size,
             sample.kind.as_deref().unwrap_or("app"),
-        ]).unwrap();
+        ])
+        .unwrap();
     }
 
-    println!("wrote {} ({} bytes)", path.display(), fs::metadata(&path)?.len());
+    println!(
+        "wrote {} ({} bytes)",
+        path.display(),
+        fs::metadata(&path)?.len()
+    );
     Ok(())
 }
 
 fn random_id() -> String {
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut rng = fastrand::Rng::new();
-    (0..16).map(|_| {
-        let idx = rng.usize(..CHARSET.len());
-        CHARSET[idx] as char
-    }).collect()
+    (0..16)
+        .map(|_| {
+            let idx = rng.usize(..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
 }
 
 use std::collections::HashMap;

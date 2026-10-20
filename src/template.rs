@@ -35,7 +35,11 @@ fn q(name: &str) -> String {
 
 /// Compare two DDL statements while ignoring the formatting the writer chose.
 fn norm_sql(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches(';').to_string()
+    sql.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(';')
+        .to_string()
 }
 
 // ---- the opened source ------------------------------------------------------
@@ -73,7 +77,9 @@ impl Source {
         }
         let tmp = std::env::temp_dir().join(format!(
             "uapp-tplsrc-{}.uapp",
-            (0..10).map(|_| fastrand::alphanumeric()).collect::<String>()
+            (0..10)
+                .map(|_| fastrand::alphanumeric())
+                .collect::<String>()
         ));
         let opened = (|| -> Result<Connection> {
             std::fs::write(&tmp, bytes)?;
@@ -95,7 +101,10 @@ impl Source {
             Ok(conn)
         })();
         match opened {
-            Ok(conn) => Ok(Source { conn, tmp: Some(tmp) }),
+            Ok(conn) => Ok(Source {
+                conn,
+                tmp: Some(tmp),
+            }),
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
                 Err(e)
@@ -179,7 +188,11 @@ fn user_objects(conn: &Connection) -> Result<Vec<Obj>> {
          ORDER BY rowid",
     )?;
     let rows = stmt.query_map([], |r| {
-        Ok(Obj { typ: r.get(0)?, name: r.get(1)?, sql: r.get(2)? })
+        Ok(Obj {
+            typ: r.get(0)?,
+            name: r.get(1)?,
+            sql: r.get(2)?,
+        })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -242,7 +255,10 @@ fn add_column(table: &str, c: &Col) -> (Option<String>, Option<String>) {
             ));
         }
     }
-    (Some(format!("ALTER TABLE {} ADD COLUMN {decl}", q(table))), note)
+    (
+        Some(format!("ALTER TABLE {} ADD COLUMN {decl}", q(table))),
+        note,
+    )
 }
 
 // ---- the plan ---------------------------------------------------------------
@@ -265,14 +281,16 @@ pub fn plan(target: &Connection, src: &Connection) -> Result<Value> {
     }
     // App files this template doesn't have: stale app code (or something added
     // locally). Removing them is the caller's choice — see `apply`.
-    let stale: Vec<String> =
-        cur_files.keys().filter(|n| !tpl_files.contains_key(*n)).cloned().collect();
+    let stale: Vec<String> = cur_files
+        .keys()
+        .filter(|n| !tpl_files.contains_key(*n))
+        .cloned()
+        .collect();
 
     let mut warnings: Vec<String> = Vec::new();
     let src_objs = user_objects(src)?;
     let cur_objs = user_objects(target)?;
-    let cur_by_name: BTreeMap<&str, &Obj> =
-        cur_objs.iter().map(|o| (o.name.as_str(), o)).collect();
+    let cur_by_name: BTreeMap<&str, &Obj> = cur_objs.iter().map(|o| (o.name.as_str(), o)).collect();
 
     let mut create_tables: Vec<Value> = Vec::new();
     let mut alters: Vec<Value> = Vec::new();
@@ -287,8 +305,10 @@ pub fn plan(target: &Connection, src: &Connection) -> Result<Value> {
                 o.name, cur.typ
             )),
             Some(cur) => {
-                let have: BTreeSet<String> =
-                    columns(target, &o.name)?.into_iter().map(|c| c.name).collect();
+                let have: BTreeSet<String> = columns(target, &o.name)?
+                    .into_iter()
+                    .map(|c| c.name)
+                    .collect();
                 let want = columns(src, &o.name)?;
                 let mut missing = 0usize;
                 for c in want.iter().filter(|c| !have.contains(&c.name)) {
@@ -368,7 +388,9 @@ pub fn plan(target: &Connection, src: &Connection) -> Result<Value> {
     let mut src_rows = 0i64;
     for o in src_objs.iter().filter(|o| o.typ == "table") {
         let n: i64 = src
-            .query_row(&format!("SELECT count(*) FROM {}", q(&o.name)), [], |r| r.get(0))
+            .query_row(&format!("SELECT count(*) FROM {}", q(&o.name)), [], |r| {
+                r.get(0)
+            })
             .unwrap_or(0);
         src_rows += n;
     }
@@ -412,7 +434,11 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
     let mut plan = plan(target, src)?;
     let mut warnings: Vec<String> = plan["warnings"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let mtime = (op.ts / 1000) as i64;
 
@@ -420,12 +446,18 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
     let names = |key: &str| -> Vec<String> {
         plan["files"][key]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let mut written = 0usize;
     for name in names("added").into_iter().chain(names("changed")) {
-        let Some(data) = store::sqlar_read(src, &name)? else { continue };
+        let Some(data) = store::sqlar_read(src, &name)? else {
+            continue;
+        };
         store::record_file_history(target, op, &name, "put")?;
         store::sqlar_write(target, &name, mtime, &data)?;
         written += 1;
@@ -450,22 +482,44 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
         }
     };
     let mut tables_created = 0usize;
-    for t in plan["schema"]["createTables"].as_array().cloned().unwrap_or_default() {
-        let (name, sql) = (t["table"].as_str().unwrap_or(""), t["sql"].as_str().unwrap_or(""));
+    for t in plan["schema"]["createTables"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
+        let (name, sql) = (
+            t["table"].as_str().unwrap_or(""),
+            t["sql"].as_str().unwrap_or(""),
+        );
         if exec(sql, &format!("creating table {name}"), &mut warnings) {
             tables_created += 1;
         }
     }
     let mut columns_added = 0usize;
-    for a in plan["schema"]["addColumns"].as_array().cloned().unwrap_or_default() {
-        let what = format!("adding {}.{}", a["table"].as_str().unwrap_or(""), a["column"].as_str().unwrap_or(""));
+    for a in plan["schema"]["addColumns"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
+        let what = format!(
+            "adding {}.{}",
+            a["table"].as_str().unwrap_or(""),
+            a["column"].as_str().unwrap_or("")
+        );
         if exec(a["sql"].as_str().unwrap_or(""), &what, &mut warnings) {
             columns_added += 1;
         }
     }
     let mut objects = 0usize;
-    for o in plan["schema"]["replaceObjects"].as_array().cloned().unwrap_or_default() {
-        let (typ, name) = (o["type"].as_str().unwrap_or(""), o["name"].as_str().unwrap_or(""));
+    for o in plan["schema"]["replaceObjects"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
+        let (typ, name) = (
+            o["type"].as_str().unwrap_or(""),
+            o["name"].as_str().unwrap_or(""),
+        );
         let drop = match typ {
             "view" => format!("DROP VIEW IF EXISTS {}", q(name)),
             "index" => format!("DROP INDEX IF EXISTS {}", q(name)),
@@ -473,21 +527,40 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
             _ => continue,
         };
         if exec(&drop, &format!("replacing {typ} {name}"), &mut warnings)
-            && exec(o["sql"].as_str().unwrap_or(""), &format!("recreating {typ} {name}"), &mut warnings)
+            && exec(
+                o["sql"].as_str().unwrap_or(""),
+                &format!("recreating {typ} {name}"),
+                &mut warnings,
+            )
         {
             objects += 1;
         }
     }
-    for o in plan["schema"]["createObjects"].as_array().cloned().unwrap_or_default() {
-        let (typ, name) = (o["type"].as_str().unwrap_or(""), o["name"].as_str().unwrap_or(""));
-        if exec(o["sql"].as_str().unwrap_or(""), &format!("creating {typ} {name}"), &mut warnings) {
+    for o in plan["schema"]["createObjects"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
+        let (typ, name) = (
+            o["type"].as_str().unwrap_or(""),
+            o["name"].as_str().unwrap_or(""),
+        );
+        if exec(
+            o["sql"].as_str().unwrap_or(""),
+            &format!("creating {typ} {name}"),
+            &mut warnings,
+        ) {
             objects += 1;
         }
     }
 
     // --- config: only the keys this app doesn't have (never a stray API key) ---
     let mut config_added = 0usize;
-    for key in plan["config"]["added"].as_array().cloned().unwrap_or_default() {
+    for key in plan["config"]["added"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
         let Some(key) = key.as_str() else { continue };
         let raw: String = match src.query_row(
             "SELECT value FROM uapp_config WHERE key=?1",
@@ -562,9 +635,18 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
 ///
 /// Runs inside the caller's transaction (`Engine::local_op`), so the whole
 /// publish lands or nothing does.
-pub fn publish(target: &Connection, src: &Connection, op: &Op, include_data: bool) -> Result<Value> {
+pub fn publish(
+    target: &Connection,
+    src: &Connection,
+    op: &Op,
+    include_data: bool,
+) -> Result<Value> {
     let mtime = (op.ts / 1000) as i64;
-    let roles: &[&str] = if include_data { &["app", "data"] } else { &["app"] };
+    let roles: &[&str] = if include_data {
+        &["app", "data"]
+    } else {
+        &["app"]
+    };
 
     let src_files = files_by_role(src, roles)?;
     let cur_files = files_by_role(target, roles)?;
@@ -609,7 +691,10 @@ pub fn publish(target: &Connection, src: &Connection, op: &Op, include_data: boo
         if ncols == 0 {
             continue;
         }
-        let holders = (1..=ncols).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+        let holders = (1..=ncols)
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let mut ins = target.prepare(&format!("INSERT INTO {quoted} VALUES({holders})"))?;
         let mut it = sel.query([])?;
         while let Some(r) = it.next()? {
@@ -662,7 +747,9 @@ fn files_by_role(conn: &Connection, roles: &[&str]) -> Result<BTreeMap<String, V
             continue;
         }
         let sz: Option<i64> = r.get(1)?;
-        let Some(data) = r.get::<_, Option<Vec<u8>>>(2)? else { continue };
+        let Some(data) = r.get::<_, Option<Vec<u8>>>(2)? else {
+            continue;
+        };
         out.insert(name.clone(), store::sqlar_inflate(sz, data, &name)?);
     }
     Ok(out)

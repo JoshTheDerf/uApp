@@ -212,7 +212,11 @@ pub fn name_candidates(name: &str) -> Vec<String> {
     let n = name.trim().trim_start_matches('/').to_string();
     let mut out = vec![n.clone()];
     let bare = strip_root(&n);
-    for cand in [canon_name(&n), format!("{APP_DIR}{bare}"), format!("{DATA_DIR}{bare}")] {
+    for cand in [
+        canon_name(&n),
+        format!("{APP_DIR}{bare}"),
+        format!("{DATA_DIR}{bare}"),
+    ] {
         if !out.contains(&cand) {
             out.push(cand);
         }
@@ -270,12 +274,14 @@ fn migrate_paths(conn: &Connection) -> Result<()> {
         rows.collect::<rusqlite::Result<_>>()?
     };
     let hnames: Vec<String> = {
-        let mut stmt =
-            conn.prepare("SELECT DISTINCT name FROM uapp_file_history ORDER BY name")?;
+        let mut stmt = conn.prepare("SELECT DISTINCT name FROM uapp_file_history ORDER BY name")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
-    for old in names.iter().chain(hnames.iter().filter(|h| !names.contains(h))) {
+    for old in names
+        .iter()
+        .chain(hnames.iter().filter(|h| !names.contains(h)))
+    {
         let new = target(old);
         if &new == old {
             continue;
@@ -315,7 +321,12 @@ fn populate_export(
     out.execute(
         "INSERT INTO uapp_meta(key,value) VALUES
          ('app_id',?1),('name',?2),('format_version',?3),('created',?4)",
-        rusqlite::params![app_id, app_name, FORMAT_VERSION.to_string(), now_ms().to_string()],
+        rusqlite::params![
+            app_id,
+            app_name,
+            FORMAT_VERSION.to_string(),
+            now_ms().to_string()
+        ],
     )?;
     // Files: stored form copied verbatim (compression preserved). `data/` only
     // when the caller opted in; app files always.
@@ -364,7 +375,10 @@ fn populate_export(
             if ncols == 0 {
                 continue;
             }
-            let holders = (1..=ncols).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+            let holders = (1..=ncols)
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
             let mut ins = out.prepare(&format!("INSERT INTO {quoted} VALUES({holders})"))?;
             let mut rows = sel.query([])?;
             while let Some(row) = rows.next()? {
@@ -418,7 +432,10 @@ fn populate_export(
         } else {
             raw
         };
-        out.execute("INSERT INTO uapp_config(key,value) VALUES(?1,?2)", rusqlite::params![key, value])?;
+        out.execute(
+            "INSERT INTO uapp_config(key,value) VALUES(?1,?2)",
+            rusqlite::params![key, value],
+        )?;
     }
     Ok(())
 }
@@ -429,7 +446,9 @@ fn populate_export(
 pub fn export_template(mem: &Connection, app_name: &str) -> Result<Vec<u8>> {
     let tmp = std::env::temp_dir().join(format!(
         "uapp-template-{}.uapp",
-        (0..10).map(|_| fastrand::alphanumeric()).collect::<String>()
+        (0..10)
+            .map(|_| fastrand::alphanumeric())
+            .collect::<String>()
     ));
     let build = (|| -> Result<()> {
         let out = Connection::open(&tmp)?;
@@ -458,7 +477,9 @@ pub fn export_template(mem: &Connection, app_name: &str) -> Result<Vec<u8>> {
 pub fn export_public(mem: &Connection, app_name: &str, include_data: bool) -> Result<Vec<u8>> {
     let tmp = std::env::temp_dir().join(format!(
         "uapp-public-{}.uapp",
-        (0..10).map(|_| fastrand::alphanumeric()).collect::<String>()
+        (0..10)
+            .map(|_| fastrand::alphanumeric())
+            .collect::<String>()
     ));
     let build = (|| -> Result<()> {
         let out = Connection::open(&tmp)?;
@@ -513,7 +534,9 @@ pub fn with_open_retry<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
 pub fn export_full(db: &Connection, key: Option<&str>) -> Result<Vec<u8>> {
     let tmp = std::env::temp_dir().join(format!(
         "uapp-export-{}.uapp",
-        (0..12).map(|_| fastrand::alphanumeric()).collect::<String>()
+        (0..12)
+            .map(|_| fastrand::alphanumeric())
+            .collect::<String>()
     ));
     let build = (|| -> Result<()> {
         let mut dst = match key {
@@ -602,7 +625,9 @@ pub fn check_whole_bytes(head: &[u8], len: u64) -> Result<()> {
 /// show the unlock prompt.
 pub fn is_encrypted_file(path: &Path) -> bool {
     !path.is_dir()
-        && std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false)
+        && std::fs::metadata(path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
         && !looks_like_sqlite(path)
 }
 
@@ -647,7 +672,11 @@ fn bind_params(stmt: &mut rusqlite::Statement, params: &[Value]) -> Result<()> {
             if want == 1 { "" } else { "s" },
             params.len(),
             if params.len() == 1 { "" } else { "s" },
-            stmt.expanded_sql().unwrap_or_default().chars().take(120).collect::<String>()
+            stmt.expanded_sql()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect::<String>()
         );
     }
     for (i, p) in params.iter().enumerate() {
@@ -661,16 +690,25 @@ fn first_keyword(sql: &str) -> String {
     let b = sql.as_bytes();
     let mut i = 0;
     loop {
-        while i < b.len() && b[i].is_ascii_whitespace() { i += 1; }
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
         if sql[i..].starts_with("--") {
             i += sql[i..].find('\n').map(|n| n + 1).unwrap_or(sql.len() - i);
         } else if sql[i..].starts_with("/*") {
-            match sql[i..].find("*/") { Some(n) => i += n + 2, None => return String::new() }
+            match sql[i..].find("*/") {
+                Some(n) => i += n + 2,
+                None => return String::new(),
+            }
         } else {
             break;
         }
     }
-    sql[i..].chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>().to_ascii_lowercase()
+    sql[i..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 /// Is this statement an ATTACH or DETACH? SQLite reports both as "read-only",
@@ -764,7 +802,9 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
     let p = &op.payload;
     match op.kind.as_str() {
         "sql" => {
-            let sql = p["sql"].as_str().ok_or_else(|| anyhow!("sql op missing sql"))?;
+            let sql = p["sql"]
+                .as_str()
+                .ok_or_else(|| anyhow!("sql op missing sql"))?;
             // ATTACH would open (or create) an arbitrary local file with the
             // app's privileges — never allowed from app-originated writes.
             if is_attach_stmt(sql) {
@@ -778,8 +818,7 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             // read back e.g. the new id in the SAME statement — no
             // insert-then-SELECT-MAX(id) race.
             if stmt.column_count() > 0 {
-                let cols: Vec<String> =
-                    stmt.column_names().iter().map(|s| s.to_string()).collect();
+                let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
                 let ncols = cols.len();
                 let mut rows_out = Vec::new();
                 let mut rows = stmt.raw_query();
@@ -797,11 +836,17 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             // Rowid of the row this write created (0 = none: UPDATE/DELETE/DDL
             // or a table without a rowid alias). Lets actions do
             // `const {insert_id} = await uapp.exec("INSERT ...")`.
-            let iid = if matches!(first_keyword(sql).as_str(), "insert" | "replace") { conn.last_insert_rowid() } else { 0 };
+            let iid = if matches!(first_keyword(sql).as_str(), "insert" | "replace") {
+                conn.last_insert_rowid()
+            } else {
+                0
+            };
             Ok(json!({"changes": n, "insert_id": if iid > 0 { json!(iid) } else { Value::Null } }))
         }
         "batch" => {
-            let sql = p["sql"].as_str().ok_or_else(|| anyhow!("batch op missing sql"))?;
+            let sql = p["sql"]
+                .as_str()
+                .ok_or_else(|| anyhow!("batch op missing sql"))?;
             if mentions_attach(sql) {
                 bail!("ATTACH/DETACH can't run in app writes — read the other database with an approved read-only query and inline the values instead");
             }
@@ -810,7 +855,9 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
         }
         "import" => {
             // One op = one whole dataset. {table, columns, rows, create?, truncate?}
-            let table = p["table"].as_str().ok_or_else(|| anyhow!("import missing table"))?;
+            let table = p["table"]
+                .as_str()
+                .ok_or_else(|| anyhow!("import missing table"))?;
             if !table.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 bail!("import table name must be alphanumeric/underscore");
             }
@@ -826,7 +873,10 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
                 .iter()
                 .map(|c| c.as_str().unwrap_or_default().to_string())
                 .collect();
-            if cols.iter().any(|c| !c.chars().all(|ch| ch.is_alphanumeric() || ch == '_')) {
+            if cols
+                .iter()
+                .any(|c| !c.chars().all(|ch| ch.is_alphanumeric() || ch == '_'))
+            {
                 bail!("import column names must be alphanumeric/underscore");
             }
             let placeholders = vec!["?"; cols.len()].join(",");
@@ -838,9 +888,13 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
                 placeholders
             );
             let mut stmt = conn.prepare(&sql)?;
-            let rows = p["rows"].as_array().ok_or_else(|| anyhow!("import missing rows"))?;
+            let rows = p["rows"]
+                .as_array()
+                .ok_or_else(|| anyhow!("import missing rows"))?;
             for row in rows {
-                let vals = row.as_array().ok_or_else(|| anyhow!("import row not array"))?;
+                let vals = row
+                    .as_array()
+                    .ok_or_else(|| anyhow!("import row not array"))?;
                 bind_params(&mut stmt, vals)?;
                 stmt.raw_execute()?;
             }
@@ -850,7 +904,9 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
         // app/data split (or by an app using root-absolute paths) must replay
         // into the same canonical location on every device.
         "file_put" => {
-            let name = p["name"].as_str().ok_or_else(|| anyhow!("file_put missing name"))?;
+            let name = p["name"]
+                .as_str()
+                .ok_or_else(|| anyhow!("file_put missing name"))?;
             let name = canon_name(name);
             let data = base64::engine::general_purpose::STANDARD
                 .decode(p["data"].as_str().unwrap_or_default())?;
@@ -859,7 +915,9 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             Ok(json!({"ok": true, "bytes": data.len()}))
         }
         "file_del" => {
-            let name = p["name"].as_str().ok_or_else(|| anyhow!("file_del missing name"))?;
+            let name = p["name"]
+                .as_str()
+                .ok_or_else(|| anyhow!("file_del missing name"))?;
             // Delete whatever the name resolves to today; an old op naming
             // `index.html` still removes `app/index.html`.
             let name = resolve_name(conn, name)?.unwrap_or_else(|| canon_name(name));
@@ -875,7 +933,12 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(p["b64"].as_str().unwrap_or_default())?;
             let src = crate::template::Source::from_bytes(&bytes, p["password"].as_str())?;
-            crate::template::apply(conn, src.conn(), op, p["remove_stale"].as_bool().unwrap_or(true))
+            crate::template::apply(
+                conn,
+                src.conn(),
+                op,
+                p["remove_stale"].as_bool().unwrap_or(true),
+            )
         }
         "publish" => {
             let bytes = base64::engine::general_purpose::STANDARD
@@ -884,7 +947,9 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             crate::template::publish(conn, src.conn(), op, p["data"].as_bool().unwrap_or(false))
         }
         "config_set" => {
-            let key = p["key"].as_str().ok_or_else(|| anyhow!("config_set missing key"))?;
+            let key = p["key"]
+                .as_str()
+                .ok_or_else(|| anyhow!("config_set missing key"))?;
             conn.execute(
                 "INSERT OR REPLACE INTO uapp_config(key,value) VALUES(?1,?2)",
                 rusqlite::params![key, p["value"].to_string()],
@@ -892,7 +957,9 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             Ok(json!({"ok": true}))
         }
         "chat" => {
-            let mid = p["mid"].as_str().ok_or_else(|| anyhow!("chat missing mid"))?;
+            let mid = p["mid"]
+                .as_str()
+                .ok_or_else(|| anyhow!("chat missing mid"))?;
             conn.execute(
                 "INSERT OR IGNORE INTO uapp_chat(mid,ts,ctr,device,user,role,content,session)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -930,7 +997,9 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
         // the payload overwrite; `created` is carried in the payload (never
         // read from the clock) so replay is deterministic.
         "session_meta" => {
-            let id = p["id"].as_str().ok_or_else(|| anyhow!("session_meta missing id"))?;
+            let id = p["id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("session_meta missing id"))?;
             let created = p["created"].as_i64().unwrap_or(op.ts as i64);
             conn.execute(
                 "INSERT INTO uapp_sessions(id,title,created,kind,parent,archived)
@@ -944,7 +1013,10 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
                     created,
                     p["kind"].as_str(),
                     p["parent"].as_str(),
-                    p["archived"].as_bool().map(|b| b as i64).or_else(|| p["archived"].as_i64())
+                    p["archived"]
+                        .as_bool()
+                        .map(|b| b as i64)
+                        .or_else(|| p["archived"].as_i64())
                 ],
             )?;
             Ok(json!({"ok": true}))
@@ -952,8 +1024,13 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
         // Drop a session and its messages. 'main' is implicit in the UI, so
         // deleting it just empties it.
         "session_del" => {
-            let id = p["id"].as_str().ok_or_else(|| anyhow!("session_del missing id"))?;
-            conn.execute("DELETE FROM uapp_sessions WHERE id=?1", rusqlite::params![id])?;
+            let id = p["id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("session_del missing id"))?;
+            conn.execute(
+                "DELETE FROM uapp_sessions WHERE id=?1",
+                rusqlite::params![id],
+            )?;
             conn.execute(
                 "DELETE FROM uapp_chat WHERE COALESCE(session,'main')=?1",
                 rusqlite::params![id],
@@ -965,8 +1042,12 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
         // the op is emitted — replay never calls a model.
         "chat_compact" => {
             let session = p["session"].as_str().unwrap_or("main");
-            let mid = p["mid"].as_str().ok_or_else(|| anyhow!("chat_compact missing mid"))?;
-            let upto_ts = p["upto_ts"].as_i64().ok_or_else(|| anyhow!("chat_compact missing upto_ts"))?;
+            let mid = p["mid"]
+                .as_str()
+                .ok_or_else(|| anyhow!("chat_compact missing mid"))?;
+            let upto_ts = p["upto_ts"]
+                .as_i64()
+                .ok_or_else(|| anyhow!("chat_compact missing upto_ts"))?;
             let upto_ctr = p["upto_ctr"].as_i64().unwrap_or(0);
             // Lexicographic (ts, ctr, device) cutoff matching the chat sort
             // order; ops from older binaries carry no upto_dev, so the device
@@ -1025,7 +1106,11 @@ fn sqlar_deflate(data: &[u8]) -> Result<Vec<u8>> {
     );
     enc.write_all(data)?;
     let out = enc.finish()?;
-    Ok(if out.len() < data.len() { out } else { data.to_vec() })
+    Ok(if out.len() < data.len() {
+        out
+    } else {
+        data.to_vec()
+    })
 }
 
 /// Insert/replace one file row, sqlar-style (zlib-compressed when smaller).
@@ -1090,7 +1175,10 @@ pub fn sqlar_inflate(sz: Option<i64>, data: Vec<u8>, what: &str) -> Result<Vec<u
         .read_to_end(&mut out)
         .with_context(|| format!("inflate sqlar entry {what}"))?;
     if out.len() as i64 != sz {
-        bail!("sqlar entry {what} is corrupt: expected {sz} bytes, inflated to {}", out.len());
+        bail!(
+            "sqlar entry {what} is corrupt: expected {sz} bytes, inflated to {}",
+            out.len()
+        );
     }
     Ok(out)
 }
@@ -1182,9 +1270,7 @@ pub fn export_template(mem: &Connection, app_name: &str) -> Result<Vec<u8>> {
 pub fn check_app_approval(conn: &Connection, app_id: &str, tool: &str) -> bool {
     let key = format!("approvals.app.{}", app_id);
     match config_get(conn, &key) {
-        Ok(Some(Value::Array(approvals))) => {
-            approvals.iter().any(|v| v.as_str() == Some(tool))
-        }
+        Ok(Some(Value::Array(approvals))) => approvals.iter().any(|v| v.as_str() == Some(tool)),
         _ => false,
     }
 }
@@ -1229,10 +1315,22 @@ mod tests {
     fn whole_file_check() {
         assert!(check_whole_bytes(&[], 0).is_err(), "empty");
         assert!(check_whole_bytes(&header(4096, 3), 3 * 4096).is_ok());
-        assert!(check_whole_bytes(&header(4096, 3), 3 * 4096 + 10).is_ok(), "trailing bytes are harmless");
-        assert!(check_whole_bytes(&header(4096, 3), 2 * 4096).is_err(), "cut off");
-        assert!(check_whole_bytes(&header(4096, 0), 100).is_err(), "less than one page");
-        assert!(check_whole_bytes(&header(1000, 1), 4096).is_err(), "bad page size");
+        assert!(
+            check_whole_bytes(&header(4096, 3), 3 * 4096 + 10).is_ok(),
+            "trailing bytes are harmless"
+        );
+        assert!(
+            check_whole_bytes(&header(4096, 3), 2 * 4096).is_err(),
+            "cut off"
+        );
+        assert!(
+            check_whole_bytes(&header(4096, 0), 100).is_err(),
+            "less than one page"
+        );
+        assert!(
+            check_whole_bytes(&header(1000, 1), 4096).is_err(),
+            "bad page size"
+        );
         // Stale in-header count (counter != valid-for): only the page floor applies.
         let mut stale = header(4096, 9);
         stale[92] = 1;

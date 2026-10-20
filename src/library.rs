@@ -47,7 +47,10 @@ pub fn router(lib: Arc<Library>) -> Router {
         .route("/health", get(health))
         .route(
             "/:name",
-            get(fetch).put(put).delete(delete).layer(axum::extract::DefaultBodyLimit::max(max)),
+            get(fetch)
+                .put(put)
+                .delete(delete)
+                .layer(axum::extract::DefaultBodyLimit::max(max)),
         )
         .with_state(lib)
 }
@@ -63,11 +66,19 @@ pub struct Owner;
 #[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<Library>> for Owner {
     type Rejection = Response;
-    async fn from_request_parts(parts: &mut axum::http::request::Parts, lib: &Arc<Library>) -> Result<Self, Response> {
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        lib: &Arc<Library>,
+    ) -> Result<Self, Response> {
         if lib.token.is_empty() {
             return Err(deny());
         }
-        let q_token = parts.uri.query().unwrap_or("").split('&').find_map(|kv| kv.strip_prefix("t="));
+        let q_token = parts
+            .uri
+            .query()
+            .unwrap_or("")
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("t="));
         if q_token == Some(lib.token.as_str()) {
             return Ok(Owner);
         }
@@ -78,7 +89,11 @@ impl axum::extract::FromRequestParts<Arc<Library>> for Owner {
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(|t| t.trim() == lib.token)
             .unwrap_or(false);
-        if bearer { Ok(Owner) } else { Err(deny()) }
+        if bearer {
+            Ok(Owner)
+        } else {
+            Err(deny())
+        }
     }
 }
 
@@ -87,18 +102,26 @@ fn deny() -> Response {
 }
 
 fn bad(msg: impl Into<String>) -> Response {
-    (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": msg.into() }))).into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(json!({ "error": msg.into() })),
+    )
+        .into_response()
 }
 
 /// A file name this library will store or serve: `<stem>.uapp`, where the stem
 /// is letters, digits, `.`, `_`, `-`, does not start with a dot, and is short.
 /// Nothing else — no separators, no traversal, no hidden files.
 pub fn valid_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".uapp") else { return false };
+    let Some(stem) = name.strip_suffix(".uapp") else {
+        return false;
+    };
     !stem.is_empty()
         && stem.len() <= 120
         && !stem.starts_with('.')
-        && stem.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Cheap, strong-enough validator: the file's length and mtime. Our own
@@ -149,7 +172,11 @@ async fn list(State(lib): State<Arc<Library>>) -> Response {
         .into_response()
 }
 
-async fn fetch(State(lib): State<Arc<Library>>, AxPath(name): AxPath<String>, headers: HeaderMap) -> Response {
+async fn fetch(
+    State(lib): State<Arc<Library>>,
+    AxPath(name): AxPath<String>,
+    headers: HeaderMap,
+) -> Response {
     if !valid_name(&name) {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
@@ -171,7 +198,10 @@ async fn fetch(State(lib): State<Arc<Library>>, AxPath(name): AxPath<String>, he
             // A shell compares ETags to know whether the shelf moved on; never
             // let a cache answer that for us.
             (header::CACHE_CONTROL, "no-cache".to_string()),
-            (header::CONTENT_DISPOSITION, format!("inline; filename=\"{name}\"")),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("inline; filename=\"{name}\""),
+            ),
         ],
         bytes,
     )
@@ -195,7 +225,9 @@ async fn put(
     // If-Match: the ETag of the copy the publisher started from. A shelf that
     // moved on since (someone else published) is a conflict, not an overwrite.
     if let Some(want) = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()) {
-        let now = std::fs::metadata(&target).map(|m| etag_of(&m)).unwrap_or_default();
+        let now = std::fs::metadata(&target)
+            .map(|m| etag_of(&m))
+            .unwrap_or_default();
         if !want.split(',').any(|t| t.trim() == now || t.trim() == "*") {
             return (
                 StatusCode::CONFLICT,
@@ -207,7 +239,8 @@ async fn put(
     }
     let lib2 = lib.clone();
     let name2 = name.clone();
-    let stored = tokio::task::spawn_blocking(move || sanitize_and_store(&lib2, &name2, &body)).await;
+    let stored =
+        tokio::task::spawn_blocking(move || sanitize_and_store(&lib2, &name2, &body)).await;
     match stored {
         Ok(Ok(meta)) => {
             let etag = etag_of(&meta);
@@ -233,10 +266,17 @@ fn sanitize_and_store(lib: &Library, name: &str, body: &[u8]) -> anyhow::Result<
     let staged = lib.dir.join(format!(".{name}.staged-{rand}"));
     let result = (|| -> anyhow::Result<()> {
         std::fs::write(&upload, body).with_context(|| format!("writing {}", upload.display()))?;
-        let conn = rusqlite::Connection::open_with_flags(&upload, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .context("opening the upload as SQLite")?;
+        let conn = rusqlite::Connection::open_with_flags(
+            &upload,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .context("opening the upload as SQLite")?;
         let has_sqlar: i64 = conn
-            .query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sqlar'", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sqlar'",
+                [],
+                |r| r.get(0),
+            )
             .context("reading the upload's schema")?;
         anyhow::ensure!(has_sqlar == 1, "not a .uapp: no sqlar table");
         let app_name = crate::store::meta_get(&conn, "name")
@@ -244,7 +284,8 @@ fn sanitize_and_store(lib: &Library, name: &str, body: &[u8]) -> anyhow::Result<
             .flatten()
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| name.trim_end_matches(".uapp").to_string());
-        let clean = crate::store::export_public(&conn, &app_name, true).context("sanitizing the archive")?;
+        let clean = crate::store::export_public(&conn, &app_name, true)
+            .context("sanitizing the archive")?;
         drop(conn);
         std::fs::write(&staged, &clean).with_context(|| format!("writing {}", staged.display()))?;
         std::fs::rename(&staged, lib.dir.join(name)).context("moving the archive into place")?;
@@ -256,13 +297,19 @@ fn sanitize_and_store(lib: &Library, name: &str, body: &[u8]) -> anyhow::Result<
     Ok(std::fs::metadata(lib.dir.join(name))?)
 }
 
-async fn delete(State(lib): State<Arc<Library>>, AxPath(name): AxPath<String>, _who: Owner) -> Response {
+async fn delete(
+    State(lib): State<Arc<Library>>,
+    AxPath(name): AxPath<String>,
+    _who: Owner,
+) -> Response {
     if !valid_name(&name) {
         return bad("bad name");
     }
     match std::fs::remove_file(lib.dir.join(&name)) {
         Ok(()) => axum::Json(json!({ "ok": true, "name": name })).into_response(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (StatusCode::NOT_FOUND, "not found").into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     }
 }
@@ -273,10 +320,24 @@ mod tests {
 
     #[test]
     fn names_are_plain_uapp_files_only() {
-        for good in ["a.uapp", "kanban-board.uapp", "My_App.2.uapp", "launcher.uapp"] {
+        for good in [
+            "a.uapp",
+            "kanban-board.uapp",
+            "My_App.2.uapp",
+            "launcher.uapp",
+        ] {
             assert!(valid_name(good), "{good}");
         }
-        for bad in ["a", ".uapp", ".hidden.uapp", "../x.uapp", "a/b.uapp", "a b.uapp", "x.UAPP", "a.uapp.upload-1"] {
+        for bad in [
+            "a",
+            ".uapp",
+            ".hidden.uapp",
+            "../x.uapp",
+            "a/b.uapp",
+            "a b.uapp",
+            "x.UAPP",
+            "a.uapp.upload-1",
+        ] {
             assert!(!valid_name(bad), "{bad}");
         }
     }

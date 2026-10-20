@@ -48,7 +48,10 @@ const ICONS_JS: &str = include_str!("shell/icons.js");
 const SCRATCH_HTML: &str = include_str!("shell/scratch.html");
 
 fn cookie_name(app: &App) -> String {
-    format!("uapp_t_{}", app.port.load(std::sync::atomic::Ordering::Relaxed))
+    format!(
+        "uapp_t_{}",
+        app.port.load(std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 /// DNS-rebinding guard: the server binds 127.0.0.1 only, so a legitimate
@@ -123,7 +126,10 @@ pub enum Visitor {
 #[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<App>> for Owner {
     type Rejection = Response;
-    async fn from_request_parts(parts: &mut axum::http::request::Parts, app: &Arc<App>) -> Result<Self, Response> {
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        app: &Arc<App>,
+    ) -> Result<Self, Response> {
         if authed(app, &parts.headers, parts.uri.query()) {
             Ok(Owner)
         } else {
@@ -135,7 +141,10 @@ impl axum::extract::FromRequestParts<Arc<App>> for Owner {
 #[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
     type Rejection = Response;
-    async fn from_request_parts(parts: &mut axum::http::request::Parts, app: &Arc<App>) -> Result<Self, Response> {
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        app: &Arc<App>,
+    ) -> Result<Self, Response> {
         if authed(app, &parts.headers, parts.uri.query()) {
             Ok(Visitor::Owner)
         } else if app.public.is_some() {
@@ -151,14 +160,16 @@ fn deny() -> Response {
 }
 
 pub(crate) fn html_escape(s: &str) -> String {
-    s.chars().map(|c| match c {
-        '&' => "&amp;".to_string(),
-        '<' => "&lt;".to_string(),
-        '>' => "&gt;".to_string(),
-        '"' => "&quot;".to_string(),
-        '\'' => "&#39;".to_string(),
-        c => c.to_string(),
-    }).collect()
+    s.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_string(),
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '"' => "&quot;".to_string(),
+            '\'' => "&#39;".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) -> Response {
@@ -205,8 +216,8 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
             app.token,
             if app.public.is_some() { "; Secure" } else { "" }
         )
-            .parse()
-            .unwrap(),
+        .parse()
+        .unwrap(),
     );
     // The shell is embedded in the binary and changes on every upgrade;
     // stale-cached shells would keep showing the old UI.
@@ -326,9 +337,15 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
                 }
                 for t in tries {
                     match crate::store::sqlar_read(&eng.db, &t) {
-                        Ok(Some(b)) => { found = (Ok(Some(b)), t); break; }
+                        Ok(Some(b)) => {
+                            found = (Ok(Some(b)), t);
+                            break;
+                        }
                         Ok(None) => {}
-                        Err(e) => { found = (Err(e), t); break; }
+                        Err(e) => {
+                            found = (Err(e), t);
+                            break;
+                        }
                     }
                 }
             }
@@ -358,7 +375,10 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
                             (header::CONTENT_TYPE, ctype.to_string()),
                             (header::CACHE_CONTROL, "no-store".to_string()),
                             (header::ACCEPT_RANGES, "bytes".to_string()),
-                            (header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}")),
+                            (
+                                header::CONTENT_RANGE,
+                                format!("bytes {start}-{end}/{total}"),
+                            ),
                         ],
                         slice,
                     )
@@ -382,7 +402,11 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
                     .into_response(),
             }
         }
-        Ok(None) => (StatusCode::NOT_FOUND, format!("no such file in app: {name}")).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            format!("no such file in app: {name}"),
+        )
+            .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -399,7 +423,11 @@ async fn app_file(
     if let Visitor::Reader = who {
         return public_page(&app, &format!("/{path}"), &headers);
     }
-    let name = if path.is_empty() { "index.html".to_string() } else { path };
+    let name = if path.is_empty() {
+        "index.html".to_string()
+    } else {
+        path
+    };
     serve_sqlar(&app, &name, &headers)
 }
 
@@ -498,7 +526,10 @@ async fn root_file(
                     (header::ETAG, etag),
                     // Changes only with the server image, but must never outlive
                     // a deploy: revalidate, and let the ETag make that cheap.
-                    (header::CACHE_CONTROL, "public, max-age=0, must-revalidate".to_string()),
+                    (
+                        header::CACHE_CONTROL,
+                        "public, max-age=0, must-revalidate".to_string(),
+                    ),
                 ],
                 bytes.clone(),
             )
@@ -528,8 +559,15 @@ async fn health(State(app): State<Arc<App>>) -> Response {
     // Android's chat keep-alive service polls this to know when it can stop
     // holding the process out of the cached-apps freezer.
     let busy = if app.ai_busy_any() { "1" } else { "0" };
-    ([("x-uapp-version", env!("CARGO_PKG_VERSION").to_string()), ("x-uapp-key", key),
-      ("x-uapp-ai-busy", busy.to_string())], "ok").into_response()
+    (
+        [
+            ("x-uapp-version", env!("CARGO_PKG_VERSION").to_string()),
+            ("x-uapp-key", key),
+            ("x-uapp-ai-busy", busy.to_string()),
+        ],
+        "ok",
+    )
+        .into_response()
 }
 
 /// Download this app as a template: app-role files + empty tables, no user
@@ -543,7 +581,11 @@ async fn template_download(State(app): State<Arc<App>>, _who: Owner) -> Response
     };
     match result {
         Ok((bytes, name)) => attachment(bytes, &format!("{name} template")),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("template export failed: {e}")).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("template export failed: {e}"),
+        )
+            .into_response(),
     }
 }
 
@@ -558,12 +600,19 @@ async fn app_download(State(app): State<Arc<App>>, _who: Owner) -> Response {
     };
     match result {
         Ok((bytes, name)) => attachment(bytes, &name),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("download failed: {e}")).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("download failed: {e}"),
+        )
+            .into_response(),
     }
 }
 
 fn app_display_name(eng: &crate::engine::Engine) -> String {
-    crate::store::meta_get(&eng.db, "name").ok().flatten().unwrap_or_else(|| "app".into())
+    crate::store::meta_get(&eng.db, "name")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "app".into())
 }
 
 /// A `.uapp` download named after the app. The filename must be a valid
@@ -581,7 +630,11 @@ fn attachment(bytes: Vec<u8>, stem: &str) -> Response {
     let utf8: String = stem
         .bytes()
         .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') { (b as char).to_string() } else { format!("%{b:02X}") }
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
         })
         .collect();
     (
@@ -671,7 +724,10 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(256);
     {
         let tx = out_tx.clone();
-        app.conn_open(conn_id, std::sync::Arc::new(move |m: String| tx.blocking_send(m).is_ok()));
+        app.conn_open(
+            conn_id,
+            std::sync::Arc::new(move |m: String| tx.blocking_send(m).is_ok()),
+        );
     }
 
     // Fan-in: broadcast events + rpc responses -> socket. The periodic Ping
@@ -716,7 +772,9 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
         // Transport-level messages that need this connection's identity.
         if let Some(reply) = app.conn_message(conn_id, &method, &params) {
             if !id.is_null() {
-                let _ = out_tx.send(json!({"id": id, "result": reply}).to_string()).await;
+                let _ = out_tx
+                    .send(json!({"id": id, "result": reply}).to_string())
+                    .await;
             }
             continue;
         }
@@ -724,10 +782,11 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
         let out = out_tx.clone();
         // Each request handled on the blocking pool (SQLite is sync).
         tokio::spawn(async move {
-            let result =
-                tokio::task::spawn_blocking(move || crate::rpc::dispatch_untrusted(&app2, &method, params))
-                    .await
-                    .unwrap_or_else(|e| Err(anyhow::anyhow!("task panic: {e}")));
+            let result = tokio::task::spawn_blocking(move || {
+                crate::rpc::dispatch_untrusted(&app2, &method, params)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("task panic: {e}")));
             let resp = match result {
                 Ok(v) => json!({"id": id, "result": v}),
                 Err(e) => json!({"id": id, "error": {"message": e.to_string()}}),
@@ -771,7 +830,11 @@ pub async fn run_unlock(
 /// longer be served here — e.g. another instance won the file between unlock
 /// and open. Without it the waiting tab's reload hits a closed socket
 /// ("connection refused") with no explanation.
-pub async fn run_notice(listener: &tokio::net::TcpListener, redirect_to: Option<String>, message: &str) {
+pub async fn run_notice(
+    listener: &tokio::net::TcpListener,
+    redirect_to: Option<String>,
+    message: &str,
+) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         tokio::select! {
@@ -866,7 +929,12 @@ async fn handle_unlock_conn(
             let _ = tx.send(pw).await; // stops run_unlock; the app server takes over
         }
     } else {
-        let _ = write_http(&mut stream, "text/html; charset=utf-8", UNLOCK_HTML.as_bytes()).await;
+        let _ = write_http(
+            &mut stream,
+            "text/html; charset=utf-8",
+            UNLOCK_HTML.as_bytes(),
+        )
+        .await;
     }
 }
 
@@ -958,7 +1026,10 @@ async fn upload_file(
     if body.len() > crate::rpc::MAX_UPLOAD_BYTES {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            format!("over the {}MB limit", crate::rpc::MAX_UPLOAD_BYTES / 1024 / 1024),
+            format!(
+                "over the {}MB limit",
+                crate::rpc::MAX_UPLOAD_BYTES / 1024 / 1024
+            ),
         )
             .into_response();
     }
@@ -978,7 +1049,11 @@ async fn upload_file(
     match done {
         Ok(Ok(_)) => axum::Json(json!({"ok": true, "name": name, "bytes": bytes})).into_response(),
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("upload failed: {e}")).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("upload failed: {e}"),
+        )
+            .into_response(),
     }
 }
 
@@ -992,22 +1067,43 @@ pub fn router(app: Arc<App>) -> Router {
             )),
         )
         .route("/health", get(health))
-        .route("/icon-256.png", get(|| async {
-            (
-                [(header::CONTENT_TYPE, "image/png".to_string()),
-                 (header::CACHE_CONTROL, "max-age=86400".to_string())],
-                include_bytes!("../assets/uapp-256.png") as &[u8],
-            ).into_response()
-        }))
-        .route("/shell/*file", get(|axum::extract::Path(file): axum::extract::Path<String>| async move {
-            match SHELL_MODULES.iter().find(|(name, _)| *name == file) {
-                Some((_, body)) => static_asset(body, "text/javascript; charset=utf-8"),
-                None => (axum::http::StatusCode::NOT_FOUND, "no such shell module").into_response(),
-            }
-        }))
-        .route("/shell.css", get(|| async { static_asset(SHELL_CSS, "text/css; charset=utf-8") }))
-        .route("/uapp.js", get(|| async { static_asset(UAPP_JS, "text/javascript; charset=utf-8") }))
-        .route("/icons.js", get(|| async { static_asset(ICONS_JS, "text/javascript; charset=utf-8") }))
+        .route(
+            "/icon-256.png",
+            get(|| async {
+                (
+                    [
+                        (header::CONTENT_TYPE, "image/png".to_string()),
+                        (header::CACHE_CONTROL, "max-age=86400".to_string()),
+                    ],
+                    include_bytes!("../assets/uapp-256.png") as &[u8],
+                )
+                    .into_response()
+            }),
+        )
+        .route(
+            "/shell/*file",
+            get(
+                |axum::extract::Path(file): axum::extract::Path<String>| async move {
+                    match SHELL_MODULES.iter().find(|(name, _)| *name == file) {
+                        Some((_, body)) => static_asset(body, "text/javascript; charset=utf-8"),
+                        None => (axum::http::StatusCode::NOT_FOUND, "no such shell module")
+                            .into_response(),
+                    }
+                },
+            ),
+        )
+        .route(
+            "/shell.css",
+            get(|| async { static_asset(SHELL_CSS, "text/css; charset=utf-8") }),
+        )
+        .route(
+            "/uapp.js",
+            get(|| async { static_asset(UAPP_JS, "text/javascript; charset=utf-8") }),
+        )
+        .route(
+            "/icons.js",
+            get(|| async { static_asset(ICONS_JS, "text/javascript; charset=utf-8") }),
+        )
         .route("/scratch/", get(scratch_page))
         .route("/template.uapp", get(template_download))
         .route("/download.uapp", get(app_download))
@@ -1016,12 +1112,17 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/ws", get(ws_route))
         .route(
             "/site.uapp",
-            get(site_archive).put(site_publish).layer(axum::extract::DefaultBodyLimit::max(
-                crate::rpc::MAX_UPLOAD_BYTES + 1024 * 1024,
-            )),
+            get(site_archive)
+                .put(site_publish)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::rpc::MAX_UPLOAD_BYTES + 1024 * 1024,
+                )),
         )
         .fallback(get(root_file))
-        .layer(axum::middleware::map_response_with_state(app.clone(), security_headers))
+        .layer(axum::middleware::map_response_with_state(
+            app.clone(),
+            security_headers,
+        ))
         .with_state(app)
 }
 
@@ -1041,10 +1142,16 @@ async fn security_headers(State(app): State<Arc<App>>, mut resp: Response) -> Re
         .map(|v| v.starts_with("text/html"))
         .unwrap_or(false);
     let h = resp.headers_mut();
-    h.insert(header::X_CONTENT_TYPE_OPTIONS, header::HeaderValue::from_static("nosniff"));
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
     match app.public {
         None => {
-            h.insert(header::REFERRER_POLICY, header::HeaderValue::from_static("no-referrer"));
+            h.insert(
+                header::REFERRER_POLICY,
+                header::HeaderValue::from_static("no-referrer"),
+            );
         }
         Some(opts) => {
             h.insert(
@@ -1052,7 +1159,10 @@ async fn security_headers(State(app): State<Arc<App>>, mut resp: Response) -> Re
                 header::HeaderValue::from_static("strict-origin-when-cross-origin"),
             );
             if opts.coi && is_html {
-                h.insert("cross-origin-opener-policy", header::HeaderValue::from_static("same-origin"));
+                h.insert(
+                    "cross-origin-opener-policy",
+                    header::HeaderValue::from_static("same-origin"),
+                );
                 h.insert(
                     "cross-origin-embedder-policy",
                     header::HeaderValue::from_static("credentialless"),
@@ -1089,13 +1199,19 @@ pub fn load_bundle(dir: &std::path::Path, standalone: bool) -> anyhow::Result<cr
     let mut bundle = HashMap::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        for entry in std::fs::read_dir(&d).with_context(|| format!("reading web bundle {}", d.display()))? {
+        for entry in
+            std::fs::read_dir(&d).with_context(|| format!("reading web bundle {}", d.display()))?
+        {
             let path = entry?.path();
             if path.is_dir() {
                 stack.push(path);
                 continue;
             }
-            let rel = path.strip_prefix(dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            let rel = path
+                .strip_prefix(dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
             if skip(&rel) {
                 continue;
             }
@@ -1110,7 +1226,10 @@ pub fn load_bundle(dir: &std::path::Path, standalone: bool) -> anyhow::Result<cr
     // site-chrome.js is the injected entry point; serve it under the shorter
     // name the injected tag uses.
     let Some(chrome) = bundle.get("/site-chrome.js").cloned() else {
-        anyhow::bail!("{} has no site-chrome.js — run scripts/build-web.sh", dir.display());
+        anyhow::bail!(
+            "{} has no site-chrome.js — run scripts/build-web.sh",
+            dir.display()
+        );
     };
     bundle.insert("/chrome.js".into(), chrome);
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1120,7 +1239,10 @@ pub fn load_bundle(dir: &std::path::Path, standalone: bool) -> anyhow::Result<cr
         n.hash(&mut h);
         bundle[n].hash(&mut h);
     }
-    Ok(crate::app::Chrome { bundle, version: format!("{:x}", h.finish()) })
+    Ok(crate::app::Chrome {
+        bundle,
+        version: format!("{:x}", h.finish()),
+    })
 }
 
 /// A strong-form validator over the served bytes. Only a cache validator, so
@@ -1143,7 +1265,9 @@ pub(crate) fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
 /// Read one archive entry by its EXACT name. `store::sqlar_read` is the wrong
 /// tool for an anonymous request — see the module header.
 fn read_exact(db: &rusqlite::Connection, name: &str) -> Option<Vec<u8>> {
-    let mut stmt = db.prepare("SELECT sz, data FROM sqlar WHERE name=?1").ok()?;
+    let mut stmt = db
+        .prepare("SELECT sz, data FROM sqlar WHERE name=?1")
+        .ok()?;
     let mut rows = stmt.query(rusqlite::params![name]).ok()?;
     let row = rows.next().ok()??;
     let sz: Option<i64> = row.get(0).ok()?;
@@ -1170,7 +1294,9 @@ fn resolve_public(db: &rusqlite::Connection, path: &str) -> Option<(String, Vec<
             tries.push(format!("app/{p}/index.html"));
         }
     }
-    tries.into_iter().find_map(|name| read_exact(db, &name).map(|b| (name, b)))
+    tries
+        .into_iter()
+        .find_map(|name| read_exact(db, &name).map(|b| (name, b)))
 }
 
 /// Add `<meta name="viewport">` when the document lacks one, and — when the
@@ -1198,7 +1324,9 @@ fn inject_chrome(bytes: Vec<u8>, chrome: Option<&str>) -> Vec<u8> {
     if let Some(v) = chrome {
         if !loads_chrome_entry(&lower) {
             inject.push('\n');
-            inject.push_str(&format!(r#"<script src="/chrome.js?v={v}" defer></script>"#));
+            inject.push_str(&format!(
+                r#"<script src="/chrome.js?v={v}" defer></script>"#
+            ));
         }
     }
     if inject.is_empty() {
@@ -1227,14 +1355,19 @@ fn loads_chrome_entry(lower: &str) -> bool {
         // The path must start right after an attribute's quote (or `=`, for an
         // unquoted src) and end at the quote, a `?query` or whitespace.
         let opens = i > 0 && matches!(b[i - 1], b'"' | b'\'' | b'=' | b' ');
-        let ends = matches!(b.get(i + NAME.len()), None | Some(b'"' | b'\'' | b'?' | b' ' | b'>'));
+        let ends = matches!(
+            b.get(i + NAME.len()),
+            None | Some(b'"' | b'\'' | b'?' | b' ' | b'>')
+        );
         opens && ends
     })
 }
 
 fn strip_wasm_marker(text: &str) -> String {
-    const MARKERS: [&str; 2] =
-        ["<script>window.__uappWasm=1</script>", "<script>window.__uappWasm = 1;</script>"];
+    const MARKERS: [&str; 2] = [
+        "<script>window.__uappWasm=1</script>",
+        "<script>window.__uappWasm = 1;</script>",
+    ];
     let mut out = text.to_string();
     for m in MARKERS {
         while let Some(pos) = out.find(m) {
@@ -1251,8 +1384,9 @@ fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
     let opts = app.public.unwrap_or_default();
     let found = {
         let eng = app.engine.lock().unwrap();
-        resolve_public(&eng.db, path)
-            .or_else(|| read_exact(&eng.db, "app/404.html").map(|b| ("app/404.html".to_string(), b)))
+        resolve_public(&eng.db, path).or_else(|| {
+            read_exact(&eng.db, "app/404.html").map(|b| ("app/404.html".to_string(), b))
+        })
     };
     let Some((name, bytes)) = found else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -1282,11 +1416,18 @@ fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
     };
     let etag = etag_for(&bytes);
     if !is_404 && if_none_match(headers, &etag) {
-        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag), (header::CACHE_CONTROL, cache)])
+        return (
+            StatusCode::NOT_MODIFIED,
+            [(header::ETAG, etag), (header::CACHE_CONTROL, cache)],
+        )
             .into_response();
     }
     (
-        if is_404 { StatusCode::NOT_FOUND } else { StatusCode::OK },
+        if is_404 {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::OK
+        },
         [
             (header::CONTENT_TYPE, ctype.to_string()),
             (header::ETAG, etag),
@@ -1310,9 +1451,15 @@ fn current_archive(app: &App) -> anyhow::Result<Arc<crate::app::PublicArchive>> 
             return Ok(arc.clone());
         }
     }
-    let name = crate::store::meta_get(&eng.db, "name").ok().flatten().unwrap_or_else(|| "site".into());
+    let name = crate::store::meta_get(&eng.db, "name")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "site".into());
     let bytes = crate::store::export_public(&eng.db, &name, opts.export_data)?;
-    let arc = Arc::new(crate::app::PublicArchive { etag: etag_for(&bytes), bytes });
+    let arc = Arc::new(crate::app::PublicArchive {
+        etag: etag_for(&bytes),
+        bytes,
+    });
     *cache = Some((eng.writes, arc.clone()));
     Ok(arc)
 }
@@ -1335,11 +1482,7 @@ async fn site_archive(State(app): State<Arc<App>>, headers: HeaderMap) -> Respon
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     };
     if if_none_match(&headers, &arc.etag) {
-        return (
-            StatusCode::NOT_MODIFIED,
-            [(header::ETAG, arc.etag.clone())],
-        )
-            .into_response();
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, arc.etag.clone())]).into_response();
     }
     (
         [
@@ -1348,7 +1491,10 @@ async fn site_archive(State(app): State<Arc<App>>, headers: HeaderMap) -> Respon
             // Revalidate rather than cache blind: the client re-fetches on
             // every full load and must see the current copy; a 304 keeps
             // that cheap.
-            (header::CACHE_CONTROL, "public, max-age=0, must-revalidate".to_string()),
+            (
+                header::CACHE_CONTROL,
+                "public, max-age=0, must-revalidate".to_string(),
+            ),
         ],
         arc.bytes.clone(),
     )
@@ -1376,7 +1522,10 @@ async fn site_publish(
     if !body.starts_with(b"SQLite format 3\0") {
         return (StatusCode::BAD_REQUEST, "not a .uapp archive").into_response();
     }
-    let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let if_match = headers
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let done = tokio::task::spawn_blocking(move || -> Result<Value, Response> {
         let err = |st: StatusCode, e: String| (st, e).into_response();
         if let Some(want) = if_match {
@@ -1407,7 +1556,11 @@ async fn site_publish(
             ([(header::ETAG, etag)], axum::Json(v)).into_response()
         }
         Ok(Err(resp)) => resp,
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("publish failed: {e}")).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("publish failed: {e}"),
+        )
+            .into_response(),
     }
 }
 
@@ -1428,7 +1581,10 @@ mod tests {
           <script>var srcs = ["/uapp.js", "/js/chrome.js?v=1", "/js/build.js?v=1"];</script>
         </body></html>"#;
         let out = injected(page);
-        assert!(out.contains(r#"<script src="/chrome.js?v=abc123" defer></script>"#), "{out}");
+        assert!(
+            out.contains(r#"<script src="/chrome.js?v=abc123" defer></script>"#),
+            "{out}"
+        );
         // ...and the site's own reference is left alone.
         assert!(out.contains(r#""/js/chrome.js?v=1""#), "{out}");
     }
@@ -1442,7 +1598,11 @@ mod tests {
             r#"<script src=/chrome.js defer></script>"#,
         ] {
             let out = injected(&format!("<html><head>{tag}</head><body></body></html>"));
-            assert_eq!(out.matches("/chrome.js").count(), 1, "duplicated for {tag}: {out}");
+            assert_eq!(
+                out.matches("/chrome.js").count(),
+                1,
+                "duplicated for {tag}: {out}"
+            );
         }
     }
 

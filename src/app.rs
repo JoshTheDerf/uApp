@@ -120,7 +120,12 @@ pub struct PublicOpts {
 impl Default for PublicOpts {
     fn default() -> Self {
         // 0 = always revalidate (see server.rs public_page).
-        Self { coi: false, archive: true, export_data: false, asset_max_age: 0 }
+        Self {
+            coi: false,
+            archive: true,
+            export_data: false,
+            asset_max_age: 0,
+        }
     }
 }
 
@@ -365,8 +370,11 @@ impl App {
         let buf = self.console.lock().unwrap();
         // A line the AI has already been shown (same text, e.g. a framework
         // warning repeated on every page load) is not news again.
-        let seen: std::collections::HashSet<&str> =
-            buf.iter().filter(|e| e.seq <= ack).map(|e| e.text.as_str()).collect();
+        let seen: std::collections::HashSet<&str> = buf
+            .iter()
+            .filter(|e| e.seq <= ack)
+            .map(|e| e.text.as_str())
+            .collect();
         let mut errs = 0usize;
         let mut warns = 0usize;
         let mut others = 0usize;
@@ -411,8 +419,7 @@ impl App {
     /// Sessions with a live run, oldest first.
     pub fn ai_sessions(&self) -> Vec<String> {
         let runs = self.ai_runs.lock().unwrap();
-        let mut v: Vec<(u64, String)> =
-            runs.iter().map(|(s, h)| (h.started, s.clone())).collect();
+        let mut v: Vec<(u64, String)> = runs.iter().map(|(s, h)| (h.started, s.clone())).collect();
         v.sort();
         v.into_iter().map(|(_, s)| s).collect()
     }
@@ -478,8 +485,10 @@ impl App {
         let q = self.questions.lock().unwrap();
         let mut list: Vec<Value> = q
             .iter()
-            .map(|(id, e)| json!({"id": id, "questions": e.questions,
-                                  "created": e.created, "session": e.session}))
+            .map(|(id, e)| {
+                json!({"id": id, "questions": e.questions,
+                                  "created": e.created, "session": e.session})
+            })
             .collect();
         list.sort_by_key(|v| v["created"].as_u64().unwrap_or(0));
         Value::Array(list)
@@ -493,8 +502,10 @@ impl App {
         let p = self.pending.lock().unwrap();
         let mut list: Vec<Value> = p
             .iter()
-            .map(|(id, e)| json!({"id": id, "name": e.name, "input": e.input,
-                                  "created": e.created, "note": e.note, "session": e.session}))
+            .map(|(id, e)| {
+                json!({"id": id, "name": e.name, "input": e.input,
+                                  "created": e.created, "note": e.note, "session": e.session})
+            })
             .collect();
         list.sort_by_key(|v| v["created"].as_u64().unwrap_or(0));
         Value::Array(list)
@@ -563,7 +574,9 @@ impl App {
                 reg.retain(|_, a| a.conn != id);
                 let mut count = 0;
                 for a in params["actions"].as_array().cloned().unwrap_or_default() {
-                    let Some(name) = a["name"].as_str() else { continue };
+                    let Some(name) = a["name"].as_str() else {
+                        continue;
+                    };
                     if name.is_empty() || name.len() > 64 {
                         continue;
                     }
@@ -618,7 +631,12 @@ impl App {
     /// passes (`false`). The one blocking primitive under every page wait:
     /// natively a thread sleep, in the browser build a wait that keeps
     /// servicing page RPCs (the reply we wait for arrives through them).
-    pub fn wait_until(&self, timeout_ms: u64, step_ms: u64, mut pred: impl FnMut() -> bool) -> anyhow::Result<bool> {
+    pub fn wait_until(
+        &self,
+        timeout_ms: u64,
+        step_ms: u64,
+        mut pred: impl FnMut() -> bool,
+    ) -> anyhow::Result<bool> {
         let start = crate::store::now_ms();
         loop {
             if pred() {
@@ -650,7 +668,14 @@ impl App {
 
     /// Send `method` to one page and block until it answers (`*.result` with
     /// the same id) or `timeout_ms` passes. `what` names the call in errors.
-    fn page_call(&self, conn_id: u64, method: &str, mut params: Value, timeout_ms: u64, what: &str) -> anyhow::Result<Value> {
+    fn page_call(
+        &self,
+        conn_id: u64,
+        method: &str,
+        mut params: Value,
+        timeout_ms: u64,
+        what: &str,
+    ) -> anyhow::Result<Value> {
         let send = self
             .conns
             .lock()
@@ -666,7 +691,14 @@ impl App {
             self.invokes.lock().unwrap().remove(&id);
             anyhow::bail!("the page disconnected before {what} could run");
         }
-        let done = || self.invokes.lock().unwrap().get(&id).map(|v| v.is_some()).unwrap_or(true);
+        let done = || {
+            self.invokes
+                .lock()
+                .unwrap()
+                .get(&id)
+                .map(|v| v.is_some())
+                .unwrap_or(true)
+        };
         let finished = self.wait_until(timeout_ms, 20, done);
         let reply = self.invokes.lock().unwrap().remove(&id).flatten();
         finished?;
@@ -687,17 +719,23 @@ impl App {
     pub fn invoke_action(&self, name: &str, input: &Value) -> anyhow::Result<Value> {
         let conn_id = self.wait_for_action(name)?;
         let timeout_ms = env_ms("UAPP_ACTION_TIMEOUT_MS", 60_000);
-        self.page_call(conn_id, "action.invoke", json!({"name": name, "input": input}), timeout_ms, &format!("action '{name}'"))
-            .map_err(|e| {
-                let m = e.to_string();
-                if m.contains("did not respond") {
-                    anyhow::anyhow!("{m} (page busy or reloading?)")
-                } else if m.contains("disconnected") {
-                    e
-                } else {
-                    anyhow::anyhow!("action '{name}' failed: {m}")
-                }
-            })
+        self.page_call(
+            conn_id,
+            "action.invoke",
+            json!({"name": name, "input": input}),
+            timeout_ms,
+            &format!("action '{name}'"),
+        )
+        .map_err(|e| {
+            let m = e.to_string();
+            if m.contains("did not respond") {
+                anyhow::anyhow!("{m} (page busy or reloading?)")
+            } else if m.contains("disconnected") {
+                e
+            } else {
+                anyhow::anyhow!("action '{name}' failed: {m}")
+            }
+        })
     }
 
     /// Run JavaScript in a connected page context ("scratchpad" or "app") and
@@ -729,17 +767,26 @@ impl App {
             }
         })?;
         let timeout_ms = env_ms("UAPP_EVAL_TIMEOUT_MS", 60_000);
-        self.page_call(conn_id, "eval.invoke", json!({"code": code}), timeout_ms, &format!("code in '{context}'"))
-            .map_err(|e| {
-                let m = e.to_string();
-                if m.contains("did not respond") {
-                    anyhow::anyhow!("{} (infinite loop, or a promise that never resolves?)", m.replace("did not respond", "did not finish"))
-                } else if m.contains("disconnected") {
-                    e
-                } else {
-                    anyhow::anyhow!("code failed in {context}: {m}")
-                }
-            })
+        self.page_call(
+            conn_id,
+            "eval.invoke",
+            json!({"code": code}),
+            timeout_ms,
+            &format!("code in '{context}'"),
+        )
+        .map_err(|e| {
+            let m = e.to_string();
+            if m.contains("did not respond") {
+                anyhow::anyhow!(
+                    "{} (infinite loop, or a promise that never resolves?)",
+                    m.replace("did not respond", "did not finish")
+                )
+            } else if m.contains("disconnected") {
+                e
+            } else {
+                anyhow::anyhow!("code failed in {context}: {m}")
+            }
+        })
     }
 
     /// Reload the live app page and wait until the NEW document has finished
@@ -766,7 +813,9 @@ impl App {
         let loaded = self.wait_until(RELOAD_WAIT_MS, 50, || {
             let fresh = app_conns();
             let loaded = self.ctx_loaded.lock().unwrap();
-            fresh.iter().any(|id| !before.contains(id) && loaded.contains(id))
+            fresh
+                .iter()
+                .any(|id| !before.contains(id) && loaded.contains(id))
         })?;
         Ok(if loaded {
             json!({"ok": true, "loaded": true, "ms": crate::store::now_ms() - start})
@@ -778,7 +827,10 @@ impl App {
 }
 
 fn env_ms(var: &str, default: u64) -> u64 {
-    std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Sleep without holding any `App` lock. Native: a plain thread sleep (page
@@ -835,9 +887,10 @@ impl App {
             // them, later moves don't), so the shell can tell a .uapp — an
             // app update — from files to file away, and not light up a drop
             // zone that won't be used. Still no paths: the page never sees one.
-            DropPhase::Hover => {
-                self.notify("drop_hover", json!({"x": info.x, "y": info.y, "names": names}))
-            }
+            DropPhase::Hover => self.notify(
+                "drop_hover",
+                json!({"x": info.x, "y": info.y, "names": names}),
+            ),
             DropPhase::Leave => self.notify("drop_leave", json!({})),
             DropPhase::Drop => {
                 let id: String = (0..12).map(|_| fastrand::alphanumeric()).collect();
@@ -848,8 +901,11 @@ impl App {
                     }
                     drops.insert(id.clone(), (crate::store::now_ms(), info.paths));
                 }
-                self.notify("drop_files", json!({"id": id, "names": names,
-                                                 "x": info.x, "y": info.y}));
+                self.notify(
+                    "drop_files",
+                    json!({"id": id, "names": names,
+                                                 "x": info.x, "y": info.y}),
+                );
             }
         }
     }

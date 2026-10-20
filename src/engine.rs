@@ -386,7 +386,10 @@ impl Engine {
         // Windows over an open db, and the re-open would deadlock on our lock.
         let same_file = registry::key(&new_path) == registry::key(&self.path);
         if same_file {
-            drop(std::mem::replace(&mut self.db, Connection::open_in_memory()?));
+            drop(std::mem::replace(
+                &mut self.db,
+                Connection::open_in_memory()?,
+            ));
             self._lock = None;
         }
         std::fs::rename(&tmp, &new_path)
@@ -432,7 +435,10 @@ impl Engine {
         }
         // Close our live connection first: the transform replaces the file by
         // rename, which Windows refuses while SQLite holds the old file open.
-        drop(std::mem::replace(&mut self.db, Connection::open_in_memory()?));
+        drop(std::mem::replace(
+            &mut self.db,
+            Connection::open_in_memory()?,
+        ));
         let transform = match (currently_encrypted, new_passphrase.as_deref()) {
             (false, Some(pw)) => crate::cipher::encrypt_file_in_place(&self.path, pw),
             (true, None) => {
@@ -502,7 +508,6 @@ impl Engine {
             }
         }
     }
-
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -540,7 +545,8 @@ impl Engine {
     pub fn serialize_bytes(&self) -> Result<Vec<u8>> {
         unsafe {
             let mut size: i64 = 0;
-            let p = rusqlite::ffi::sqlite3_serialize(self.db.handle(), c"main".as_ptr(), &mut size, 0);
+            let p =
+                rusqlite::ffi::sqlite3_serialize(self.db.handle(), c"main".as_ptr(), &mut size, 0);
             if p.is_null() {
                 anyhow::bail!("sqlite3_serialize failed (out of memory?)");
             }

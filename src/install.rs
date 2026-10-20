@@ -16,17 +16,40 @@ pub fn install() -> Result<()> {
     let icon_root = data.join("icons/hicolor");
     std::fs::create_dir_all(icon_root.join("scalable/apps"))?;
     std::fs::create_dir_all(icon_root.join("scalable/mimetypes"))?;
-    std::fs::write(icon_root.join("scalable/apps/uapp.svg"), include_str!("../assets/icon.svg"))?;
+    std::fs::write(
+        icon_root.join("scalable/apps/uapp.svg"),
+        include_str!("../assets/icon.svg"),
+    )?;
     std::fs::write(
         icon_root.join("scalable/mimetypes/application-x-uapp.svg"),
         include_str!("../assets/icon-file.svg"),
     )?;
     let pngs: [(&str, &[u8], &[u8]); 5] = [
-        ("16x16", include_bytes!("../assets/uapp-16.png"), include_bytes!("../assets/uapp-file-16.png")),
-        ("32x32", include_bytes!("../assets/uapp-32.png"), include_bytes!("../assets/uapp-file-32.png")),
-        ("48x48", include_bytes!("../assets/uapp-48.png"), include_bytes!("../assets/uapp-file-48.png")),
-        ("128x128", include_bytes!("../assets/uapp-128.png"), include_bytes!("../assets/uapp-file-128.png")),
-        ("256x256", include_bytes!("../assets/uapp-256.png"), include_bytes!("../assets/uapp-file-256.png")),
+        (
+            "16x16",
+            include_bytes!("../assets/uapp-16.png"),
+            include_bytes!("../assets/uapp-file-16.png"),
+        ),
+        (
+            "32x32",
+            include_bytes!("../assets/uapp-32.png"),
+            include_bytes!("../assets/uapp-file-32.png"),
+        ),
+        (
+            "48x48",
+            include_bytes!("../assets/uapp-48.png"),
+            include_bytes!("../assets/uapp-file-48.png"),
+        ),
+        (
+            "128x128",
+            include_bytes!("../assets/uapp-128.png"),
+            include_bytes!("../assets/uapp-file-128.png"),
+        ),
+        (
+            "256x256",
+            include_bytes!("../assets/uapp-256.png"),
+            include_bytes!("../assets/uapp-file-256.png"),
+        ),
     ];
     for (size, app_png, file_png) in pngs {
         let d = icon_root.join(size);
@@ -35,7 +58,10 @@ pub fn install() -> Result<()> {
         std::fs::write(d.join("apps/uapp.png"), app_png)?;
         std::fs::write(d.join("mimetypes/application-x-uapp.png"), file_png)?;
     }
-    let _ = Command::new("gtk-update-icon-cache").args(["-f", "-t"]).arg(&icon_root).status();
+    let _ = Command::new("gtk-update-icon-cache")
+        .args(["-f", "-t"])
+        .arg(&icon_root)
+        .status();
 
     // 2. MIME type
     let mime_dir = data.join("mime/packages");
@@ -52,7 +78,9 @@ pub fn install() -> Result<()> {
 </mime-info>
 "#,
     )?;
-    let _ = Command::new("update-mime-database").arg(data.join("mime")).status();
+    let _ = Command::new("update-mime-database")
+        .arg(data.join("mime"))
+        .status();
 
     // 3. Desktop entry
     let apps_dir = data.join("applications");
@@ -81,7 +109,9 @@ pub fn install() -> Result<()> {
             ),
         )?;
     }
-    let _ = Command::new("update-desktop-database").arg(&apps_dir).status();
+    let _ = Command::new("update-desktop-database")
+        .arg(&apps_dir)
+        .status();
     let _ = Command::new("xdg-mime")
         .args(["default", "uapp.desktop", "application/x-uapp"])
         .status();
@@ -98,14 +128,27 @@ pub fn install() -> Result<()> {
     crate::store::bootstrap(&tpl, "New App", None)?;
 
     println!("Installed:");
-    println!("  Icons: uapp + application-x-uapp ({})", icon_root.display());
+    println!(
+        "  Icons: uapp + application-x-uapp ({})",
+        icon_root.display()
+    );
     println!("  MIME type application/x-uapp (*.uapp)");
-    println!("  Desktop entry: {} (double-click .uapp files now opens uapp)", apps_dir.join("uapp.desktop").display());
+    println!(
+        "  Desktop entry: {} (double-click .uapp files now opens uapp)",
+        apps_dir.join("uapp.desktop").display()
+    );
     match &desktop_bin {
-        Some(bin) => println!("  Launcher: {} (bare UApp window → {})", apps_dir.join("UApp.desktop").display(), bin.display()),
+        Some(bin) => println!(
+            "  Launcher: {} (bare UApp window → {})",
+            apps_dir.join("UApp.desktop").display(),
+            bin.display()
+        ),
         None => println!("  (no uapp binary found — bare UApp launcher not installed)"),
     }
-    println!("  File-manager template: {} (right-click → New Document → New App)", tpl.display());
+    println!(
+        "  File-manager template: {} (right-click → New Document → New App)",
+        tpl.display()
+    );
     Ok(())
 }
 

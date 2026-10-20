@@ -9,8 +9,8 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::rpc;
 use crate::app::App;
+use crate::rpc;
 
 pub struct ToolDef {
     pub name: &'static str,
@@ -339,7 +339,11 @@ pub fn disabled_set(app: &Arc<App>) -> std::collections::HashSet<String> {
         .ok()
         .flatten()
         .and_then(|v| v.as_array().cloned())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -353,10 +357,12 @@ pub fn forced_gate(name: &str, input: &Value) -> Option<(String, String)> {
     match name {
         "sql_query" => {
             let sql = input["sql"].as_str().unwrap_or("");
-            crate::store::mentions_attach(sql).then(|| (
-                "sql_query:attach".to_string(),
-                "attaches another database file on this machine".to_string(),
-            ))
+            crate::store::mentions_attach(sql).then(|| {
+                (
+                    "sql_query:attach".to_string(),
+                    "attaches another database file on this machine".to_string(),
+                )
+            })
         }
         "fetch_url" | "download_lib" => {
             let url = input["url"].as_str().unwrap_or("");

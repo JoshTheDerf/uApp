@@ -115,7 +115,11 @@ pub struct Ask {
 
 impl Ask {
     pub fn new(features: Vec<Feature>) -> Ask {
-        Ask { features, detail: None, scope: None }
+        Ask {
+            features,
+            detail: None,
+            scope: None,
+        }
     }
     pub fn one(f: Feature) -> Ask {
         Ask::new(vec![f])
@@ -203,7 +207,9 @@ pub fn any_allowed(features: &[Feature]) -> bool {
     let Ok(sess) = SESSION_ALLOW.get_or_init(Default::default).lock() else {
         return false;
     };
-    features.iter().any(|f| sess.contains(&session_key(&app_id, &Ask::one(*f))))
+    features
+        .iter()
+        .any(|f| sess.contains(&session_key(&app_id, &Ask::one(*f))))
 }
 
 /// Requests whose answer is already settled, and background asks in flight.
@@ -412,35 +418,53 @@ fn wording(l: &str, key: &str) -> (&'static str, &'static str) {
     match (l, key) {
         ("fr", "camera") => ("Caméra", "demande à utiliser votre caméra."),
         ("fr", "microphone") => ("Microphone", "demande à utiliser votre microphone."),
-        ("fr", "cameraMic") => ("Caméra et microphone", "demande à utiliser votre caméra et votre microphone."),
+        ("fr", "cameraMic") => (
+            "Caméra et microphone",
+            "demande à utiliser votre caméra et votre microphone.",
+        ),
         ("fr", "screen") => ("Partage d'écran", "demande à partager votre écran."),
         ("fr", "location") => ("Localisation", "demande à connaître votre position."),
         ("fr", "notifications") => ("Notifications", "demande à afficher des notifications."),
         ("fr", "clipboard") => ("Presse-papiers", "demande à lire votre presse-papiers."),
         ("fr", "pointerLock") => ("Contrôle de la souris", "demande à capturer votre curseur."),
-        ("fr", "storage") => ("Stockage intersite", "demande à laisser un site intégré utiliser ses propres cookies."),
+        ("fr", "storage") => (
+            "Stockage intersite",
+            "demande à laisser un site intégré utiliser ses propres cookies.",
+        ),
         ("fr", _) => ("Demande d'autorisation", "demande un accès supplémentaire."),
 
         ("es", "camera") => ("Cámara", "quiere usar tu cámara."),
         ("es", "microphone") => ("Micrófono", "quiere usar tu micrófono."),
-        ("es", "cameraMic") => ("Cámara y micrófono", "quiere usar tu cámara y tu micrófono."),
+        ("es", "cameraMic") => (
+            "Cámara y micrófono",
+            "quiere usar tu cámara y tu micrófono.",
+        ),
         ("es", "screen") => ("Compartir pantalla", "quiere compartir tu pantalla."),
         ("es", "location") => ("Ubicación", "quiere conocer tu ubicación."),
         ("es", "notifications") => ("Notificaciones", "quiere mostrar notificaciones."),
         ("es", "clipboard") => ("Portapapeles", "quiere leer tu portapapeles."),
         ("es", "pointerLock") => ("Control del ratón", "quiere capturar el cursor del ratón."),
-        ("es", "storage") => ("Almacenamiento entre sitios", "quiere permitir que un sitio incrustado use sus propias cookies."),
+        ("es", "storage") => (
+            "Almacenamiento entre sitios",
+            "quiere permitir que un sitio incrustado use sus propias cookies.",
+        ),
         ("es", _) => ("Solicitud de permiso", "quiere acceso adicional."),
 
         ("de", "camera") => ("Kamera", "möchte deine Kamera verwenden."),
         ("de", "microphone") => ("Mikrofon", "möchte dein Mikrofon verwenden."),
-        ("de", "cameraMic") => ("Kamera & Mikrofon", "möchte deine Kamera und dein Mikrofon verwenden."),
+        ("de", "cameraMic") => (
+            "Kamera & Mikrofon",
+            "möchte deine Kamera und dein Mikrofon verwenden.",
+        ),
         ("de", "screen") => ("Bildschirmfreigabe", "möchte deinen Bildschirm teilen."),
         ("de", "location") => ("Standort", "möchte deinen Standort wissen."),
         ("de", "notifications") => ("Mitteilungen", "möchte Mitteilungen anzeigen."),
         ("de", "clipboard") => ("Zwischenablage", "möchte deine Zwischenablage lesen."),
         ("de", "pointerLock") => ("Maussteuerung", "möchte deinen Mauszeiger erfassen."),
-        ("de", "storage") => ("Seitenübergreifender Speicher", "möchte einer eingebetteten Seite ihre eigenen Cookies erlauben."),
+        ("de", "storage") => (
+            "Seitenübergreifender Speicher",
+            "möchte einer eingebetteten Seite ihre eigenen Cookies erlauben.",
+        ),
         ("de", _) => ("Berechtigungsanfrage", "möchte zusätzlichen Zugriff."),
 
         ("zh", "camera") => ("摄像头", "请求使用你的摄像头。"),
@@ -456,13 +480,19 @@ fn wording(l: &str, key: &str) -> (&'static str, &'static str) {
 
         (_, "camera") => ("Camera", "wants to use your camera."),
         (_, "microphone") => ("Microphone", "wants to use your microphone."),
-        (_, "cameraMic") => ("Camera & microphone", "wants to use your camera and microphone."),
+        (_, "cameraMic") => (
+            "Camera & microphone",
+            "wants to use your camera and microphone.",
+        ),
         (_, "screen") => ("Screen sharing", "wants to share your screen."),
         (_, "location") => ("Location", "wants to know your location."),
         (_, "notifications") => ("Notifications", "wants to show notifications."),
         (_, "clipboard") => ("Clipboard", "wants to read your clipboard."),
         (_, "pointerLock") => ("Mouse control", "wants to capture your mouse cursor."),
-        (_, "storage") => ("Cross-site storage", "wants to let an embedded site use its own cookies."),
+        (_, "storage") => (
+            "Cross-site storage",
+            "wants to let an embedded site use its own cookies.",
+        ),
         (_, _) => ("Permission request", "wants additional access."),
     }
 }
@@ -564,8 +594,10 @@ mod tests {
 
     #[test]
     fn storage_prompt_carries_the_domain() {
-        let a = Ask::one(Feature::StorageAccess)
-            .scoped("tracker.example".into(), "tracker.example (embedded in shop.example)".into());
+        let a = Ask::one(Feature::StorageAccess).scoped(
+            "tracker.example".into(),
+            "tracker.example (embedded in shop.example)".into(),
+        );
         assert!(a.prompt_text().body.contains("tracker.example"));
         assert_eq!(a.keys_joined(), "storage@tracker.example");
     }
