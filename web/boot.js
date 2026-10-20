@@ -475,8 +475,7 @@ async function handleSwRequest(m) {
     const url = new URL(m.path, location.origin);
     const p = url.pathname;
     if (p === "/download.uapp") {
-      const r = await sendRpc("app.export");
-      reply({ bodyB64: r.b64, contentType: "application/octet-stream",
+      reply({ body: await exportBytes(), contentType: "application/octet-stream",
               disposition: `attachment; filename="${downloadName()}"` });
       return;
     }
@@ -615,6 +614,10 @@ window.addEventListener("message", (ev) => {
     return;
   }
   if (CONN_METHODS.has(m.method)) { connMessage(win, m, replyTo); return; }
+  if (m.method === "app.exportBytes") { // the shell's own; pages have app.export
+    if (m.id != null) replyTo({ id: m.id, error: { message: "unknown method app.exportBytes" } });
+    return;
+  }
   if (m.method.startsWith("host.")) {
     handleHostRpc(m).then(
       (result) => { if (m.id != null) replyTo({ id: m.id, result }); },
@@ -846,9 +849,10 @@ window.addEventListener("beforeunload", (e) => {
   if (dirtySince || savingPromise || saveState === "failed") { e.preventDefault(); e.returnValue = ""; }
 });
 
+// The database as bytes, transferred out of the worker rather than encoded
+// (app.export is base64 inside JSON, ~5 copies of the file per save).
 async function exportBytes() {
-  const r = await sendRpc("app.export");
-  return bytesFromB64(r.b64);
+  return (await sendRpc("app.exportBytes")).bytes;
 }
 
 function downloadName() { return (appName() || "app").replace(/[^\w \-.]/g, "_") + ".uapp"; }
@@ -1014,11 +1018,11 @@ window.__uappSiteReset = async () => {
 window.__uappSitePublish = async (token, { force = false } = {}) => {
   if (!siteState || !window.__uappSiteArchive) throw new Error("not a hosted site");
   await window.__uappFlushSave();
-  const r = await sendRpc("app.export");
+  const body = await exportBytes();
   const headers = { authorization: "Bearer " + token, "content-type": "application/octet-stream" };
   if (siteState.etag && !force) headers["if-match"] = siteState.etag;
   const resp = await fetch(new URL(window.__uappSiteArchive, location.href), {
-    method: "PUT", headers, body: bytesFromB64(r.b64), cache: "no-store",
+    method: "PUT", headers, body, cache: "no-store",
   });
   const text = await resp.text();
   let json = null;

@@ -167,6 +167,20 @@ pub fn open_app(bytes: Option<Vec<u8>>, name: String, user: String) -> Result<St
     opened.map_err(|e| JsValue::from_str(&format!("{e:#}")))
 }
 
+/// The whole database as one byte array, for saves and downloads. It reaches
+/// JS as a Uint8Array (one copy out of wasm memory) that the worker transfers
+/// to the page; `app.export` would take it through base64 and JSON on both
+/// sides, several more copies of a file that can be tens of megabytes.
+#[wasm_bindgen]
+pub fn export_bytes() -> Result<Vec<u8>, JsValue> {
+    let out = (|| -> Result<Vec<u8>> {
+        let app = app()?;
+        let eng = app.engine.lock().unwrap();
+        eng.serialize_bytes()
+    })();
+    out.map_err(|e| JsValue::from_str(&format!("{e:#}")))
+}
+
 /// One JSON-RPC call. Returns {"result": ...} or {"error": {"message": ...}}.
 #[wasm_bindgen]
 pub fn rpc_dispatch(method: String, params_json: String) -> String {

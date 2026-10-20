@@ -178,7 +178,8 @@ async function archiveResponse(req, url, clientId, probe, inst) {
   }
   if (!r) return withCoi(new Response("uapp shell not ready", { status: 503 }));
   if (r.error) return withCoi(new Response(r.error, { status: r.status || 404 }));
-  const bytes = Uint8Array.from(atob(r.bodyB64 || ""), (c) => c.charCodeAt(0));
+  // `body` (raw bytes) where the shell has them, base64 for archive files.
+  const bytes = r.body instanceof Uint8Array ? r.body : Uint8Array.from(atob(r.bodyB64 || ""), (c) => c.charCodeAt(0));
   const headers = {
     "content-type": r.contentType || "application/octet-stream",
     "cache-control": "no-store",

@@ -3,7 +3,7 @@
  * postMessage (same protocol the native WebSocket carries) — or, while an AI
  * run has this worker blocked, over the shared-memory inbox the glue drains. */
 
-import init, { open_app, rpc_dispatch, ai_tick } from "./uapp_wasm.js";
+import init, { open_app, rpc_dispatch, ai_tick, export_bytes } from "./uapp_wasm.js";
 import { glueConfigure, glueDrainInbox, gluePanicked } from "./uapp_glue.js";
 
 const ready = init();
@@ -39,7 +39,7 @@ self.onmessage = async (ev) => {
       onPanic: markDead,
       // RPCs that arrive through the shared-memory inbox while an AI run has
       // this worker blocked (see blockUntil in the glue).
-      dispatch: (req) => postMessage({ type: "reply", id: req.id, ...dispatch(req) }),
+      dispatch: (req) => reply(req.id, dispatch(req)),
       aiTick: (session) => {
         if (dead) return;
         try {
@@ -74,13 +74,21 @@ self.onmessage = async (ev) => {
     return;
   }
   if (m.type === "rpc") {
-    postMessage({ type: "reply", id: m.id, ...dispatch(m) });
+    reply(m.id, dispatch(m));
   }
 };
+
+// The database bytes travel as a transfer, not a copy (see export_bytes).
+function reply(id, out) {
+  const bytes = out.result && out.result.bytes;
+  postMessage({ type: "reply", id, ...out }, bytes instanceof Uint8Array ? [bytes.buffer] : []);
+}
 
 function dispatch(m) {
   if (dead) return DEAD();
   try {
+    // The page's own saves and downloads (boot.js exportBytes).
+    if (m.method === "app.exportBytes") return { result: { bytes: export_bytes() } };
     return JSON.parse(rpc_dispatch(m.method || "", JSON.stringify(m.params || {})));
   } catch (e) {
     crashed(e);
