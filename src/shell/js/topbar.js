@@ -3,7 +3,7 @@
 
 import { rpc, on, emit } from "./core.js";
 import { $, I, installStyle, togglePanel, openPanel, dlgAlert, downloadUrl, isComposing, menuFrom } from "./ui.js";
-import { toggleToolbar, shortcutLabel, toolbarDefault } from "./toolbar-visibility.js";
+import { toggleToolbar, shortcutLabel, toolbarDefault, PANEL_KEYS, MAC } from "./toolbar-visibility.js";
 import { mirrorRefresh } from "./mirror.js";
 import { S } from "./strings.js";
 
@@ -235,11 +235,11 @@ function startRename() {
 // the bar at every width.
 function openBarMenu() {
   const native = document.body.classList.contains("native");
-  const panel = (src, icon, label) =>
-    ({ icon, label, checked: $(src).classList.contains("active"), run: () => $(src).click() });
+  const panel = (src, icon, label, keys) =>
+    ({ icon, label, keys: keys && shortcutLabel(keys), checked: $(src).classList.contains("active"), run: () => $(src).click() });
   menuFrom($("btn-menu"), [
-    panel("btn-files", "files", S.topbar.menuFiles),
-    panel("btn-sql", "database", S.topbar.menuDatabase),
+    panel("btn-files", "files", S.topbar.menuFiles, PANEL_KEYS.files),
+    panel("btn-sql", "database", S.topbar.menuDatabase, PANEL_KEYS.database),
     panel("btn-tools", "wrench", S.topbar.menuTools),
     panel("btn-settings", "settings", S.topbar.menuSettings),
     { sep: true },
@@ -250,20 +250,21 @@ function openBarMenu() {
 }
 
 // Panel buttons: icon only (named for assistive tech), Chat with a label on
-// wide screens.
-function panelButton(id, icon, title, label) {
+// wide screens. The tooltip names the shortcut, if the panel has one.
+function panelButton(id, icon, title, label, keys) {
   const b = $(id);
   b.innerHTML = I(icon, 18) + (label ? `<span class="bar-label">${label}</span>` : "");
-  b.title = title;
+  b.title = keys ? `${title} (${shortcutLabel(keys)})` : title;
   b.setAttribute("aria-label", label || title);
+  if (keys) b.setAttribute("aria-keyshortcuts", keys.replace("Mod", MAC ? "Meta" : "Control"));
 }
 
 function wire() {
-  panelButton("btn-files", "files", S.topbar.browseFiles);
-  panelButton("btn-sql", "database", S.topbar.browseDatabase);
+  panelButton("btn-files", "files", S.topbar.browseFiles, "", PANEL_KEYS.files);
+  panelButton("btn-sql", "database", S.topbar.browseDatabase, "", PANEL_KEYS.database);
   panelButton("btn-tools", "wrench", S.topbar.toolsBtn);
   panelButton("btn-settings", "settings", S.topbar.settingsBtn);
-  panelButton("btn-chat", "message-square", S.topbar.chatBtn, S.topbar.chatLabel);
+  panelButton("btn-chat", "message-square", S.topbar.chatBtn, S.topbar.chatLabel, PANEL_KEYS.chat);
   $("btn-menu").innerHTML = I("ellipsis-vertical", 18);
   $("btn-menu").setAttribute("aria-haspopup", "menu");
   $("btn-menu").setAttribute("aria-expanded", "false");

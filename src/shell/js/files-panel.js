@@ -152,6 +152,7 @@ const rootOf = (name) => (name.startsWith("data/") ? "data/" : "app/");
 const otherRoot = (name) => (rootOf(name) === "app/" ? "data/" : "app/");
 const MAX_UPLOAD = 100 * 1024 * 1024;
 
+const touchUi = matchMedia("(pointer: coarse)");
 const fb = {
   rows: [],            // files.list rows: [name, sz, mtime, role]
   cwd: "",             // current prefix, "" = root, otherwise ends with "/"
@@ -315,12 +316,42 @@ function wireEntry(el, e) {
   if (fb.sel === e.name) el.classList.add("sel");
   el.tabIndex = 0;
   const open = () => (e.dir ? fbGo(e.name) : openViewer(e.name));
-  el.onclick = () => {
+  const select = () => {
     fb.sel = e.name;
     document.querySelectorAll("#fb-items .fbitem.sel").forEach((x) => x.classList.remove("sel"));
     el.classList.add("sel");
   };
-  el.ondblclick = open;
+  // Mouse: click selects, double-click opens. Touch: a tap opens (there is
+  // no double-tap convention for files) and a long press opens the menu.
+  let longPressed = false;
+  el.onclick = () => {
+    if (longPressed) { longPressed = false; return; }
+    if (touchUi.matches) open(); else select();
+  };
+  el.ondblclick = () => { if (!touchUi.matches) open(); };
+  // Android fires contextmenu on a long press by itself; iOS doesn't, so
+  // time it here too (whichever comes first wins, the other is ignored).
+  let pressTimer = null, pressAt = null;
+  el.addEventListener("pointerdown", (ev) => {
+    longPressed = false;
+    if (ev.pointerType !== "touch") return;
+    pressAt = [ev.clientX, ev.clientY];
+    clearTimeout(pressTimer);
+    pressTimer = setTimeout(() => {
+      longPressed = true;
+      select();
+      entryMenu(e, pressAt[0], pressAt[1]);
+    }, 550);
+  });
+  const cancelPress = () => { clearTimeout(pressTimer); pressTimer = null; };
+  // A finger lifted after a long press must not also "click" (or send the
+  // mousedown that would close the menu it just opened).
+  el.addEventListener("touchend", (ev) => { if (longPressed) ev.preventDefault(); });
+  el.addEventListener("pointerup", cancelPress);
+  el.addEventListener("pointercancel", cancelPress);
+  el.addEventListener("pointermove", (ev) => {
+    if (pressAt && Math.hypot(ev.clientX - pressAt[0], ev.clientY - pressAt[1]) > 10) cancelPress();
+  });
   el.onkeydown = (ev) => {
     if (ev.target !== el) return; // the entry's own ⋮ button handles its keys
     if (ev.key === "Enter") { ev.preventDefault(); open(); }
@@ -333,7 +364,10 @@ function wireEntry(el, e) {
   };
   el.oncontextmenu = (ev) => {
     ev.preventDefault();
-    fb.sel = e.name;
+    if (longPressed && document.querySelector(".ctxmenu")) return; // our timer got there first
+    cancelPress();
+    if (ev.pointerType === "touch" || touchUi.matches) longPressed = true; // swallow the tap that follows
+    select();
     entryMenu(e, ev.clientX, ev.clientY);
   };
   const more = document.createElement("button");
