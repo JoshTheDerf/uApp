@@ -29,11 +29,29 @@
         ],
         "name": "UApp application",
         "description": "UApp shareable application",
-        "role": "Editor"
+        "role": "Editor",
+        "mimeType": "application/x-uapp"
       }
     ],
     "macOS": {
       "infoPlist": "installer/macos/Info.plist"
+    },
+    "category": "Utility",
+    "linux": {
+      "deb": {
+        "desktopTemplate": "installer/linux/uapp.desktop",
+        "files": {
+          "/usr/share/mime/packages/uapp.xml": "installer/linux/uapp-mime.xml",
+          "/usr/share/icons/hicolor/scalable/mimetypes/application-x-uapp.svg": "assets/icon-file.svg"
+        }
+      },
+      "rpm": {
+        "desktopTemplate": "installer/linux/uapp.desktop",
+        "files": {
+          "/usr/share/mime/packages/uapp.xml": "installer/linux/uapp-mime.xml",
+          "/usr/share/icons/hicolor/scalable/mimetypes/application-x-uapp.svg": "assets/icon-file.svg"
+        }
+      }
     }
   }
 }
