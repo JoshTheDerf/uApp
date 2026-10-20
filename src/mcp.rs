@@ -11,15 +11,13 @@ use std::sync::Mutex;
 static SESSIONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 fn get_session(url: &str) -> Option<String> {
-    SESSIONS
-        .lock()
-        .unwrap()
+    crate::app::lock(&SESSIONS)
         .as_ref()
         .and_then(|m| m.get(url).cloned())
 }
 
 fn set_session(url: &str, sid: Option<String>) {
-    let mut g = SESSIONS.lock().unwrap();
+    let mut g = crate::app::lock(&SESSIONS);
     let m = g.get_or_insert_with(HashMap::new);
     match sid {
         Some(s) => {

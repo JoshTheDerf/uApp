@@ -15,12 +15,12 @@ static MEM: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
 
 #[cfg(target_arch = "wasm32")]
 pub fn load() -> Value {
-    MEM.lock().unwrap().clone().unwrap_or_else(|| json!({}))
+    crate::app::lock(&MEM).clone().unwrap_or_else(|| json!({}))
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn set(key: &str, value: Value) -> Result<()> {
-    let mut g = MEM.lock().unwrap();
+    let mut g = crate::app::lock(&MEM);
     let mut v = g.clone().unwrap_or_else(|| json!({}));
     if let Some(o) = v.as_object_mut() {
         o.insert(key.to_string(), value);

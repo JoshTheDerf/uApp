@@ -249,9 +249,7 @@ mod native_serve {
         // reachable from the page is reachable from untrusted app code.
         {
             let id_app = app.clone();
-            permissions::install_app_id(Box::new(move || {
-                id_app.engine.lock().unwrap().app_id.clone()
-            }));
+            permissions::install_app_id(Box::new(move || id_app.eng().app_id.clone()));
         }
 
         rt.block_on(async move {
@@ -263,7 +261,7 @@ mod native_serve {
             // Advertise for double-open reuse (rewritten by app.save when the
             // backing file changes — see rpc.rs).
             {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 registry::write_addr(&eng.path, port, &token);
             }
 
@@ -277,7 +275,7 @@ mod native_serve {
                         tick.tick().await;
                         let app2 = app.clone();
                         let _ = tokio::task::spawn_blocking(move || {
-                            app2.engine.lock().unwrap().maybe_snapshot();
+                            app2.eng().maybe_snapshot();
                         })
                         .await;
                     }
@@ -462,7 +460,7 @@ mod native_serve {
                     tick.tick().await;
                     let app2 = app.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        app2.engine.lock().unwrap().maybe_snapshot();
+                        app2.eng().maybe_snapshot();
                     })
                     .await;
                 }

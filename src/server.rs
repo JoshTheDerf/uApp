@@ -285,7 +285,7 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
     // arrives a round trip late means the bar paints and then vanishes, which
     // reads as a glitch every single time the app is opened.
     let topbar_class = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let saved = crate::store::config_get(&eng.db, "toolbar").ok().flatten();
         if crate::toolbar::settings(saved.as_ref())["hidden"] == json!(true) {
             " class=\"hidden\""
@@ -453,7 +453,7 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
     // "posts/x" -> posts/x/index.html, "admin" -> admin.html. Generated sites
     // (and the public `uapp serve` router) link this way.
     let (data, name) = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let mut found = (crate::store::sqlar_read(&eng.db, name), name.to_string());
         if matches!(found.0, Ok(None)) {
             let bare = name.trim_end_matches('/');
@@ -683,7 +683,7 @@ async fn app_root(state: State<Arc<App>>, who: Visitor, headers: HeaderMap) -> R
 async fn health(State(app): State<Arc<App>>) -> Response {
     // The key names WHICH file this server has open: a stale registry entry
     // whose port was recycled by another uapp must not be mistaken for ours.
-    let key = crate::registry::key(&app.engine.lock().unwrap().path);
+    let key = crate::registry::key(&app.eng().path);
     // Android's chat keep-alive service polls this to know when it can stop
     // holding the process out of the cached-apps freezer.
     let busy = if app.ai_busy_any() { "1" } else { "0" };
@@ -703,7 +703,7 @@ async fn health(State(app): State<Arc<App>>) -> Response {
 /// shell button just navigates here.
 async fn template_download(State(app): State<Arc<App>>, _who: Owner) -> Response {
     let result = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let name = app_display_name(&eng);
         crate::store::export_template(&eng.db, &name).map(|b| (b, name))
     };
@@ -721,7 +721,7 @@ async fn template_download(State(app): State<Arc<App>>, _who: Owner) -> Response
 /// save a scratch/unsaved app, but works for any app.
 async fn app_download(State(app): State<Arc<App>>, _who: Owner) -> Response {
     let result = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let name = app_display_name(&eng);
         crate::store::export_full(&eng.db, eng.crypt.as_ref().map(|k| k.passphrase.as_str()))
             .map(|b| (b, name))
@@ -808,6 +808,14 @@ async fn ws_route(State(app): State<Arc<App>>, _who: Owner, ws: WebSocketUpgrade
 
 static CONN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// How much one connection may have running at once. Every RPC takes a
+/// blocking-pool thread until it returns (some wait minutes on a prompt), and
+/// its message stays in memory meanwhile, so a request costs 1 plus 1 per MiB
+/// of message. Over budget, the request is refused straight away rather than
+/// queued: queuing would stop this socket being read, and the replies that
+/// in-flight calls are waiting for (an app action's result) arrive on it.
+const CONN_BUDGET: usize = 256;
+
 async fn ws_conn(app: Arc<App>, socket: WebSocket) {
     struct ClientGuard(Arc<App>, u64);
     impl Drop for ClientGuard {
@@ -820,6 +828,7 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
     let mut events = app.events.subscribe();
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(256);
+    let budget = Arc::new(tokio::sync::Semaphore::new(CONN_BUDGET));
     {
         let tx = out_tx.clone();
         app.conn_open(
@@ -876,10 +885,21 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
             }
             continue;
         }
+        let cost = (1 + (text.len() >> 20)).min(CONN_BUDGET) as u32;
+        let Ok(permit) = budget.clone().try_acquire_many_owned(cost) else {
+            if !id.is_null() {
+                let msg = "too many requests in flight on this connection; wait for some to finish";
+                let _ = out_tx
+                    .send(json!({"id": id, "error": {"message": msg}}).to_string())
+                    .await;
+            }
+            continue;
+        };
         let app2 = app.clone();
         let out = out_tx.clone();
         // Each request handled on the blocking pool (SQLite is sync).
         tokio::spawn(async move {
+            let _permit = permit;
             let result = tokio::task::spawn_blocking(move || {
                 crate::rpc::dispatch_untrusted(&app2, &method, params)
             })
@@ -1604,7 +1624,7 @@ fn strip_wasm_marker(text: &str) -> String {
 fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
     let opts = app.public.unwrap_or_default();
     let found = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         resolve_public(&eng.db, path).or_else(|| {
             read_exact(&eng.db, "app/404.html").map(|b| ("app/404.html".to_string(), b))
         })
@@ -1665,8 +1685,8 @@ fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
 /// The current `/site.uapp`, rebuilt only when something was written since.
 fn current_archive(app: &App) -> anyhow::Result<Arc<crate::app::PublicArchive>> {
     let opts = app.public.unwrap_or_default();
-    let eng = app.engine.lock().unwrap();
-    let mut cache = app.archive_cache.lock().unwrap();
+    let eng = app.eng();
+    let mut cache = crate::app::lock(&app.archive_cache);
     if let Some((gen, arc)) = cache.as_ref() {
         if *gen == eng.writes {
             return Ok(arc.clone());
@@ -1761,7 +1781,7 @@ async fn site_publish(
             }
         }
         // Rescue point before a whole-site change, like a template update.
-        if let Err(e) = app.engine.lock().unwrap().snapshot() {
+        if let Err(e) = app.eng().snapshot() {
             eprintln!("uapp: snapshot before publish failed: {e:#}");
         }
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body);

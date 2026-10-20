@@ -162,7 +162,7 @@ fn compact_bytes(cfg: &AiConfig) -> usize {
 
 fn load_config(app: &Arc<App>) -> Result<AiConfig> {
     let cfg = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         store::config_get(&eng.db, "ai")?
     }
     .ok_or_else(|| anyhow!("no AI provider configured — open Settings in the shell"))?;
@@ -183,7 +183,7 @@ fn load_config(app: &Arc<App>) -> Result<AiConfig> {
 
 fn system_prompt(app: &Arc<App>, ctx: &RunCtx) -> String {
     let (files, schema, name) = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let files = store::query(&eng.db, "SELECT name, sz FROM sqlar ORDER BY name", &[])
             .map(|v| v.to_string())
             .unwrap_or_default();
@@ -328,7 +328,7 @@ CURRENT DATA SCHEMA: {schema}"#
 /// Plan mode = read-only toolset: gated builtins can write, and agents can
 /// write inside their own loop, so both are withheld.
 fn plan_mode(app: &Arc<App>) -> bool {
-    app.ai_mode.lock().unwrap().as_str() == "plan"
+    crate::app::lock(&app.ai_mode).as_str() == "plan"
 }
 
 fn builtin_tools(app: &Arc<App>, ctx: &RunCtx) -> Vec<Value> {
@@ -409,11 +409,11 @@ fn approval_gate(
 ) -> bool {
     match forced {
         None => {
-            let manual = app.ai_mode.lock().unwrap().as_str() == "manual";
+            let manual = crate::app::lock(&app.ai_mode).as_str() == "manual";
             if !manual || !crate::tools::is_gated(app, name) {
                 return true;
             }
-            if app.always_allow.lock().unwrap().contains(name) {
+            if crate::app::lock(&app.always_allow).contains(name) {
                 return true;
             }
         }
@@ -421,7 +421,7 @@ fn approval_gate(
         // "fetch_url:local"), so approving OBS control once doesn't wave
         // through every future gated call of that tool.
         Some((key, _)) => {
-            if app.always_allow.lock().unwrap().contains(key) {
+            if crate::app::lock(&app.always_allow).contains(key) {
                 return true;
             }
         }
@@ -447,7 +447,7 @@ fn approval_gate(
                         .as_ref()
                         .map(|(k, _)| k.clone())
                         .unwrap_or_else(|| name.to_string());
-                    app.always_allow.lock().unwrap().insert(key);
+                    crate::app::lock(&app.always_allow).insert(key);
                 }
                 allow
             }
@@ -457,7 +457,7 @@ fn approval_gate(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let (tx, rx) = std::sync::mpsc::sync_channel::<(bool, bool)>(1);
-        app.pending.lock().unwrap().insert(
+        crate::app::lock(&app.pending).insert(
             id.to_string(),
             crate::app::PendingApproval {
                 name: name.to_string(),
@@ -472,7 +472,7 @@ fn approval_gate(
         );
         app.notify_pending();
         let decision = rx.recv_timeout(std::time::Duration::from_secs(300));
-        app.pending.lock().unwrap().remove(id);
+        crate::app::lock(&app.pending).remove(id);
         app.notify_pending();
         match decision {
             Ok((allow, always)) => {
@@ -481,7 +481,7 @@ fn approval_gate(
                         .as_ref()
                         .map(|(k, _)| k.clone())
                         .unwrap_or_else(|| name.to_string());
-                    app.always_allow.lock().unwrap().insert(key);
+                    crate::app::lock(&app.always_allow).insert(key);
                 }
                 allow
             }
@@ -494,7 +494,7 @@ fn approval_gate(
 /// app-triggered calls always prompt (as if in manual mode) unless the tool
 /// has been "always allowed" for this app. Returns true=run it, false=denied.
 pub fn app_approval_gate(app: &Arc<App>, tool: &str, input: &Value) -> Result<bool> {
-    let eng = app.engine.lock().unwrap();
+    let eng = app.eng();
     let app_id = eng.app_id.clone();
     drop(eng);
 
@@ -508,7 +508,7 @@ pub fn app_approval_gate(app: &Arc<App>, tool: &str, input: &Value) -> Result<bo
 
     // Get the app name for the prompt
     let app_name = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "uapp".into())
     };
 
@@ -539,7 +539,7 @@ pub fn app_approval_gate(app: &Arc<App>, tool: &str, input: &Value) -> Result<bo
     #[cfg(not(target_arch = "wasm32"))]
     {
         let (tx, rx) = std::sync::mpsc::sync_channel::<(bool, bool)>(1);
-        app.pending.lock().unwrap().insert(
+        crate::app::lock(&app.pending).insert(
             id.clone(),
             crate::app::PendingApproval {
                 name: tool.to_string(),
@@ -552,7 +552,7 @@ pub fn app_approval_gate(app: &Arc<App>, tool: &str, input: &Value) -> Result<bo
         );
         app.notify_pending();
         let decision = rx.recv_timeout(std::time::Duration::from_secs(300));
-        app.pending.lock().unwrap().remove(&id);
+        crate::app::lock(&app.pending).remove(&id);
         app.notify_pending();
         match decision {
             Ok((allow, always)) => {
@@ -672,7 +672,7 @@ pub fn ask_user(app: &Arc<App>, input: &Value) -> Result<Value> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(1);
-        app.questions.lock().unwrap().insert(
+        crate::app::lock(&app.questions).insert(
             id.clone(),
             crate::app::PendingQuestion {
                 questions: questions.clone(),
@@ -687,7 +687,7 @@ pub fn ask_user(app: &Arc<App>, input: &Value) -> Result<Value> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(300_000);
         let answer = rx.recv_timeout(std::time::Duration::from_millis(timeout_ms));
-        app.questions.lock().unwrap().remove(&id);
+        crate::app::lock(&app.questions).remove(&id);
         app.notify_questions();
         match answer {
             Ok(v) if v["stopped"] == json!(true) => Ok(json!({
@@ -2147,7 +2147,7 @@ fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result<Outcome> {
 
 /// Newest chat row id in a session — the watermark for "seen by this turn".
 fn last_chat_id(app: &Arc<App>, session: &str) -> i64 {
-    let eng = app.engine.lock().unwrap();
+    let eng = app.eng();
     store::query(
         &eng.db,
         "SELECT COALESCE(max(id), 0) FROM uapp_chat WHERE COALESCE(session,'main') = ?1",
@@ -2161,7 +2161,7 @@ fn last_chat_id(app: &Arc<App>, session: &str) -> i64 {
 /// whose loop was about to finish — including ones that arrived mid-provider
 /// call, which sort BEFORE the assistant reply.)
 fn has_user_after(app: &Arc<App>, session: &str, seen_id: i64) -> bool {
-    let eng = app.engine.lock().unwrap();
+    let eng = app.eng();
     store::query(
         &eng.db,
         "SELECT count(*) FROM uapp_chat WHERE COALESCE(session,'main') = ?1 AND role = 'user'
@@ -2174,7 +2174,7 @@ fn has_user_after(app: &Arc<App>, session: &str, seen_id: i64) -> bool {
 
 /// Is the newest row of this session a user message nobody answered yet?
 pub fn unanswered(app: &Arc<App>, session: &str) -> bool {
-    let eng = app.engine.lock().unwrap();
+    let eng = app.eng();
     store::query(
         &eng.db,
         "SELECT role FROM uapp_chat WHERE COALESCE(session,'main') = ?1 ORDER BY id DESC LIMIT 1",
@@ -2215,7 +2215,7 @@ fn schema_hint(name: &str, err: &anyhow::Error) -> String {
 
 /// Rows of one session, with the (ts, ctr) ordering key compaction needs.
 fn session_rows(app: &Arc<App>, session: &str) -> Result<Vec<Value>> {
-    let eng = app.engine.lock().unwrap();
+    let eng = app.eng();
     let r = store::query(
         &eng.db,
         "SELECT mid, ts, ctr, role, content, device FROM uapp_chat
@@ -2483,7 +2483,7 @@ pub fn agent_send(app: &Arc<App>, input: &Value) -> Result<Value> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("agent_send needs a non-empty message"))?;
     let kind: Option<String> = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let r = store::query(
             &eng.db,
             "SELECT kind FROM uapp_sessions WHERE id = ?1",

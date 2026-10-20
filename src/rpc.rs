@@ -26,7 +26,7 @@ pub fn dispatch_untrusted(app: &Arc<App>, method: &str, mut p: Value) -> Result<
 pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
     match method {
         "app.info" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let name = store::meta_get(&eng.db, "name")?.unwrap_or_default();
             Ok(json!({
                 "name": name,
@@ -63,7 +63,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             }))
         }
         "sql.query" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let params: Vec<Value> = p["params"].as_array().cloned().unwrap_or_default();
             // _user_approved is set only by the AI loop after the user's
             // permission prompt (and stripped from wire requests).
@@ -83,7 +83,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         }
         "sql.batch" => local_op(app, "batch", json!({"sql": need_str(&p, "sql")?})),
         "files.list" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let mut r = store::query(
                 &eng.db,
                 "SELECT name, sz, mtime FROM sqlar ORDER BY name",
@@ -101,7 +101,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             Ok(r)
         }
         "files.read" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let name = need_str(&p, "name")?;
             // Report the archive name it resolved to, not the reference given.
             let name = &store::resolve_name(&eng.db, name)?.unwrap_or_else(|| name.to_string());
@@ -135,7 +135,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "files.delete" => {
             // A miss is an error, never a silent no-op: "deleted" must mean gone.
             let name = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 let asked = need_str(&p, "name")?;
                 store::resolve_name(&eng.db, asked)?.ok_or_else(|| {
                     anyhow!("no file named '{asked}' (list_files shows the archive's names)")
@@ -154,7 +154,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 bail!("mode must be auto, raw, pretty or edit");
             }
             let by = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 match store::resolve_name(&eng.db, &name)? {
                     Some(n) => name = n,
                     None => bail!("no such file: {name}"),
@@ -185,7 +185,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "template.apply" => template_apply(app, p),
         "template.discard" => {
             let token = need_str(&p, "token")?;
-            if app.templates.lock().unwrap().remove(token).is_none() {
+            if crate::app::lock(&app.templates).remove(token).is_none() {
                 bail!("no staged template with that token (already applied or discarded?)");
             }
             Ok(json!({"ok": true}))
@@ -215,7 +215,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             Ok(json!({"ok": true}))
         }
         "files.history" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let name = need_str(&p, "name")?;
             let name =
                 store::resolve_name(&eng.db, name)?.unwrap_or_else(|| store::canon_name(name));
@@ -232,7 +232,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 .ok_or_else(|| anyhow!("files.revert needs id"))?;
             let mut name = need_str(&p, "name")?.to_string();
             let (sz, data): (Option<i64>, Option<Vec<u8>>) = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 name = store::resolve_name(&eng.db, &name)?
                     .unwrap_or_else(|| store::canon_name(&name));
                 let mut stmt = eng
@@ -291,7 +291,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // ---- the toolbar around the app frame (see toolbar.rs) ----
         // The saved default: what every fresh open of this app starts from.
         "toolbar.get" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             Ok(crate::toolbar::settings(
                 store::config_get(&eng.db, "toolbar")?.as_ref(),
             ))
@@ -315,7 +315,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // they can see the effect by reopening the app.
         "toolbar.setDefault" => {
             let merged = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 crate::toolbar::merge(store::config_get(&eng.db, "toolbar")?.as_ref(), &p)?
             };
             local_op(
@@ -339,7 +339,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         }
         "chat.list" => {
             let session = session_arg(&p)?;
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             store::query(
                 &eng.db,
                 "SELECT mid, ts, device, user, role, content, COALESCE(session,'main') AS session
@@ -419,7 +419,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // one entry per question in the prompt's order.
         "ai.answer" => {
             let id = need_str(&p, "id")?;
-            let entry = app.questions.lock().unwrap().remove(id);
+            let entry = crate::app::lock(&app.questions).remove(id);
             match entry {
                 Some(e) => {
                     let _ = e.tx.try_send(json!({
@@ -435,7 +435,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             let id = need_str(&p, "id")?;
             let allow = p["allow"].as_bool().unwrap_or(false);
             let always = p["always"].as_bool().unwrap_or(false);
-            let entry = app.pending.lock().unwrap().remove(id);
+            let entry = crate::app::lock(&app.pending).remove(id);
             match entry {
                 Some(e) => {
                     let _ = e.tx.try_send((allow, always));
@@ -544,7 +544,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // Reclaim dead space in the .uapp (deleted rows/files keep their pages
         // until a VACUUM) and refresh the rescue snapshot.
         "app.compact" => {
-            let mut eng = app.engine.lock().unwrap();
+            let mut eng = app.eng();
             eng.db.execute_batch("VACUUM")?;
             let _ = eng.snapshot();
             let size = file_size(&eng);
@@ -669,7 +669,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 bail!("this app isn't saved to a file yet — download it first");
             }
             let (app_id, name, path) = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "uapp".into());
                 (eng.app_id.clone(), name, eng.path.clone())
             };
@@ -698,7 +698,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         #[cfg(not(target_arch = "wasm32"))]
         "app.shortcutStatus" => {
             let (app_id, name, path) = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "uapp".into());
                 (eng.app_id.clone(), name, eng.path.clone())
             };
@@ -717,7 +717,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         #[cfg(not(target_arch = "wasm32"))]
         "app.removeShortcut" => {
             let (app_id, name) = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "uapp".into());
                 (eng.app_id.clone(), name)
             };
@@ -727,7 +727,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // the Download button.
         #[cfg(target_arch = "wasm32")]
         "app.export" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let bytes = eng.serialize_bytes()?;
             Ok(
                 json!({"b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -737,7 +737,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // Template export works on wasm too (in-memory build).
         #[cfg(target_arch = "wasm32")]
         "app.exportTemplate" => {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "app".into());
             let bytes = store::export_template(&eng.db, &name)?;
             Ok(
@@ -801,7 +801,7 @@ fn crypt_set(app: &Arc<App>, p: Value) -> Result<Value> {
         .map(|s| s.to_string());
     let current = p["current_password"].as_str().unwrap_or("").to_string();
 
-    let mut eng = app.engine.lock().unwrap();
+    let mut eng = app.eng();
     let is_encrypted = eng.passphrase().is_some();
     if !is_encrypted && new_password.is_none() {
         bail!("this app is not encrypted");
@@ -841,7 +841,7 @@ fn app_save(app: &Arc<App>) -> Result<Value> {
     }
     let was_unsaved = app.unsaved.load(Ordering::Relaxed);
     let default_name = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let name = store::meta_get(&eng.db, "name")?.unwrap_or_else(|| "app".into());
         let safe: String = name
             .chars()
@@ -863,7 +863,7 @@ fn app_save(app: &Arc<App>) -> Result<Value> {
     // Re-home the running engine onto the chosen file, and move the reuse
     // advertisement to the new path (same server/port, new backing file).
     let old_path = {
-        let mut eng = app.engine.lock().unwrap();
+        let mut eng = app.eng();
         let old_path = eng.path.clone();
         eng.save_as(path.clone())?;
         crate::registry::write_addr(&eng.path, app.port.load(Ordering::Relaxed), &app.token);
@@ -924,7 +924,7 @@ fn app_open_file(app: &Arc<App>) -> Result<Value> {
         bail!("{} is not a file", path.display());
     }
     let (cur_path, blank) = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         (eng.path.clone(), store::is_blank_app(&eng.db))
     };
     // Picking the file this window already has would hand the new instance our
@@ -961,7 +961,7 @@ fn app_open_file(app: &Arc<App>) -> Result<Value> {
 /// Run + persist a local op, then push change notifications to all clients.
 pub fn local_op(app: &Arc<App>, kind: &str, payload: Value) -> Result<Value> {
     let (result, op) = {
-        let mut eng = app.engine.lock().unwrap();
+        let mut eng = app.eng();
         eng.local_op(kind, payload)?
     };
     let mut c = crate::engine::ChangeSet::default();
@@ -998,7 +998,7 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
         if !matches!(mode, "auto" | "manual" | "plan") {
             bail!("mode must be auto, manual or plan (got '{mode}')");
         }
-        *app.ai_mode.lock().unwrap() = mode.to_string();
+        *crate::app::lock(&app.ai_mode) = mode.to_string();
     }
     let attachments = p["attachments"].as_array().cloned().unwrap_or_default();
     let mut stored = Vec::new();
@@ -1006,7 +1006,7 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
     for r in p["refs"].as_array().cloned().unwrap_or_default() {
         if let Some(name) = r.as_str() {
             let exists = {
-                let eng = app.engine.lock().unwrap();
+                let eng = app.eng();
                 store::sqlar_read(&eng.db, name)?.is_some()
             };
             if !exists {
@@ -1058,7 +1058,7 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
 /// did not start another), start the next run now so it is not left
 /// unanswered. Not after a stop: the user asked for silence.
 pub fn finish_run(app: &Arc<App>, session: &str, result: Result<()>, stopped: bool) {
-    app.ai_runs.lock().unwrap().remove(session);
+    crate::app::lock(&app.ai_runs).remove(session);
     match result {
         Ok(_) => {
             app.notify("ai", json!({"state": "idle", "session": session}));
@@ -1088,7 +1088,7 @@ pub fn finish_run(app: &Arc<App>, session: &str, result: Result<()>, stopped: bo
 /// session's live loop, while another session starts its own thread.
 pub fn spawn_ai(app: Arc<App>, session: String) {
     let stop = {
-        let mut runs = app.ai_runs.lock().unwrap();
+        let mut runs = crate::app::lock(&app.ai_runs);
         if runs.contains_key(&session) {
             return; // this session already has a loop; it re-reads the history
         }
@@ -1160,7 +1160,7 @@ pub fn session_id(s: &str) -> Result<String> {
 /// device). Newest-active first, archived ones last.
 pub fn sessions_list(app: &Arc<App>) -> Result<Value> {
     let (metas, stats) = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         (
             store::query(
                 &eng.db,
@@ -1670,7 +1670,7 @@ fn take_drop(app: &Arc<App>, p: &Value) -> Result<(Vec<std::path::PathBuf>, Vec<
     let id = need_str(p, "id")?.to_string();
     let now = crate::store::now_ms();
     let paths = {
-        let mut drops = app.drops.lock().unwrap();
+        let mut drops = crate::app::lock(&app.drops);
         drops.retain(|_, (ts, _)| now.saturating_sub(*ts) < DROP_TTL_MS);
         match drops.remove(&id) {
             Some((_, paths)) => paths,
@@ -1791,7 +1791,7 @@ fn template_inspect(app: &Arc<App>, p: Value) -> Result<Value> {
     let (bytes, label) = template_bytes(app, &p)?;
     let plan = {
         let src = crate::template::Source::from_bytes(&bytes, password.as_deref())?;
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let mut plan = crate::template::plan(&eng.db, src.conn())?;
         // What only this layer knows: the name it was dropped as, and whether
         // it came out of this very app (so the dialog can say so).
@@ -1803,7 +1803,7 @@ fn template_inspect(app: &Arc<App>, p: Value) -> Result<Value> {
     };
     let token = secrets::new_token();
     {
-        let mut staged = app.templates.lock().unwrap();
+        let mut staged = crate::app::lock(&app.templates);
         let now = store::now_ms();
         staged.retain(|_, s| now.saturating_sub(s.ts) < TEMPLATE_TTL_MS);
         // A template can be tens of megabytes; never hold more than the one
@@ -1829,16 +1829,13 @@ fn template_inspect(app: &Arc<App>, p: Value) -> Result<Value> {
 fn template_apply(app: &Arc<App>, p: Value) -> Result<Value> {
     let token = need_str(&p, "token")?;
     let remove_stale = p["remove_stale"].as_bool().unwrap_or(true);
-    let staged = app
-        .templates
-        .lock()
-        .unwrap()
+    let staged = crate::app::lock(&app.templates)
         .remove(token)
         .ok_or_else(|| anyhow!("that template is no longer staged — drop it in again"))?;
     // Rescue point before a whole-app change, like an encryption switch.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut eng = app.engine.lock().unwrap();
+        let mut eng = app.eng();
         if let Err(e) = eng.snapshot() {
             eprintln!("uapp: snapshot before the template update failed: {e:#}");
         }
@@ -1889,7 +1886,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
     check_target(&to_raw)?;
     if !from_raw.ends_with('/') {
         let from = {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             store::resolve_name(&eng.db, &from_raw)?.unwrap_or_else(|| store::canon_name(&from_raw))
         };
         let to = store::canon_name(&to_raw);
@@ -1900,7 +1897,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
             return Ok(json!({"ok": true, "from": from, "to": to}));
         }
         let (data, taken) = {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             (
                 store::sqlar_read(&eng.db, &from)?,
                 store::sqlar_read(&eng.db, &to)?.is_some(),
@@ -1941,7 +1938,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
     }
     // Every file under the prefix, with its destination name.
     let moves: Vec<(String, String)> = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let mut stmt = eng
             .db
             .prepare("SELECT name FROM sqlar WHERE name LIKE ?1 || '%' ORDER BY name")?;
@@ -1957,7 +1954,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
         bail!("no such folder: {from}");
     }
     {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         let mut stmt = eng.db.prepare("SELECT 1 FROM sqlar WHERE name=?1")?;
         for (_, new) in &moves {
             if stmt.exists(rusqlite::params![new])? {
@@ -1967,7 +1964,7 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
     }
     for (old, new) in &moves {
         let data = {
-            let eng = app.engine.lock().unwrap();
+            let eng = app.eng();
             store::sqlar_read(&eng.db, old)?
         };
         let Some(data) = data else { continue }; // vanished mid-move
@@ -2083,7 +2080,7 @@ pub fn import_csv(app: &Arc<App>, p: Value) -> Result<Value> {
         ),
     );
     let data = {
-        let eng = app.engine.lock().unwrap();
+        let eng = app.eng();
         store::sqlar_read(&eng.db, file)?.ok_or_else(|| anyhow!("no such file: {file}"))?
     };
     let text = String::from_utf8_lossy(&data).to_string();
