@@ -10,13 +10,13 @@
 // is reported as an update instead of being run.
 const BUILD = "__UAPP_BUILD__";
 const V = BUILD.startsWith("__") ? "" : "?v=" + BUILD; // unstamped: as the generated glue imports it
-let open_app, rpc_dispatch, ai_tick, export_bytes, glueConfigure, glueDrainInbox, gluePanicked;
+let open_app, rpc_dispatch, ai_tick, export_bytes, export_shareable, glueConfigure, glueDrainInbox, gluePanicked;
 const ready = (async () => {
   const [wasm, glue] = await Promise.all([import("./uapp_wasm.js" + V), import("./uapp_glue.js" + V)]);
   if (glue.GLUE_BUILD !== BUILD || (wasm.WASM_BUILD !== undefined && wasm.WASM_BUILD !== BUILD)) {
     throw Object.assign(new Error("the runtime on the server is from another build"), { updated: true });
   }
-  ({ open_app, rpc_dispatch, ai_tick, export_bytes } = wasm);
+  ({ open_app, rpc_dispatch, ai_tick, export_bytes, export_shareable } = wasm);
   ({ glueConfigure, glueDrainInbox, gluePanicked } = glue);
   await wasm.default({ module_or_path: new URL("uapp_wasm_bg.wasm" + V, import.meta.url) });
 })();
@@ -101,8 +101,10 @@ function reply(id, out) {
 function dispatch(m) {
   if (dead) return DEAD();
   try {
-    // The page's own saves and downloads (boot.js exportBytes).
+    // The page's own saves (all of it: the copy stays on this device) and
+    // downloads (minus device secrets; see boot.js exportBytes).
     if (m.method === "app.exportBytes") return { result: { bytes: export_bytes() } };
+    if (m.method === "app.exportShareable") return { result: { bytes: export_shareable() } };
     return JSON.parse(rpc_dispatch(m.method || "", JSON.stringify(m.params || {})));
   } catch (e) {
     crashed(e);

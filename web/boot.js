@@ -518,7 +518,7 @@ async function handleSwRequest(m) {
     const url = new URL(m.path, location.origin);
     const p = url.pathname;
     if (p === "/download.uapp") {
-      reply({ body: await exportBytes(), contentType: "application/octet-stream",
+      reply({ body: await exportBytes(true), contentType: "application/octet-stream",
               disposition: `attachment; filename="${downloadName()}"` });
       return;
     }
@@ -657,8 +657,8 @@ window.addEventListener("message", (ev) => {
     return;
   }
   if (CONN_METHODS.has(m.method)) { connMessage(win, m, replyTo); return; }
-  if (m.method === "app.exportBytes") { // the shell's own; pages have app.export
-    if (m.id != null) replyTo({ id: m.id, error: { message: "unknown method app.exportBytes" } });
+  if (m.method === "app.exportBytes" || m.method === "app.exportShareable") { // the shell's own; pages have app.export
+    if (m.id != null) replyTo({ id: m.id, error: { message: "unknown method " + m.method } });
     return;
   }
   if (m.method.startsWith("host.")) {
@@ -894,13 +894,17 @@ window.addEventListener("beforeunload", (e) => {
 
 // The database as bytes, transferred out of the worker rather than encoded
 // (app.export is base64 inside JSON, ~5 copies of the file per save).
-async function exportBytes() {
-  return (await sendRpc("app.exportBytes")).bytes;
+// `shareable` is for a copy that leaves this device (a download, a
+// publish): without the API key, MCP headers and tool approvals, which on
+// native never live in the file at all. Saves keep everything, since the
+// OPFS copy is this device's own.
+async function exportBytes(shareable = false) {
+  return (await sendRpc(shareable ? "app.exportShareable" : "app.exportBytes")).bytes;
 }
 
 function downloadName() { return (appName() || "app").replace(/[^\w \-.]/g, "_") + ".uapp"; }
 async function downloadCopy() {
-  const bytes = await exportBytes();
+  const bytes = await exportBytes(true);
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
   a.download = downloadName();
@@ -1070,7 +1074,7 @@ window.__uappSitePublish = async (token, { force = false } = {}) => {
     throw e;
   }
   await window.__uappFlushSave();
-  const body = await exportBytes();
+  const body = await exportBytes(true);
   const headers = { authorization: "Bearer " + token, "content-type": "application/octet-stream" };
   if (siteState.etag && !force) headers["if-match"] = siteState.etag;
   const resp = await fetch(new URL(window.__uappSiteArchive, location.href), {

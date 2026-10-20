@@ -181,6 +181,19 @@ pub fn export_bytes() -> Result<Vec<u8>, JsValue> {
     out.map_err(|e| JsValue::from_str(&format!("{e:#}")))
 }
 
+/// The copy that leaves the device (Download a copy, /download.uapp,
+/// publishing): `export_bytes` minus API keys, MCP headers and tool approvals,
+/// which only the device-local OPFS copy keeps (see store::export_shareable).
+#[wasm_bindgen]
+pub fn export_shareable() -> Result<Vec<u8>, JsValue> {
+    let out = (|| -> Result<Vec<u8>> {
+        let app = app()?;
+        let eng = app.engine.lock().unwrap();
+        crate::store::export_shareable(&eng.db)
+    })();
+    out.map_err(|e| JsValue::from_str(&format!("{e:#}")))
+}
+
 /// One JSON-RPC call. Returns {"result": ...} or {"error": {"message": ...}}.
 #[wasm_bindgen]
 pub fn rpc_dispatch(method: String, params_json: String) -> String {
