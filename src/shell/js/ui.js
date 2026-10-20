@@ -3,11 +3,21 @@
  * overlay-panel manager, and per-component <style> installation. */
 
 import { HL_BY_EXT } from "./markdown.js";
-import { S } from "./strings.js";
+import { S, getLocale } from "./strings.js";
 
 export const $ = (id) => document.getElementById(id);
 export const I = (name, size) => window.uappIcon(name, size);
 export const div = (cls) => { const d = document.createElement("div"); d.className = cls; return d; };
+/// True while an IME is composing (Japanese, Chinese, Korean input...): the
+/// Enter that confirms a candidate must not also send or save.
+export const isComposing = (e) => e.isComposing || e.keyCode === 229;
+/// localStorage that never throws (private windows, blocked site data,
+/// sandboxed webviews): reads come back null, writes are dropped.
+export const store = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
+  del: (k) => { try { localStorage.removeItem(k); } catch {} },
+};
 
 // Escape-FIRST discipline: source text is HTML-escaped before any markup is
 // added; only markup this code generates ever reaches innerHTML. The shell
@@ -23,7 +33,7 @@ export const pretty = (v) => {
 };
 export const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
   : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B");
-export const fmtTime = (t) => new Date(t).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+export const fmtTime = (t) => new Date(t).toLocaleString(getLocale(), { dateStyle: "medium", timeStyle: "short" });
 
 /// HTTP path for an archive file (per-segment encoding; the cookie authorizes).
 // Base prefix for archive URLs: "/" natively; the wasm demo build may be
@@ -143,22 +153,23 @@ async function fetchToDownloads(href) {
 export function toast(msg, { duration = 3500, progress = false, delay = 0 } = {}) {
   installStyle("shell-toast", /* css */ `
     #toast-wrap {
-      position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
-      z-index: 4000; display: flex; flex-direction: column-reverse; gap: 8px;
+      position: fixed; left: 50%; bottom: var(--sp-6); transform: translateX(-50%);
+      z-index: 4000; display: flex; flex-direction: column-reverse; gap: var(--sp-2);
       align-items: center; pointer-events: none;
     }
     .toast {
       display: flex; flex-direction: column; gap: 6px;
       background: var(--ink); color: var(--chrome-text);
-      border-radius: 10px; padding: 10px 14px; min-width: 220px; max-width: 80vw;
-      box-shadow: 0 4px 18px rgba(0,0,0,.35); font-size: 12px;
+      border: 1px solid var(--chrome-line);
+      border-radius: var(--r-m); padding: 10px var(--sp-4); min-width: 220px; max-width: 80vw;
+      box-shadow: var(--shadow-2); font-size: var(--fs-sm);
     }
     .toast-msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .toast-track {
-      height: 4px; border-radius: 2px; background: rgba(255,255,255,.18); overflow: hidden;
+      height: 4px; border-radius: 2px; background: var(--chrome-line); overflow: hidden;
     }
     .toast-fill {
-      height: 100%; width: 0; border-radius: 2px; background: var(--brand, #6ea8fe);
+      height: 100%; width: 0; border-radius: 2px; background: var(--chrome-accent);
       transition: width .15s linear;
     }
     .toast.indet .toast-fill { width: 35%; animation: toast-slide 1.1s ease-in-out infinite; }
@@ -173,6 +184,9 @@ export function toast(msg, { duration = 3500, progress = false, delay = 0 } = {}
     if (!wrap) {
       wrap = document.createElement("div");
       wrap.id = "toast-wrap";
+      // Announced politely by screen readers; toasts never need an answer.
+      wrap.setAttribute("role", "status");
+      wrap.setAttribute("aria-live", "polite");
       document.body.appendChild(wrap);
     }
     el = div("toast" + (progress ? " indet" : ""));
@@ -288,46 +302,116 @@ export function toolMeta(name, input = {}) {
   }
 }
 
-// ---------- context menus ----------
-/// items: {icon, label, run, danger} or {sep: true}.
-export function showMenu(items, x, y) {
+// ---------- menus ----------
+/// One menu for the whole shell: context menus, overflow (⋮) menus and the
+/// chat switcher. items: {icon, label, run, danger, checked, keys} or
+/// {sep: true}. `checked` (true/false) makes a checkable item; `keys` is a
+/// shortcut hint shown on the right. Keyboard: arrows, Home/End, a letter to
+/// jump, Enter/Space to pick, Esc or Tab to close. Focus goes back to
+/// whatever had it when the menu opened.
+/// opts: {align: "right"} anchors the menu's right edge at x; {opener} is the
+/// button that opened it (gets aria-expanded while open); {label} names it.
+let openMenu = null; // {cleanup, opener} of the menu on screen
+export function showMenu(items, x, y, opts = {}) {
+  // One menu at a time. Its own opener clicked again just closes it.
+  if (openMenu) {
+    const same = !!opts.opener && openMenu.opener === opts.opener;
+    openMenu.cleanup(false);
+    if (same) return null;
+  }
   document.querySelectorAll(".ctxmenu").forEach((m) => m.remove());
   // Menus are assembled conditionally: drop leading/trailing/doubled separators.
   items = items.filter((it, i) => !it.sep || (i > 0 && !items[i - 1].sep));
   while (items.length && items[items.length - 1].sep) items.pop();
   const menu = div("ctxmenu");
+  menu.setAttribute("role", "menu");
+  if (opts.label) menu.setAttribute("aria-label", opts.label);
+  const opener = opts.opener || null;
+  const returnTo = document.activeElement;
+  opener?.setAttribute("aria-expanded", "true");
   // One cleanup path no matter how the menu goes away (item click, click
   // outside, Esc, or removal by other code) — a stale capture listener would
   // otherwise eat the next Escape.
-  const cleanup = () => {
+  const cleanup = (restore) => {
+    const hadFocus = menu.contains(document.activeElement);
+    if (openMenu?.cleanup === cleanup) openMenu = null;
     menu.remove();
+    opener?.setAttribute("aria-expanded", "false");
     document.removeEventListener("mousedown", away, true);
     document.removeEventListener("keydown", esckey, true);
+    if (restore && (hadFocus || document.activeElement === document.body) && returnTo?.isConnected) {
+      try { returnTo.focus({ preventScroll: true }); } catch {}
+    }
   };
   const away = (ev) => {
-    if (!menu.isConnected) return cleanup();
+    if (!menu.isConnected) return cleanup(false);
     if (ev.target && menu.contains(ev.target)) return;
-    cleanup();
+    if (opener && opener.contains(ev.target)) return; // the opener toggles it itself
+    cleanup(false);
   };
   const esckey = (ev) => {
-    if (!menu.isConnected) return cleanup();
-    if (ev.key === "Escape") { ev.preventDefault(); cleanup(); }
+    if (!menu.isConnected) return cleanup(false);
+    if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); cleanup(true); }
   };
+  const buttons = [];
   for (const it of items) {
-    if (it.sep) { menu.appendChild(div("ctxsep")); continue; }
+    if (it.sep) {
+      const sep = div("ctxsep");
+      sep.setAttribute("role", "separator");
+      menu.appendChild(sep);
+      continue;
+    }
     const b = document.createElement("button");
+    b.type = "button";
+    b.tabIndex = -1;
+    if (it.checked !== undefined) {
+      b.setAttribute("role", "menuitemcheckbox");
+      b.setAttribute("aria-checked", it.checked ? "true" : "false");
+    } else {
+      b.setAttribute("role", "menuitem");
+    }
     if (it.danger) b.className = "danger";
-    b.innerHTML = `<span class="ticon">${I(it.icon, 13)}</span>${esc(it.label)}`;
-    b.onclick = () => { cleanup(); it.run(); };
+    b.innerHTML = `<span class="ticon">${I(it.icon, 14)}</span><span class="mlabel">${esc(it.label)}</span>` +
+      (it.keys ? `<span class="mkeys">${esc(it.keys)}</span>` : "");
+    b.onclick = () => { cleanup(true); it.run(); };
     menu.appendChild(b);
+    buttons.push(b);
   }
+  const move = (i) => buttons[(i + buttons.length) % buttons.length]?.focus();
+  menu.addEventListener("keydown", (ev) => {
+    const i = buttons.indexOf(document.activeElement);
+    if (ev.key === "ArrowDown") { ev.preventDefault(); move(i + 1); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); move(i < 0 ? -1 : i - 1); }
+    else if (ev.key === "Home") { ev.preventDefault(); move(0); }
+    else if (ev.key === "End") { ev.preventDefault(); move(-1); }
+    else if (ev.key === "Tab") { cleanup(false); }
+    else if (ev.key.length === 1 && /\S/.test(ev.key)) {
+      // Type-ahead: the next item starting with that letter.
+      const k = ev.key.toLowerCase();
+      for (let n = 1; n <= buttons.length; n++) {
+        const b = buttons[(i + n) % buttons.length];
+        if (b.textContent.trim().toLowerCase().startsWith(k)) { b.focus(); break; }
+      }
+    }
+  });
   document.body.appendChild(menu);
-  menu.style.left = Math.max(6, Math.min(x, innerWidth - menu.offsetWidth - 8)) + "px";
+  const left = opts.align === "right" ? x - menu.offsetWidth : x;
+  menu.style.left = Math.max(6, Math.min(left, innerWidth - menu.offsetWidth - 8)) + "px";
   menu.style.top = Math.max(6, Math.min(y, innerHeight - menu.offsetHeight - 8)) + "px";
+  buttons[0]?.focus({ preventScroll: true });
+  openMenu = { cleanup, opener };
   setTimeout(() => {
     document.addEventListener("mousedown", away, true);
     document.addEventListener("keydown", esckey, true);
   }, 0);
+  return { close: () => cleanup(true) };
+}
+/// Open a menu under a button (right-aligned to it), or close it when it is
+/// already open from that same button.
+export function menuFrom(btn, items, label) {
+  btn.setAttribute("aria-haspopup", "menu");
+  const r = btn.getBoundingClientRect();
+  return showMenu(items, r.right, r.bottom + 4, { align: "right", opener: btn, label });
 }
 
 // ---------- dialogs ----------
@@ -335,15 +419,18 @@ export function showMenu(items, x, y) {
 // .dlg-head (icon + title + X), .dlg-body, .dlg-foot. Esc, focus trapping
 // and the backdrop come free. (window.alert()/confirm() stay banned — they
 // are blocked or invisible in the frameless desktop webview.)
+let dlgSeq = 0;
 export function makeDialog(title, icon = "circle-alert") {
   const d = document.createElement("dialog");
+  const hid = `dlg-title-${++dlgSeq}`;
   d.className = "dlg dlg-s";
-  d.innerHTML = `<div class="dlg-head"><h2><span class="dlg-hicon"></span><span class="dlg-title"></span></h2>` +
-    `<button class="icon-btn dlg-x" title="${esc(S.common.close)}"></button></div>` +
+  d.setAttribute("aria-labelledby", hid);
+  d.innerHTML = `<div class="dlg-head"><h2 id="${hid}"><span class="dlg-hicon"></span><span class="dlg-title"></span></h2>` +
+    `<button class="icon-btn dlg-x" title="${esc(S.common.close)}" aria-label="${esc(S.common.close)}"></button></div>` +
     `<div class="dlg-body"></div><div class="dlg-foot"></div>`;
   d.querySelector(".dlg-title").textContent = title;
-  d.querySelector(".dlg-hicon").innerHTML = I(icon, 15);
-  d.querySelector(".dlg-x").innerHTML = I("x", 15);
+  d.querySelector(".dlg-hicon").innerHTML = I(icon, 16);
+  d.querySelector(".dlg-x").innerHTML = I("x", 16);
   d.querySelector(".dlg-x").onclick = () => d.close();
   d.addEventListener("close", () => d.remove());
   document.body.appendChild(d);
@@ -382,12 +469,12 @@ export const dlgConfirm = async (msg) =>
 /// "data/" or null (cancelled).
 export const dlgPickRoot = (msg) =>
   shellPrompt(msg, [
-    { label: "Cancel", value: "" },
-    { label: "App files", value: "app/" },
-    { label: "Data files", value: "data/", primary: true },
+    { label: S.common.cancel, value: "" },
+    { label: S.ui.appFiles, value: "app/" },
+    { label: S.ui.dataFiles, value: "data/", primary: true },
   ], { icon: "folder-open" }).then((v) => v || null);
 /// One-line text prompt (rename, new file). Resolves null when cancelled.
-export function dlgInput(message, value = "", okLabel = "OK") {
+export function dlgInput(message, value = "", okLabel = S.common.ok) {
   return new Promise((resolve) => {
     const d = makeDialog(shellTitle(), "pencil");
     const p = document.createElement("p");
@@ -402,7 +489,9 @@ export function dlgInput(message, value = "", okLabel = "OK") {
     footBtn(d, S.common.cancel).onclick = () => d.close();
     const ok = footBtn(d, okLabel, { primary: true });
     ok.onclick = () => { result = inp.value; d.close(); };
-    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); ok.click(); } });
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !isComposing(e)) { e.preventDefault(); ok.click(); }
+    });
     d.addEventListener("close", () => resolve(result));
     d.showModal();
     inp.focus();
@@ -420,10 +509,14 @@ export function dlgHtml(title, html, icon) {
 /// Show/hide toggle for a .pwfield (an input + eye button pair).
 export function wirePwToggle(wrap) {
   const i = wrap.querySelector("input"), t = wrap.querySelector(".pw-toggle");
-  t.innerHTML = I("eye", 14);
+  t.innerHTML = I("eye", 16);
+  t.title = S.common.showHide;
+  t.setAttribute("aria-label", S.common.showHide);
+  t.setAttribute("aria-pressed", "false");
   t.onclick = () => {
     i.type = i.type === "password" ? "text" : "password";
-    t.innerHTML = I(i.type === "password" ? "eye" : "eye-off", 14);
+    t.innerHTML = I(i.type === "password" ? "eye" : "eye-off", 16);
+    t.setAttribute("aria-pressed", i.type === "password" ? "false" : "true");
   };
 }
 
@@ -434,9 +527,25 @@ export function wirePwToggle(wrap) {
 // Open state is the `.open` class (a transform slide, so it animates) —
 // never display:none, which can't transition.
 const panels = {}; // id -> {btn, onOpen}
-export function registerPanel(id, btnId, onOpen) {
+const narrow = matchMedia("(max-width: 700px)");
+const coarse = matchMedia("(pointer: coarse)");
+let returnFocus = null; // what had focus before a panel took it
+
+/// label names the panel for assistive tech (role=region needs a name).
+export function registerPanel(id, btnId, onOpen, label) {
   panels[id] = { btn: btnId, onOpen };
-  installResizer($(id));
+  const el = $(id);
+  if (!el) return;
+  el.setAttribute("role", "region");
+  if (label) el.setAttribute("aria-label", label);
+  el.tabIndex = -1; // focus lands on the panel itself when it has no better target
+  installResizer(el);
+  installPin(el);
+  const b = $(btnId);
+  if (b) {
+    b.setAttribute("aria-controls", id);
+    b.setAttribute("aria-expanded", "false");
+  }
 }
 /// Every overlay panel is drag-resizable from its left edge. The width is
 /// remembered per panel on this machine; double-click resets to the default.
@@ -447,9 +556,9 @@ function installResizer(el) {
   grip.title = S.ui.resizerTitle;
   el.prepend(grip);
   const KEY = `uapp.panelw.${el.id}`;
-  const saved = parseInt(localStorage.getItem(KEY), 10);
+  const saved = parseInt(store.get(KEY), 10);
   // maxWidth is lifted with the inline width: the component defaults cap at
-  // e.g. 55vw, but a deliberate drag may go wider.
+  // e.g. 92vw, but a deliberate drag may go wider.
   if (saved) { el.style.width = saved + "px"; el.style.maxWidth = "96vw"; }
   grip.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
@@ -471,7 +580,7 @@ function installResizer(el) {
       el.classList.remove("resizing");
       document.body.classList.remove("panel-resizing");
       const w = parseInt(el.style.width, 10);
-      if (w) localStorage.setItem(KEY, String(w));
+      if (w) store.set(KEY, String(w));
     };
     grip.addEventListener("pointermove", move);
     grip.addEventListener("pointerup", up);
@@ -480,35 +589,109 @@ function installResizer(el) {
   grip.addEventListener("dblclick", () => {
     el.style.width = "";
     el.style.maxWidth = "";
-    localStorage.removeItem(KEY);
+    store.del(KEY);
   });
 }
-export const panelOpen = (id) => $(id).classList.contains("open");
-export function openPanel(id) {
-  for (const other in panels) if (other !== id) closePanel(other);
-  if (panelOpen(id)) return;
+
+// Docking (wide screens only, see shell.css): a pinned panel sits beside the
+// app instead of over it. One choice for all panels, kept on this device.
+const DOCK_KEY = "uapp.dock";
+document.body.classList.toggle("dock", store.get(DOCK_KEY) === "1");
+function syncPins() {
+  const on = document.body.classList.contains("dock");
+  for (const b of document.querySelectorAll(".panel-pin")) {
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.title = on ? S.ui.unpinPanel : S.ui.pinPanel;
+    b.innerHTML = I(on ? "pin-off" : "pin", 15);
+  }
+}
+function installPin(el) {
+  const head = el.querySelector(".panel-head");
+  if (!head || head.querySelector(".panel-pin")) return;
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "icon-btn panel-pin";
+  b.onclick = () => {
+    const on = !document.body.classList.contains("dock");
+    document.body.classList.toggle("dock", on);
+    on ? store.set(DOCK_KEY, "1") : store.del(DOCK_KEY);
+    syncPins();
+  };
+  // Just before the close X, which is always the head's last button.
+  const buttons = head.querySelectorAll(":scope > button");
+  head.insertBefore(b, buttons[buttons.length - 1] || null);
+  syncPins();
+}
+
+/// On a phone a panel covers the whole app: keep the app out of the tab
+/// order and away from screen readers while it does.
+function syncInert() {
+  const f = $("appframe");
+  if (!f) return;
+  f.inert = narrow.matches && Object.keys(panels).some((id) => panelOpen(id));
+}
+narrow.addEventListener?.("change", syncInert);
+
+/// Move focus into a panel the user just opened: its [data-autofocus]
+/// control, or the panel itself. On touch screens never a text field (that
+/// would pop the keyboard over what they wanted to look at).
+function focusInto(el) {
+  if (el.contains(document.activeElement)) return;
+  const auto = el.querySelector("[data-autofocus]");
+  const target = auto && !(coarse.matches && auto.matches("input, textarea")) ? auto : el;
+  try { target.focus({ preventScroll: true }); } catch {}
+}
+
+export const panelOpen = (id) => !!$(id)?.classList.contains("open");
+/// opts.focus: the user opened it (button, shortcut), so focus follows.
+/// Opens asked for by the app or the assistant leave focus where it is.
+export function openPanel(id, opts = {}) {
+  // Focus in a panel being swapped out goes to the new one when it takes
+  // focus, and back where it came from otherwise.
+  for (const other in panels) if (other !== id) closePanel(other, { handoff: !!opts.focus });
+  if (panelOpen(id)) { if (opts.focus) focusInto($(id)); return; }
+  const active = document.activeElement;
+  if (active && active !== document.body && !active.closest?.(".overlay-panel")) returnFocus = active;
   $(id).classList.add("open");
-  $(panels[id].btn).classList.add("active");
+  const b = $(panels[id].btn);
+  b?.classList.add("active");
+  b?.setAttribute("aria-expanded", "true");
   panels[id].onOpen?.();
+  if (opts.focus) focusInto($(id));
+  syncInert();
 }
-export function closePanel(id) {
+export function closePanel(id, opts = {}) {
   if (!panelOpen(id)) return;
-  $(id).classList.remove("open");
-  $(panels[id].btn).classList.remove("active");
+  const el = $(id);
+  const hadFocus = el.contains(document.activeElement);
+  el.classList.remove("open");
+  const b = $(panels[id].btn);
+  b?.classList.remove("active");
+  b?.setAttribute("aria-expanded", "false");
+  syncInert();
+  // Focus inside a closing panel would be stranded (it goes invisible), so
+  // hand it back: to what had it before, else the panel's toolbar button.
+  if (hadFocus && !opts.handoff) {
+    const back = returnFocus?.isConnected && returnFocus.getClientRects().length ? returnFocus
+      : b && b.getClientRects().length ? b : null;
+    returnFocus = null;
+    try { back ? back.focus({ preventScroll: true }) : el.blur(); } catch {}
+  }
 }
-export const togglePanel = (id) => (panelOpen(id) ? closePanel(id) : openPanel(id));
+export const togglePanel = (id, opts) => (panelOpen(id) ? closePanel(id) : openPanel(id, opts));
 /// Close whatever is open. Used when the toolbar is hidden: every panel was
 /// opened from a button on it, so leaving one on screen with nothing to close
 /// it from would be a dead end.
 export function closePanels() {
   for (const id in panels) closePanel(id);
 }
+/// The open panel's id, or null.
+export const openPanelId = () => Object.keys(panels).find((id) => panelOpen(id)) || null;
 // Esc closes the open panel — unless a menu, a dialog, or an inner editor
 // (cell edit, rename, search) already handled the key.
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || e.defaultPrevented) return;
   if (document.querySelector(".ctxmenu") || document.querySelector("dialog[open]")) return;
-  for (const id in panels) {
-    if (panelOpen(id)) { e.preventDefault(); closePanel(id); return; }
-  }
+  const id = openPanelId();
+  if (id) { e.preventDefault(); closePanel(id); }
 });

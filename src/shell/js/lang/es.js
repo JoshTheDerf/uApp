@@ -13,6 +13,7 @@ export const S = {
     loading: "cargando…",
     checking: "verificando…",
     retry: "Reintentar",
+    showHide: "Mostrar u ocultar",
   },
 
   chat: {
@@ -109,6 +110,20 @@ export const S = {
     diffEditNotFound: (name) => `edita ${name}, texto anterior no encontrado (fallará)`,
 
     stepCount: (n) => `${n} paso${n === 1 ? "" : "s"}`,
+    inputLabel: "Mensaje",
+    emptyTitle: "Pregunta al asistente",
+    emptyHint: "Puede leer y cambiar los archivos y datos de esta app, y explicar cómo funciona.",
+    suggestExplain: "Explica cómo funciona esta app",
+    suggestFeature: "Sugiere una función nueva útil",
+    suggestData: "Resume los datos de esta app",
+    archivedLabel: (title) => `${title} (archivado)`,
+    diffMore: (n) => `…${n} más`,
+    aiError: (msg) => `Error de IA: ${msg}`,
+    emptyTitleBlank: "¿Qué debe hacer esta app?",
+    emptyHintBlank: "Descríbelo y el asistente lo construye aquí. Puedes cambiar cualquier cosa después.",
+    suggestTasks: "Crea un gestor de tareas sencillo",
+    suggestContacts: "Haz una lista de contactos con búsqueda",
+    suggestSheet: "Convierte una hoja de cálculo en una app",
   },
 
   settings: {
@@ -136,7 +151,7 @@ export const S = {
     openApp: "Abrir archivo uApp…",
     openFailed: (msg) => `No se pudo abrir ese archivo: ${msg}`,
     language: "Idioma",
-    languageHint: "Este ajuste es local de tu ordenador. La página se recarga al cambiarlo.",
+    languageHint: "La página se recarga al cambiarlo.",
     aiHint: "La configuración de IA se guarda en el archivo .uapp y se comparte con todos los que lo abren.",
     aiProvider: "Proveedor de IA",
     providerNone: "(ninguno)",
@@ -207,6 +222,16 @@ export const S = {
     saveAs: "Guardar como…",
     unsavedTitle: "Esta app aún no se ha guardado en un archivo",
     unsavedTitleBrowser: "Esta app aún no se ha guardado en un archivo",
+    aiSection: "Asistente de IA",
+    groupApp: "Esta app (se guarda en el archivo)",
+    groupDevice: "Este dispositivo",
+    appearance: "Apariencia",
+    themeSystem: "Sistema",
+    themeLight: "Claro",
+    themeDark: "Oscuro",
+    failed: (msg) => `Error: ${msg}`,
+    launcherInstalledMsg: "Instalado.",
+    launcherRemovedMsg: "Eliminado.",
   },
 
   files: {
@@ -259,6 +284,9 @@ export const S = {
     restoreConfirm: (name, time) => `¿Restaurar ${name} a la versión de ${time}? Esto se convierte en una nueva versión para todos.`,
     listView: "Vista de lista",
     gridView: "Vista de cuadrícula",
+    actions: "Acciones",
+    histDeleted: "eliminado",
+    histEdited: "editado",
   },
 
   toolbar: {
@@ -296,6 +324,7 @@ export const S = {
     menuChat: "Chat de IA",
     appClosed: "App cerrada.",
     reopenHint: "Vuelve a abrir el archivo para iniciarla de nuevo.",
+    chatLabel: "Chat",
   },
 
   sql: {
@@ -373,6 +402,18 @@ export const S = {
     filterValue: "valor",
     filterCombine: "Combinar con la condición anterior",
     filterRemove: "Eliminar condición",
+    tablesLabel: "Tablas",
+    opContains: "contiene",
+    opStarts: "empieza por",
+    opEnds: "termina en",
+    opIn: "en la lista (a, b, c)",
+    opEmpty: "está vacío",
+    opNotEmpty: "no está vacío",
+    exportResult: "Exportar este resultado",
+    range: (a, b, total) => `${a}–${b} de ${total}`,
+    keyColsMissing: "Faltan las columnas clave en el resultado.",
+    kindTable: "la tabla",
+    kindView: "la vista",
   },
 
   tools: {
@@ -394,6 +435,9 @@ export const S = {
     nameUrlRequired: "Se requieren nombre y URL.",
     connecting: "Conectando…",
     connected: (name, n) => `${name} conectado: ${n} herramienta${n === 1 ? "" : "s"}.`,
+    off: "desactivado",
+    withAuth: "con token",
+    urlLabel: "URL del servidor",
   },
 
   viewer: {
@@ -423,6 +467,7 @@ export const S = {
     appClosed: "App cerrada.",
     reopenHint: "Vuelve a abrir el archivo para iniciarla de nuevo.",
     windowCloseHint: "Esta ventana se cerrará sola si el navegador lo permite.",
+    openFailed: (url, msg) => `No se pudo abrir ${url}: ${msg}`,
   },
 
   // Actualizar esta app desde una plantilla .uapp (arrástrala a la ventana).
@@ -463,6 +508,10 @@ export const S = {
     downloadingName: (name) => `Descargando ${name}…`,
     downloadFailed: (msg) => `Error en la descarga: ${msg}`,
     resizerTitle: "Arrastra para redimensionar, doble clic para restablecer",
+    pinPanel: "Fijar junto a la app",
+    unpinPanel: "Desfijar (flotar sobre la app)",
+    appFiles: "Archivos de la app",
+    dataFiles: "Archivos de datos",
   },
 
   toolMeta: {

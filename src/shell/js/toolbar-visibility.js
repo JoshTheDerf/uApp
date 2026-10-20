@@ -29,7 +29,7 @@
  */
 
 import { rpc, on, emit } from "./core.js";
-import { $, I, installStyle, closePanels, openPanel, closePanel, panelOpen } from "./ui.js";
+import { $, I, installStyle, closePanels, openPanel, closePanel, panelOpen, openPanelId } from "./ui.js";
 import { S } from "./strings.js";
 
 // Cmd on macOS, Ctrl everywhere else — what "Mod" in a shortcut means, so one
@@ -70,15 +70,15 @@ export function shortcutLabel(spec = def.shortcut) {
 const CSS = /* css */ `
 #toolbar-reveal {
   position: absolute; top: 0; right: 0; z-index: 40;
-  width: 32px; height: 26px; padding: 0;
+  width: var(--h-m); height: 28px; padding: 0;
   display: flex; align-items: center; justify-content: center;
   border: none; border-radius: 0 0 0 var(--r-m);
   background: var(--ink); color: var(--chrome-text);
-  opacity: .3; cursor: pointer; transition: opacity .15s;
+  opacity: .3; cursor: pointer; transition: opacity var(--dur-1) var(--ease);
 }
 #toolbar-reveal:hover, #toolbar-reveal:focus-visible { opacity: 1; }
 #toolbar-reveal[hidden] { display: none; }
-@media (pointer: coarse) { #toolbar-reveal { width: 44px; height: 34px; opacity: .45; } }
+@media (pointer: coarse) { #toolbar-reveal { width: 44px; height: 36px; opacity: .45; } }
 `;
 
 let handleEl = null;
@@ -151,13 +151,14 @@ export const openPanelName = () =>
 /// closes them, so a panel on screen with no bar above it is a state nothing
 /// else here can produce, and the buttons that would close it again live on
 /// the bar.
-export function setPanel(name, open) {
+/// opts.focus: the person asked from the keyboard, so focus follows.
+export function setPanel(name, open, opts = {}) {
   const id = PANEL_IDS[name];
   if (!id || !$(id)) return null;
   const want = open === undefined || open === null ? !panelOpen(id) : !!open;
   if (want) {
     setToolbar(true);
-    openPanel(id); // closes whichever other panel was open
+    openPanel(id, opts); // closes whichever other panel was open
   } else {
     closePanel(id);
   }
@@ -211,6 +212,34 @@ function onKey(e) {
   toggleToolbar();
 }
 
+// ---- panel shortcuts ------------------------------------------------------
+// Fixed, unlike the toolbar's: the shell's own keys for its busiest panels.
+// The tooltips and the ⋮ menu show them. A page (or the toolbar shortcut,
+// checked first) that already handled the key wins.
+export const PANEL_KEYS = { chat: "Mod+J", files: "Mod+Shift+F", database: "Mod+Shift+D" };
+const panelCombos = Object.entries(PANEL_KEYS).map(([name, spec]) => [name, parseCombo(spec)]);
+
+function onPanelKey(e) {
+  if (e.defaultPrevented || e.repeat) return;
+  const keys = keysOf(e);
+  for (const [name, c] of panelCombos) {
+    if (e.ctrlKey === c.ctrl && e.altKey === c.alt && e.shiftKey === c.shift
+        && e.metaKey === c.meta && keys.includes(c.key)) {
+      e.preventDefault();
+      setPanel(name, undefined, { focus: true });
+      return;
+    }
+  }
+}
+
+/// Esc pressed inside the app closes the open panel, the same as it does
+/// anywhere else in the shell, unless the app used the key itself.
+function onFrameEscape(e) {
+  if (e.key !== "Escape" || e.defaultPrevented) return;
+  const id = openPanelId();
+  if (id) closePanel(id);
+}
+
 function bindShortcut(spec) {
   combos = String(spec || "").split(",").map((s) => s.trim()).filter(Boolean)
     .map(parseCombo).filter(Boolean);
@@ -228,6 +257,9 @@ function bindFrame() {
     if (!d || d.__uappToolbarKeys) return;
     d.__uappToolbarKeys = true;
     d.addEventListener("keydown", onKey, true);
+    // Bubble phase: the app's own handlers run first and can claim the key.
+    d.addEventListener("keydown", onPanelKey);
+    d.addEventListener("keydown", onFrameEscape);
   };
   f.addEventListener("load", attach);
   attach(); // already loaded (a reconnect, or a late import)
@@ -297,6 +329,7 @@ on("ws-open", async () => {
 });
 
 document.addEventListener("keydown", onKey, true);
+document.addEventListener("keydown", onPanelKey);
 bindFrame();
 bindPages();
 // Right away, before any RPC: an app served with the bar already hidden must

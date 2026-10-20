@@ -8,7 +8,7 @@ import { rpc, on } from "./core.js";
 import {
   $, I, esc, div, fmtSize, fmtTime, appUrl, downloadUrl, installStyle, copyText,
   showMenu, dlgAlert, dlgConfirm, dlgInput, dlgPickRoot, makeDialog, footBtn,
-  registerPanel, closePanel, panelOpen, fileKind, KIND_ICON,
+  registerPanel, closePanel, panelOpen, fileKind, KIND_ICON, menuFrom,
 } from "./ui.js";
 import { openViewer } from "./viewer.js";
 import { pickTemplate } from "./template-update.js";
@@ -16,14 +16,14 @@ import { S } from "./strings.js";
 
 const TPL = /* html */ `
   <div class="panel-head">
-    <div id="fb-crumbs"></div>
+    <nav id="fb-crumbs" aria-label="${S.files.title}"></nav>
     <div class="spacer"></div>
-    <input id="fb-search" class="hidden" placeholder="${S.files.filterPlaceholder}" autocomplete="off">
-    <button id="fb-searchbtn" class="icon-btn" title="${S.files.searchFiles}"></button>
-    <button id="fb-viewbtn" class="icon-btn" title="${S.files.gridListView}"></button>
-    <button id="fb-newbtn" class="icon-btn" title="${S.files.newFileBtn}"></button>
-    <button id="fb-more" class="icon-btn" title="${S.files.more}"></button>
-    <button id="fb-close" class="icon-btn" title="${S.common.closeEsc}"></button>
+    <input id="fb-search" class="hidden" placeholder="${S.files.filterPlaceholder}" aria-label="${S.files.searchFiles}" autocomplete="off">
+    <button id="fb-searchbtn" class="icon-btn" title="${S.files.searchFiles}" aria-label="${S.files.searchFiles}"></button>
+    <button id="fb-viewbtn" class="icon-btn" title="${S.files.gridListView}" aria-label="${S.files.gridListView}"></button>
+    <button id="fb-newbtn" class="icon-btn" title="${S.files.newFileBtn}" aria-label="${S.files.newFileBtn}"></button>
+    <button id="fb-more" class="icon-btn" title="${S.files.more}" aria-label="${S.files.more}"></button>
+    <button id="fb-close" class="icon-btn" title="${S.common.closeEsc}" aria-label="${S.common.close}"></button>
   </div>
   <div id="fb-filters"></div>
   <div id="fb-body">
@@ -36,107 +36,110 @@ const TPL = /* html */ `
 `;
 
 const CSS = /* css */ `
-#filebrowser { width: min(940px, 96vw); background: var(--surface); }
+#filebrowser { width: var(--panel-w-l); background: var(--surface); }
 #fb-crumbs {
-  display: flex; align-items: baseline; gap: 2px; min-width: 0;
-  overflow-x: auto; scrollbar-width: none; margin-left: 2px;
+  display: flex; align-items: center; gap: 2px; min-width: 0;
+  overflow-x: auto; scrollbar-width: none; margin-left: calc(-1 * var(--sp-1));
 }
 #fb-crumbs::-webkit-scrollbar { display: none; }
 .crumb {
-  border: none; background: none; font: inherit; font-size: 13px; cursor: pointer;
-  padding: 3px 4px; border-radius: var(--r-s); color: var(--muted); white-space: nowrap;
+  border: none; background: none; font: inherit; font-size: var(--fs-base); cursor: pointer;
+  min-height: var(--h-s); padding: 0 var(--sp-1); border-radius: var(--r-s); color: var(--muted); white-space: nowrap;
 }
 .crumb:hover { color: var(--brand); background: var(--brand-wash); }
 .crumb.cur { color: var(--text); font-weight: 600; }
-.crumbsep { color: var(--ghost); font-size: 12px; }
-#fb-search { width: 170px; padding: 5px 10px; font-size: 13px; }
+.crumbsep { display: inline-flex; color: var(--ghost); }
+#fb-search { width: 180px; font-size: var(--fs-md); }
 /* filter chips: All · App / Data roots · folders inside the current root */
 #fb-filters {
-  display: flex; align-items: center; gap: 5px; flex: 0 0 auto;
-  padding: 7px 10px; border-bottom: 1px solid var(--line-soft);
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--line-soft);
   overflow-x: auto; scrollbar-width: none;
 }
 #fb-filters::-webkit-scrollbar { display: none; }
-.fbchip-sep { width: 1px; align-self: stretch; margin: 2px 3px; background: var(--line); flex: 0 0 auto; }
+.fbchip-sep { width: 1px; align-self: stretch; margin: 2px var(--sp-1); background: var(--line); flex: 0 0 auto; }
 #fb-body { flex: 1; display: flex; min-height: 0; }
 #fb-pane { flex: 1; min-width: 0; position: relative; overflow: auto; }
-#fb-items { padding: 10px; }
+#fb-items { padding: var(--sp-3); }
 #fb-items.grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: var(--sp-2);
 }
 #fb-items .hint { grid-column: 1 / -1; }
 .tile {
-  display: flex; flex-direction: column; align-items: center; gap: 3px;
-  padding: 12px 6px 9px; border-radius: var(--r-m); cursor: default; position: relative;
+  display: flex; flex-direction: column; align-items: center; gap: var(--sp-1);
+  padding: var(--sp-3) 6px 10px; border-radius: var(--r-m); cursor: default; position: relative;
   border: 1px solid transparent; text-align: center;
+  transition: background var(--dur-1) var(--ease);
 }
 .tile:hover { background: var(--hover); }
 .tile.sel { background: var(--brand-soft); border-color: var(--brand-line); }
+.tile:focus-visible { outline-offset: -2px; }
 .tile .tface {
   width: 52px; height: 52px; display: flex; align-items: center; justify-content: center;
   color: var(--text-2);
 }
-.tile .tface svg { width: 36px; height: 36px; stroke-width: 1.6; }
+.tile .tface svg { width: 36px; height: 36px; stroke-width: 1.5; }
 /* App and Data are the archive's two fixed roots — they read as places, not
    as ordinary folders. */
-.tile.rootdir .tface { color: var(--brand-ink); background: var(--brand-soft); border-radius: var(--r-m); }
+.tile.rootdir .tface { color: var(--brand-ink); background: var(--brand-soft); border-radius: var(--r-l); }
 tr.rootdir .tname { font-weight: 600; }
-.tile .thumb { max-width: 52px; max-height: 52px; border-radius: 4px; object-fit: contain; }
+.tile .thumb { max-width: 52px; max-height: 52px; border-radius: var(--r-xs); object-fit: contain; }
 .tile .tlabel {
-  font-size: 12px; line-height: 1.3; max-width: 100%;
+  font-size: var(--fs-sm); line-height: 1.3; max-width: 100%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tile .tsub { font-size: 10px; color: var(--faint); }
-.tile .fbmore { position: absolute; top: 4px; right: 4px; opacity: 0; }
-.tile:hover .fbmore, .tile.sel .fbmore { opacity: 1; }
+.tile .tsub { font-size: var(--fs-xs); color: var(--faint); }
+.tile .fbmore { position: absolute; top: var(--sp-1); right: var(--sp-1); opacity: 0; }
+.tile:hover .fbmore, .tile.sel .fbmore, .fbmore:focus-visible { opacity: 1; }
 .fbmore {
   border: none; background: none; cursor: pointer; color: var(--faint);
-  display: inline-flex; padding: 4px; border-radius: var(--r-s); margin-left: auto;
+  display: inline-flex; padding: var(--sp-1); border-radius: var(--r-s); margin-left: auto;
 }
 .fbmore:hover { background: var(--line); color: var(--text-2); }
-.fbtable { border-collapse: collapse; width: 100%; font-size: 13px; }
+.fbtable { border-collapse: collapse; width: 100%; font-size: var(--fs-md); }
 .fbtable th {
-  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
-  color: var(--faint); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--line);
+  text-align: left; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .05em;
+  color: var(--faint); font-weight: 600; padding: var(--sp-1) var(--sp-2); border-bottom: 1px solid var(--line);
   position: sticky; top: 0; background: var(--surface);
 }
-.fbtable td { padding: 7px 8px; border-bottom: 1px solid var(--line-soft); }
+.fbtable td { padding: 6px var(--sp-2); border-bottom: 1px solid var(--line-soft); }
 .fbtable tr.sel td { background: var(--brand-soft); }
 .fbtable tr:hover td { background: var(--hover); }
 .fbtable tr.sel:hover td { background: var(--brand-soft); }
+.fbtable tr:focus-visible { outline-offset: -2px; }
 .fbtable td.num { text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.fbname { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.fbname { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
 .fbname .tname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fbtable .fbmore { opacity: 0; }
-.fbtable tr:hover .fbmore, .fbtable tr.sel .fbmore { opacity: 1; }
+.fbtable tr:hover .fbmore, .fbtable tr.sel .fbmore, .fbtable .fbmore:focus-visible { opacity: 1; }
 @media (hover: none) { .fbmore, .tile .fbmore { opacity: 1; } }
 #fb-drop {
   position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-  background: rgba(47,109,246,.12); border: 3px dashed var(--brand); color: var(--brand);
-  font-size: 15px; font-weight: 600; pointer-events: none;
+  background: color-mix(in srgb, var(--brand) 12%, transparent); border: 3px dashed var(--brand); color: var(--brand);
+  font-size: var(--fs-lg); font-weight: 600; pointer-events: none;
 }
 #fb-pane.dropping #fb-drop { display: flex; }
 /* file history rows (Earlier-versions dialog) */
 .fver {
-  display: flex; gap: 10px; align-items: center; font-size: 12px;
-  color: var(--text-2); padding: 4px 0; border-top: 1px dashed var(--hover);
+  display: flex; gap: 10px; align-items: center; font-size: var(--fs-sm);
+  color: var(--text-2); padding: var(--sp-1) 0; border-top: 1px dashed var(--line);
 }
 .fver .fmeta { min-width: 130px; }
 .fver span:nth-child(2) { flex: 1; }
 .frestore {
-  display: inline-flex; gap: 4px; align-items: center; font-size: 11px;
-  border: 1px solid var(--line-strong); background: var(--surface); border-radius: 6px;
-  padding: 2px 8px; cursor: pointer;
+  display: inline-flex; gap: var(--sp-1); align-items: center; font: inherit; font-size: var(--fs-xs);
+  border: 1px solid var(--line-mid); background: var(--surface); color: var(--text); border-radius: var(--r-s);
+  min-height: 24px; padding: 0 var(--sp-2); cursor: pointer;
 }
 .frestore:hover { background: var(--brand-wash); border-color: var(--brand-line); }
 /* Touch devices: taller rows and a bigger restore button. */
 @media (pointer: coarse) {
-  .fbtable td { padding: 11px 8px; }
-  .frestore { padding: 7px 11px; }
+  .fbtable td { padding: 11px var(--sp-2); }
+  .frestore { min-height: 36px; padding: 0 var(--sp-3); }
 }
 @media (max-width: 700px) {
   .fbtable th:nth-child(3), .fbtable td:nth-child(3) { display: none; } /* Modified */
-  #fb-items.grid { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); }
+  #fb-items.grid { grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); }
   #fb-search { width: 120px; }
   #fb-search:not(.hidden) { flex: 1; min-width: 0; }
 }
@@ -149,6 +152,7 @@ const rootOf = (name) => (name.startsWith("data/") ? "data/" : "app/");
 const otherRoot = (name) => (rootOf(name) === "app/" ? "data/" : "app/");
 const MAX_UPLOAD = 100 * 1024 * 1024;
 
+const touchUi = matchMedia("(pointer: coarse)");
 const fb = {
   rows: [],            // files.list rows: [name, sz, mtime, role]
   cwd: "",             // current prefix, "" = root, otherwise ends with "/"
@@ -262,7 +266,7 @@ function renderFb() {
   crumb(S.files.title, "", !segs.length);
   let acc = "";
   segs.forEach((sg, k) => {
-    cr.insertAdjacentHTML("beforeend", `<span class="crumbsep">/</span>`);
+    cr.insertAdjacentHTML("beforeend", `<span class="crumbsep" aria-hidden="true">${I("chevron-right", 14)}</span>`);
     acc += sg + "/";
     crumb(ROOTS[acc] || sg, acc, k === segs.length - 1);
   });
@@ -312,30 +316,73 @@ function wireEntry(el, e) {
   if (fb.sel === e.name) el.classList.add("sel");
   el.tabIndex = 0;
   const open = () => (e.dir ? fbGo(e.name) : openViewer(e.name));
-  el.onclick = () => {
+  const select = () => {
     fb.sel = e.name;
     document.querySelectorAll("#fb-items .fbitem.sel").forEach((x) => x.classList.remove("sel"));
     el.classList.add("sel");
   };
-  el.ondblclick = open;
-  el.onkeydown = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); open(); } };
+  // Mouse: click selects, double-click opens. Touch: a tap opens (there is
+  // no double-tap convention for files) and a long press opens the menu.
+  let longPressed = false;
+  el.onclick = () => {
+    if (longPressed) { longPressed = false; return; }
+    if (touchUi.matches) open(); else select();
+  };
+  el.ondblclick = () => { if (!touchUi.matches) open(); };
+  // Android fires contextmenu on a long press by itself; iOS doesn't, so
+  // time it here too (whichever comes first wins, the other is ignored).
+  let pressTimer = null, pressAt = null;
+  el.addEventListener("pointerdown", (ev) => {
+    longPressed = false;
+    if (ev.pointerType !== "touch") return;
+    pressAt = [ev.clientX, ev.clientY];
+    clearTimeout(pressTimer);
+    pressTimer = setTimeout(() => {
+      longPressed = true;
+      select();
+      entryMenu(e, pressAt[0], pressAt[1]);
+    }, 550);
+  });
+  const cancelPress = () => { clearTimeout(pressTimer); pressTimer = null; };
+  // A finger lifted after a long press must not also "click" (or send the
+  // mousedown that would close the menu it just opened).
+  el.addEventListener("touchend", (ev) => { if (longPressed) ev.preventDefault(); });
+  el.addEventListener("pointerup", cancelPress);
+  el.addEventListener("pointercancel", cancelPress);
+  el.addEventListener("pointermove", (ev) => {
+    if (pressAt && Math.hypot(ev.clientX - pressAt[0], ev.clientY - pressAt[1]) > 10) cancelPress();
+  });
+  el.onkeydown = (ev) => {
+    if (ev.target !== el) return; // the entry's own ⋮ button handles its keys
+    if (ev.key === "Enter") { ev.preventDefault(); open(); }
+    else if (ev.key === "ContextMenu" || (ev.key === "F10" && ev.shiftKey)) {
+      ev.preventDefault();
+      const r = el.getBoundingClientRect();
+      fb.sel = e.name;
+      entryMenu(e, r.left + 8, r.bottom - 4);
+    }
+  };
   el.oncontextmenu = (ev) => {
     ev.preventDefault();
-    fb.sel = e.name;
+    if (longPressed && document.querySelector(".ctxmenu")) return; // our timer got there first
+    cancelPress();
+    if (ev.pointerType === "touch" || touchUi.matches) longPressed = true; // swallow the tap that follows
+    select();
     entryMenu(e, ev.clientX, ev.clientY);
   };
   const more = document.createElement("button");
   more.className = "fbmore";
-  more.title = "Actions";
+  more.title = S.files.actions;
   more.innerHTML = I("ellipsis-vertical", 14);
+  more.setAttribute("aria-label", S.files.actions);
   more.onclick = (ev) => {
     ev.stopPropagation();
     const r = more.getBoundingClientRect();
-    entryMenu(e, r.right, r.bottom);
+    entryMenu(e, r.right, r.bottom, { align: "right", opener: more });
   };
   (el.querySelector(".fbname") || el).appendChild(more);
 }
-function entryMenu(e, x, y) {
+function entryMenu(e, x, y, opts) {
   if (e.dir) {
     const items = [{ icon: "folder-open", label: S.files.ctxOpen, run: () => fbGo(e.name) }];
     // The two roots are fixed; anything below them renames and moves like a
@@ -346,7 +393,7 @@ function entryMenu(e, x, y) {
       items.push({ icon: "folder-input", label: S.files.ctxMoveTo(ROOTS[otherRoot(e.name)]),
                    run: () => moveToRoot(e.name, true) });
     }
-    showMenu(items, x, y);
+    showMenu(items, x, y, opts);
     return;
   }
   showMenu([
@@ -363,7 +410,7 @@ function entryMenu(e, x, y) {
     { icon: "history", label: S.files.ctxHistory, run: () => showHistory(e.name) },
     { sep: true },
     { icon: "trash-2", label: S.files.ctxDelete, danger: true, run: () => deleteFile(e.name) },
-  ], x, y);
+  ], x, y, opts);
 }
 /// Rename a file, or (dir) a folder and everything under it. Both edit the
 /// full path, so a rename is also how you move something.
@@ -459,7 +506,7 @@ async function showHistory(name) {
     const row = div("fver");
     row.innerHTML =
       `<span class="fmeta">${fmtTime(ts)}</span>` +
-      `<span>${esc(user || "")} · ${action === "del" ? "deleted" : "edited"} · ${fmtSize(size)}</span>`;
+      `<span>${esc(user || "")} · ${action === "del" ? S.files.histDeleted : S.files.histEdited} · ${fmtSize(size)}</span>`;
     const btn = document.createElement("button");
     btn.className = "frestore";
     btn.innerHTML = I("rotate-cw", 11) + " " + S.files.restore;
@@ -488,14 +535,14 @@ class FilesPanel extends HTMLElement {
 }
 
 function wire() {
-  registerPanel("filebrowser", "btn-files", () => loadFiles());
+  registerPanel("filebrowser", "btn-files", () => loadFiles(), S.files.title);
 
-  $("fb-searchbtn").innerHTML = I("search", 15);
-  $("fb-newbtn").innerHTML = I("plus", 15);
-  $("fb-more").innerHTML = I("ellipsis-vertical", 15);
-  $("fb-close").innerHTML = I("x", 15);
+  $("fb-searchbtn").innerHTML = I("search", 16);
+  $("fb-newbtn").innerHTML = I("plus", 16);
+  $("fb-more").innerHTML = I("ellipsis-vertical", 16);
+  $("fb-close").innerHTML = I("x", 16);
   const renderFbViewBtn = () => {
-    $("fb-viewbtn").innerHTML = I(fb.view === "grid" ? "list" : "layout-grid", 15);
+    $("fb-viewbtn").innerHTML = I(fb.view === "grid" ? "list" : "layout-grid", 16);
   };
   renderFbViewBtn();
   $("fb-viewbtn").onclick = () => {
@@ -514,17 +561,15 @@ function wire() {
   $("fb-search").addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); $("fb-searchbtn").click(); }
   });
-  $("fb-newbtn").onclick = (ev) => {
-    const r = ev.currentTarget.getBoundingClientRect();
-    showMenu([
+  $("fb-newbtn").onclick = () => {
+    menuFrom($("fb-newbtn"), [
       { icon: "upload", label: S.files.menuUpload, run: () => $("fb-upload").click() },
       { icon: "file-plus", label: S.files.menuNewFile, run: () => newFile() },
       { icon: "folder-plus", label: S.files.menuNewFolder, run: () => newFolder() },
-    ], r.right, r.bottom);
+    ], S.files.newFileBtn);
   };
-  $("fb-more").onclick = (ev) => {
-    const r = ev.currentTarget.getBoundingClientRect();
-    showMenu([
+  $("fb-more").onclick = () => {
+    menuFrom($("fb-more"), [
       { icon: "refresh-cw", label: S.common.refresh, run: () => loadFiles() },
       { icon: "package", label: S.files.menuShareTemplate, run: () => downloadUrl("/template.uapp") },
       { icon: "download", label: S.files.menuDownloadApp, run: () => downloadUrl("/download.uapp") },
@@ -532,7 +577,7 @@ function wire() {
       // The other half of "share as template": take one in. Dropping the file
       // on the window does the same thing.
       { icon: "folder-input", label: S.files.menuUpdateFromTemplate, run: () => pickTemplate() },
-    ], r.right, r.bottom);
+    ], S.files.more);
   };
   $("fb-upload").addEventListener("change", (e) => {
     uploadFiles([...e.target.files]);

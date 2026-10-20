@@ -13,6 +13,7 @@ export const S = {
     loading: "chargement…",
     checking: "vérification…",
     retry: "Réessayer",
+    showHide: "Afficher ou masquer",
   },
 
   chat: {
@@ -109,6 +110,20 @@ export const S = {
     diffEditNotFound: (name) => `modifie ${name}, ancien texte introuvable (échec prévu)`,
 
     stepCount: (n) => `${n} étape${n === 1 ? "" : "s"}`,
+    inputLabel: "Message",
+    emptyTitle: "Demandez à l'assistant",
+    emptyHint: "Il peut lire et modifier les fichiers et les données de cette appli, et expliquer son fonctionnement.",
+    suggestExplain: "Explique comment fonctionne cette appli",
+    suggestFeature: "Propose une nouvelle fonctionnalité utile",
+    suggestData: "Résume les données de cette appli",
+    archivedLabel: (title) => `${title} (archivé)`,
+    diffMore: (n) => `…${n} de plus`,
+    aiError: (msg) => `Erreur IA : ${msg}`,
+    emptyTitleBlank: "Que doit faire cette appli ?",
+    emptyHintBlank: "Décrivez-la et l'assistant la construit ici. Vous pourrez tout modifier ensuite.",
+    suggestTasks: "Crée un suivi de tâches simple",
+    suggestContacts: "Fais une liste de contacts avec recherche",
+    suggestSheet: "Transforme un tableur en appli",
   },
 
   settings: {
@@ -136,7 +151,7 @@ export const S = {
     openApp: "Ouvrir un fichier uApp…",
     openFailed: (msg) => `Impossible d’ouvrir ce fichier : ${msg}`,
     language: "Langue",
-    languageHint: "Ce choix est propre à cet ordinateur. La page se recharge au changement.",
+    languageHint: "La page se recharge quand vous le changez.",
     aiHint: "Les paramètres IA sont enregistrés dans le fichier .uapp et partagés avec tous ceux qui l'ouvrent.",
     aiProvider: "Fournisseur IA",
     providerNone: "(aucun)",
@@ -207,6 +222,16 @@ export const S = {
     saveAs: "Enregistrer sous…",
     unsavedTitle: "Cette appli n'est pas encore enregistrée dans un fichier",
     unsavedTitleBrowser: "Cette appli n'est pas encore enregistrée dans un fichier",
+    aiSection: "Assistant IA",
+    groupApp: "Cette appli (enregistrée dans le fichier)",
+    groupDevice: "Cet appareil",
+    appearance: "Apparence",
+    themeSystem: "Système",
+    themeLight: "Clair",
+    themeDark: "Sombre",
+    failed: (msg) => `Échec : ${msg}`,
+    launcherInstalledMsg: "Installé.",
+    launcherRemovedMsg: "Supprimé.",
   },
 
   files: {
@@ -259,6 +284,9 @@ export const S = {
     restoreConfirm: (name, time) => `Restaurer ${name} à la version du ${time} ? Cela crée une nouvelle version pour tout le monde.`,
     listView: "Vue liste",
     gridView: "Vue grille",
+    actions: "Actions",
+    histDeleted: "supprimé",
+    histEdited: "modifié",
   },
 
   toolbar: {
@@ -296,6 +324,7 @@ export const S = {
     menuChat: "Chat IA",
     appClosed: "Appli fermée.",
     reopenHint: "Rouvrez le fichier pour la relancer.",
+    chatLabel: "Chat",
   },
 
   sql: {
@@ -373,6 +402,18 @@ export const S = {
     filterValue: "valeur",
     filterCombine: "Combiner avec la condition précédente",
     filterRemove: "Supprimer la condition",
+    tablesLabel: "Tables",
+    opContains: "contient",
+    opStarts: "commence par",
+    opEnds: "finit par",
+    opIn: "dans la liste (a, b, c)",
+    opEmpty: "est vide",
+    opNotEmpty: "n'est pas vide",
+    exportResult: "Exporter ce résultat",
+    range: (a, b, total) => `${a}–${b} sur ${total}`,
+    keyColsMissing: "Les colonnes clés manquent dans le résultat.",
+    kindTable: "la table",
+    kindView: "la vue",
   },
 
   tools: {
@@ -394,6 +435,9 @@ export const S = {
     nameUrlRequired: "Le nom et l'URL sont obligatoires.",
     connecting: "Connexion…",
     connected: (name, n) => `${name} connecté : ${n} outil${n === 1 ? "" : "s"}.`,
+    off: "désactivé",
+    withAuth: "avec jeton",
+    urlLabel: "URL du serveur",
   },
 
   viewer: {
@@ -423,6 +467,7 @@ export const S = {
     appClosed: "Appli fermée.",
     reopenHint: "Rouvrez le fichier pour la relancer.",
     windowCloseHint: "Cette fenêtre se fermera automatiquement si le navigateur le permet.",
+    openFailed: (url, msg) => `Impossible d'ouvrir ${url} : ${msg}`,
   },
 
   // Mise à jour de cette appli depuis un modèle .uapp (glissé sur la fenêtre).
@@ -463,6 +508,10 @@ export const S = {
     downloadingName: (name) => `Téléchargement de ${name}…`,
     downloadFailed: (msg) => `Échec du téléchargement : ${msg}`,
     resizerTitle: "Glissez pour redimensionner, double-cliquez pour réinitialiser",
+    pinPanel: "Épingler à côté de l'appli",
+    unpinPanel: "Détacher (flotter au-dessus de l'appli)",
+    appFiles: "Fichiers de l'appli",
+    dataFiles: "Fichiers de données",
   },
 
   toolMeta: {

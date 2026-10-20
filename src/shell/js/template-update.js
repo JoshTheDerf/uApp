@@ -16,28 +16,28 @@ import { S } from "./strings.js";
 const MAX_TEMPLATE = 100 * 1024 * 1024;
 
 const CSS = /* css */ `
-.tplu-lead { margin: 0 0 8px; font-size: 13.5px; line-height: 1.5; }
+.tplu-lead { margin: 0 0 var(--sp-2); font-size: var(--fs-base); line-height: 1.5; }
 .tplu-lead b { font-weight: 600; }
-.tplu-sum { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
+.tplu-sum { margin: 0; padding-left: var(--sp-5); font-size: var(--fs-md); line-height: 1.7; }
 .tplu-sum li::marker { color: var(--faint); }
 .dlg-body label.tplu-keep {
-  display: flex; gap: 8px; align-items: flex-start; margin: 12px 0 0;
-  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-s);
-  background: var(--surface-2); font-size: 13px; line-height: 1.45;
+  display: flex; gap: 8px; align-items: flex-start; margin: var(--sp-3) 0 0;
+  padding: var(--sp-2) var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-s);
+  background: var(--surface-2); font-size: var(--fs-md); line-height: 1.45;
   color: var(--text); cursor: pointer;
 }
 .dlg-body label.tplu-keep > input { width: auto; flex: none; margin: 2px 0 0; }
-.tplu-det { margin-top: 10px; font-size: 12.5px; }
+.tplu-det { margin-top: var(--sp-3); font-size: var(--fs-md); }
 .tplu-det summary { cursor: pointer; color: var(--text-2); }
 .tplu-det b { display: block; margin-top: 9px; color: var(--text); }
-.tplu-det ul { margin: 4px 0 0; padding-left: 18px; max-height: 190px; overflow: auto; }
-.tplu-det li { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; color: var(--text-2); }
+.tplu-det ul { margin: 4px 0 0; padding-left: var(--sp-5); max-height: 190px; overflow: auto; }
+.tplu-det li { font-family: var(--mono); font-size: var(--fs-xs); line-height: 1.6; color: var(--text-2); }
 .tplu-warn {
-  margin-top: 12px; padding: 8px 10px; border: 1px solid var(--warn-line);
+  margin-top: var(--sp-3); padding: var(--sp-2) var(--sp-3); border: 1px solid var(--warn-line);
   border-radius: var(--r-s); background: var(--warn-bg); color: var(--warn-ink);
-  font-size: 12.5px; line-height: 1.5;
+  font-size: var(--fs-md); line-height: 1.5;
 }
-.tplu-warn ul { margin: 4px 0 0; padding-left: 18px; }
+.tplu-warn ul { margin: 4px 0 0; padding-left: var(--sp-5); }
 `;
 
 /// Does this file name look like an app, rather than content for one?

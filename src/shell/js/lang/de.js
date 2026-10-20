@@ -13,6 +13,7 @@ export const S = {
     loading: "Laden…",
     checking: "Prüfen…",
     retry: "Erneut versuchen",
+    showHide: "Ein- oder ausblenden",
   },
 
   chat: {
@@ -109,6 +110,20 @@ export const S = {
     diffEditNotFound: (name) => `Bearbeitet ${name}, alter Text nicht gefunden (wird fehlschlagen)`,
 
     stepCount: (n) => `${n} Schritt${n === 1 ? "" : "e"}`,
+    inputLabel: "Nachricht",
+    emptyTitle: "Den Assistenten fragen",
+    emptyHint: "Er kann die Dateien und Daten dieser App lesen und ändern und erklären, wie alles funktioniert.",
+    suggestExplain: "Erkläre, wie diese App funktioniert",
+    suggestFeature: "Schlage eine nützliche neue Funktion vor",
+    suggestData: "Fasse die Daten in dieser App zusammen",
+    archivedLabel: (title) => `${title} (archiviert)`,
+    diffMore: (n) => `…${n} weitere`,
+    aiError: (msg) => `KI-Fehler: ${msg}`,
+    emptyTitleBlank: "Was soll diese App können?",
+    emptyHintBlank: "Beschreiben Sie es, und der Assistent baut es hier. Sie können später alles ändern.",
+    suggestTasks: "Baue eine einfache Aufgabenliste",
+    suggestContacts: "Erstelle eine Kontaktliste mit Suche",
+    suggestSheet: "Mach aus einer Tabelle eine App",
   },
 
   settings: {
@@ -136,7 +151,7 @@ export const S = {
     openApp: "uApp-Datei öffnen…",
     openFailed: (msg) => `Diese Datei konnte nicht geöffnet werden: ${msg}`,
     language: "Sprache",
-    languageHint: "Diese Einstellung gilt nur für diesen Computer. Die Seite wird beim Wechsel neu geladen.",
+    languageHint: "Die Seite lädt beim Ändern neu.",
     aiHint: "KI-Einstellungen werden in der .uapp-Datei gespeichert und mit allen geteilt, die sie öffnen.",
     aiProvider: "KI-Anbieter",
     providerNone: "(keiner)",
@@ -207,6 +222,16 @@ export const S = {
     saveAs: "Speichern unter…",
     unsavedTitle: "Diese App ist noch nicht als Datei gespeichert",
     unsavedTitleBrowser: "Diese App ist noch nicht als Datei gespeichert",
+    aiSection: "KI-Assistent",
+    groupApp: "Diese App (in der Datei gespeichert)",
+    groupDevice: "Dieses Gerät",
+    appearance: "Darstellung",
+    themeSystem: "System",
+    themeLight: "Hell",
+    themeDark: "Dunkel",
+    failed: (msg) => `Fehlgeschlagen: ${msg}`,
+    launcherInstalledMsg: "Installiert.",
+    launcherRemovedMsg: "Entfernt.",
   },
 
   files: {
@@ -259,6 +284,9 @@ export const S = {
     restoreConfirm: (name, time) => `${name} auf die Version von ${time} zurücksetzen? Dies wird eine neue Version für alle.`,
     listView: "Listenansicht",
     gridView: "Rasteransicht",
+    actions: "Aktionen",
+    histDeleted: "gelöscht",
+    histEdited: "bearbeitet",
   },
 
   toolbar: {
@@ -296,6 +324,7 @@ export const S = {
     menuChat: "KI-Chat",
     appClosed: "App geschlossen.",
     reopenHint: "Öffnen Sie die Datei erneut, um fortzufahren.",
+    chatLabel: "Chat",
   },
 
   sql: {
@@ -373,6 +402,18 @@ export const S = {
     filterValue: "Wert",
     filterCombine: "Mit der vorherigen Bedingung kombinieren",
     filterRemove: "Bedingung entfernen",
+    tablesLabel: "Tabellen",
+    opContains: "enthält",
+    opStarts: "beginnt mit",
+    opEnds: "endet mit",
+    opIn: "in Liste (a, b, c)",
+    opEmpty: "ist leer",
+    opNotEmpty: "nicht leer",
+    exportResult: "Dieses Ergebnis exportieren",
+    range: (a, b, total) => `${a}–${b} von ${total}`,
+    keyColsMissing: "Die Schlüsselspalten fehlen im Ergebnis.",
+    kindTable: "Tabelle",
+    kindView: "Ansicht",
   },
 
   tools: {
@@ -394,6 +435,9 @@ export const S = {
     nameUrlRequired: "Name und URL sind erforderlich.",
     connecting: "Verbinden…",
     connected: (name, n) => `${name} verbunden: ${n} Werkzeug${n === 1 ? "" : "e"}.`,
+    off: "aus",
+    withAuth: "mit Token",
+    urlLabel: "Server-URL",
   },
 
   viewer: {
@@ -423,6 +467,7 @@ export const S = {
     appClosed: "App geschlossen.",
     reopenHint: "Öffnen Sie die Datei erneut, um fortzufahren.",
     windowCloseHint: "Dieses Fenster schließt sich automatisch, wenn der Browser es erlaubt.",
+    openFailed: (url, msg) => `${url} konnte nicht geöffnet werden: ${msg}`,
   },
 
   // Diese App aus einer Vorlagen-.uapp aktualisieren (aufs Fenster ziehen).
@@ -463,6 +508,10 @@ export const S = {
     downloadingName: (name) => `${name} wird heruntergeladen…`,
     downloadFailed: (msg) => `Download fehlgeschlagen: ${msg}`,
     resizerTitle: "Ziehen zum Ändern der Größe, Doppelklick zum Zurücksetzen",
+    pinPanel: "Neben der App anheften",
+    unpinPanel: "Lösen (über der App schweben)",
+    appFiles: "App-Dateien",
+    dataFiles: "Datendateien",
   },
 
   toolMeta: {

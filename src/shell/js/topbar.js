@@ -2,15 +2,16 @@
  * buttons, and the window controls for the frameless desktop window. */
 
 import { rpc, on, emit } from "./core.js";
-import { $, I, installStyle, togglePanel, openPanel, dlgAlert, downloadUrl } from "./ui.js";
-import { toggleToolbar, shortcutLabel, toolbarDefault } from "./toolbar-visibility.js";
+import { $, I, installStyle, togglePanel, openPanel, dlgAlert, downloadUrl, isComposing, menuFrom } from "./ui.js";
+import { toggleToolbar, shortcutLabel, toolbarDefault, PANEL_KEYS, MAC } from "./toolbar-visibility.js";
 import { mirrorRefresh } from "./mirror.js";
 import { S } from "./strings.js";
 
 const TPL = /* html */ `
   <div id="title-wrap" title="${S.topbar.dblClickRename}">
+    <img id="app-icon" alt="" width="20" height="20">
     <span id="title"></span>
-    <button id="btn-rename" title="${S.topbar.renameApp}"></button>
+    <button id="btn-rename" title="${S.topbar.renameApp}" aria-label="${S.topbar.renameApp}"></button>
   </div>
   <div id="unsaved-bar" class="hidden" title="${S.topbar.unsavedBanner}">
     <span id="unsaved-msg"></span>
@@ -22,53 +23,67 @@ const TPL = /* html */ `
     <button id="btn-link-app"></button>
   </div>
   <div class="spacer"></div>
-  <button id="btn-files" class="bar-collapse" title="${S.topbar.browseFiles}"></button>
-  <button id="btn-sql" class="bar-collapse" title="${S.topbar.browseDatabase}"></button>
-  <button id="btn-tools" class="bar-collapse" title="${S.topbar.toolsBtn}"></button>
-  <button id="btn-settings" class="bar-collapse" title="${S.topbar.settingsBtn}"></button>
-  <button id="btn-chat" class="bar-collapse" title="${S.topbar.chatBtn}"></button>
+  <button id="btn-files" class="bar-btn bar-collapse"></button>
+  <button id="btn-sql" class="bar-btn bar-collapse"></button>
+  <button id="btn-tools" class="bar-btn bar-collapse"></button>
+  <button id="btn-settings" class="bar-btn bar-collapse"></button>
+  <button id="btn-chat" class="bar-btn"></button>
   <span class="winctl-sep bar-collapse"></span>
-  <button id="btn-hidebar" class="winctl bar-collapse"></button>
-  <button id="btn-reload" class="winctl bar-collapse" title="${S.topbar.reloadApp}"></button>
-  <button id="btn-quit" class="winctl winctl-close hide-native bar-collapse" title="${S.topbar.closeApp}"></button>
-  <button id="btn-menu" title="${S.topbar.menuBtn}"></button>
-  <div id="topbar-menu" class="hidden"></div>
+  <button id="btn-hidebar" class="bar-btn winctl bar-collapse"></button>
+  <button id="btn-reload" class="bar-btn winctl bar-collapse" title="${S.topbar.reloadApp}" aria-label="${S.topbar.reloadApp}"></button>
+  <button id="btn-quit" class="bar-btn winctl winctl-close hide-native bar-collapse" title="${S.topbar.closeApp}" aria-label="${S.topbar.closeApp}"></button>
+  <button id="btn-menu" class="bar-btn" title="${S.topbar.menuBtn}" aria-label="${S.topbar.menuBtn}"></button>
   <div id="winctls" class="native-only">
-    <button id="win-min" class="wbtn" title="${S.topbar.minimize}"></button>
-    <button id="win-max" class="wbtn" title="${S.topbar.maximizeRestore}"></button>
-    <button id="win-close" class="wbtn wbtn-close" title="${S.topbar.closeWindow}"></button>
+    <button id="win-min" class="wbtn" title="${S.topbar.minimize}" aria-label="${S.topbar.minimize}"></button>
+    <button id="win-max" class="wbtn" title="${S.topbar.maximizeRestore}" aria-label="${S.topbar.maximizeRestore}"></button>
+    <button id="win-close" class="wbtn wbtn-close" title="${S.topbar.closeWindow}" aria-label="${S.topbar.closeWindow}"></button>
   </div>
 `;
 
 const CSS = /* css */ `
 shell-topbar {
-  display: flex; align-items: center; gap: 10px;
-  padding: 6px 12px; background: var(--ink); color: var(--chrome-text);
+  display: flex; align-items: center; gap: var(--sp-1);
+  height: var(--bar-h); padding: 0 var(--sp-2) 0 var(--sp-3);
+  background: var(--ink); color: var(--chrome-text);
   flex: 0 0 auto;
-  position: relative; /* anchors the collapsed ⋮ dropdown */
+  position: relative;
+  /* the brand ring is too dark to see on the chrome */
+  --ring: 2px solid var(--chrome-accent);
 }
 shell-topbar button {
-  background: transparent; border: none; color: var(--chrome-dim);
-  cursor: pointer; padding: 5px 7px; border-radius: 6px;
-  display: inline-flex; align-items: center; gap: 5px;
+  background: transparent; border: none; color: var(--chrome-dim); font: inherit;
+  cursor: pointer; border-radius: var(--r-s);
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-1);
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
 }
-shell-topbar button:hover { background: rgba(255,255,255,.14); color: #fff; }
-shell-topbar button.active { background: rgba(255,255,255,.2); color: #fff; }
-shell-topbar button svg { display: block; }
-.winctl-sep { width: 1px; height: 18px; background: rgba(255,255,255,.18); margin: 0 4px; }
-.winctl-close:hover { background: var(--err) !important; color: #fff !important; }
+shell-topbar button:hover { background: var(--chrome-hover); color: var(--chrome-text); }
+shell-topbar button svg { display: block; flex: 0 0 auto; }
+.bar-btn { width: var(--h-m); height: var(--h-m); padding: 0; flex: 0 0 auto; }
+/* the open panel's button: tinted, so it reads as "this one is showing" */
+shell-topbar .bar-btn.active {
+  background: color-mix(in srgb, var(--chrome-accent) 26%, transparent);
+  color: var(--chrome-text);
+}
+/* Chat gets a label on wide screens: it is the one people look for first. */
+#btn-chat .bar-label { display: none; }
+@media (min-width: 900px) {
+  #btn-chat {
+    width: auto; padding: 0 var(--sp-3) 0 10px; margin-left: var(--sp-1);
+    border: 1px solid var(--chrome-line); border-radius: var(--r-pill);
+  }
+  #btn-chat .bar-label { display: inline; font-size: var(--fs-md); font-weight: 500; }
+  #btn-chat.active { border-color: transparent; }
+}
+.winctl-sep { width: 1px; height: 18px; background: var(--chrome-line); margin: 0 var(--sp-1); flex: 0 0 auto; }
+.winctl-close:hover { background: var(--err) !important; color: var(--on-err) !important; }
 
 /* --- native (frameless desktop window) chrome --- */
 .native-only { display: none !important; }
 body.native .native-only { display: inline-flex !important; }
 body.native .hide-native { display: none !important; }
-#winctls { align-items: center; gap: 2px; margin-left: 4px; }
-#winctls .wbtn {
-  width: 36px; height: 26px; padding: 0; border-radius: 6px; color: var(--chrome-dim);
-  display: inline-flex; align-items: center; justify-content: center;
-}
-#winctls .wbtn:hover { background: rgba(255,255,255,.14); color: #fff; }
-#winctls .wbtn-close:hover { background: var(--err); color: #fff; }
+#winctls { align-items: center; gap: 2px; margin-left: var(--sp-1); }
+#winctls .wbtn { width: 36px; height: 28px; padding: 0; }
+#winctls .wbtn-close:hover { background: var(--err); color: var(--on-err); }
 /* In the native window the top bar doubles as the drag handle; the empty
    areas get the move cursor, interactive bits keep the pointer. */
 body.native shell-topbar { cursor: move; }
@@ -77,44 +92,46 @@ body.native shell-topbar #title-wrap,
 body.native shell-topbar #unsaved-bar,
 body.native shell-topbar #unlinked-bar { cursor: default; }
 
-#title-wrap { display: flex; align-items: center; gap: 4px; min-width: 0; }
-#title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#title[contenteditable="true"] {
-  outline: 1px dashed rgba(255,255,255,.5); border-radius: 4px; padding: 0 5px;
-  background: rgba(255,255,255,.08);
+#title-wrap { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+#app-icon { width: 20px; height: 20px; border-radius: var(--r-xs); flex: 0 0 auto; }
+#title {
+  font-weight: 600; font-size: var(--fs-base);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-#btn-rename { opacity: 0; transition: opacity .15s; padding: 3px 4px !important; }
-#title-wrap:hover #btn-rename { opacity: .8; }
+#title[contenteditable="true"] {
+  outline: 1px dashed var(--chrome-dim); border-radius: var(--r-xs); padding: 0 5px;
+  background: var(--chrome-hover);
+}
+#btn-rename { width: 24px; height: 24px; opacity: 0; }
+#title-wrap:hover #btn-rename, #btn-rename:focus-visible { opacity: .85; }
 
 /* "not saved" banner for a scratch app (opened with no file), and the
    "not linked" banner for an intent-opened doc whose changes are NOT
    writing back to the original file (Android; see mirror.js). */
 #unsaved-bar, #unlinked-bar {
-  display: flex; align-items: center; gap: 8px; margin-left: 4px;
-  background: #5a4410; border: 1px solid #8a6a1e; border-radius: 8px;
-  padding: 2px 6px 2px 10px;
+  display: flex; align-items: center; gap: var(--sp-2); margin-left: var(--sp-2);
+  background: var(--chrome-warn-bg); border: 1px solid var(--chrome-warn-line);
+  border-radius: var(--r-m); padding: 2px 3px 2px 10px;
 }
 #unsaved-bar.hidden, #unlinked-bar.hidden { display: none; }
 #unsaved-msg, #unlinked-msg {
   display: inline-flex; align-items: center; gap: 5px;
-  font-size: 12px; color: #ffd77a; white-space: nowrap;
+  font-size: var(--fs-sm); color: var(--chrome-warn-text); white-space: nowrap;
 }
 #unsaved-msg svg, #unlinked-msg svg { display: block; }
 #btn-download-app, #btn-link-app {
-  display: inline-flex; align-items: center; gap: 4px;
-  background: #f0c04a; color: #3a2c05; border-radius: 6px;
-  padding: 2px 9px; font-size: 12px; font-weight: 600;
+  height: 24px; background: var(--chrome-warn-btn); color: var(--on-warn); border-radius: var(--r-s);
+  padding: 0 10px; font-size: var(--fs-sm); font-weight: 600;
 }
-#btn-download-app:hover, #btn-link-app:hover { background: #ffd062; color: #3a2c05; }
+#btn-download-app:hover, #btn-link-app:hover { background: var(--chrome-warn-btn-hover); color: var(--on-warn); }
 /* Secondary action in the same banner: a new app is also the moment someone
    wants to open one they already have (see #btn-open-app in wire()). Kept
    quieter than Save As so the primary action still reads first. */
 #btn-open-app {
-  display: inline-flex; align-items: center; gap: 4px;
-  border: 1px solid #f0c04a; color: #ffd77a; border-radius: 6px;
-  padding: 1px 8px; font-size: 12px; font-weight: 600;
+  height: 24px; border: 1px solid var(--chrome-warn-btn); color: var(--chrome-warn-text);
+  border-radius: var(--r-s); padding: 0 var(--sp-2); font-size: var(--fs-sm); font-weight: 600;
 }
-#btn-open-app:hover { background: rgba(240,192,74,.22); color: #fff; }
+#btn-open-app:hover { background: color-mix(in srgb, var(--chrome-warn-btn) 22%, transparent); color: var(--chrome-text); }
 #btn-open-app.hidden { display: none; }
 /* The banners never shrink; the title ellipsizes instead. */
 #unsaved-bar, #unlinked-bar { flex-shrink: 0; }
@@ -122,42 +139,20 @@ body.native shell-topbar #unlinked-bar { cursor: default; }
 /* --- collapsed menu (phones, skinny browser windows) --- */
 /* The full row of panel/window buttons doesn't fit next to the title and the
    "Not saved" banner, so on narrow screens they collapse into one ⋮ menu.
-   The banner keeps its full text — the freed space is what pays for it. */
+   Chat stays out: it is what most people open the bar for. The banner keeps
+   its full text, the freed space is what pays for it. */
 #btn-menu { display: none; }
 @media (max-width: 640px) {
   shell-topbar .bar-collapse { display: none !important; }
   #btn-menu { display: inline-flex; }
-  /* Phone = touch: bigger targets on what remains in the bar. */
-  shell-topbar button { padding: 9px 10px; }
   #btn-rename { display: none; } /* rename stays reachable via double-tap */
-  #btn-download-app, #btn-link-app { padding: 6px 12px; }
   /* Three chips + the title don't fit a phone-width bar: the open button
      keeps its icon (and its tooltip) and drops the words. */
-  #btn-open-app { padding: 5px 8px; }
   #btn-open-app .bar-label { display: none; }
-  #unsaved-bar, #unlinked-bar { padding: 3px 7px 3px 11px; }
 }
-#topbar-menu {
-  position: absolute; top: calc(100% - 4px); right: 8px; z-index: 60;
-  display: flex; flex-direction: column; min-width: 220px;
-  background: var(--ink); color: var(--chrome-text);
-  border: 1px solid rgba(255,255,255,.16); border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0,0,0,.35); padding: 6px; gap: 2px;
-}
-#topbar-menu.hidden { display: none; }
-#topbar-menu button {
-  justify-content: flex-start; gap: 10px; width: 100%;
-  padding: 11px 12px; font-size: 14px; border-radius: 8px;
-}
-#topbar-menu button.active { background: rgba(255,255,255,.2); color: #fff; }
-#topbar-menu .menu-sep { height: 1px; background: rgba(255,255,255,.14); margin: 4px 6px; }
-
-@media (max-width: 480px) { shell-topbar { gap: 4px; padding: 6px 8px; } }
-/* Tablets: wide enough to keep the full button row, but still touch. */
+@media (max-width: 480px) { shell-topbar { padding: 0 var(--sp-1) 0 var(--sp-2); } #app-icon { display: none; } }
 @media (pointer: coarse) {
-  shell-topbar button { padding: 9px 10px; }
-  #btn-download-app, #btn-link-app { padding: 6px 12px; }
-  #btn-open-app { padding: 5px 11px; }
+  #btn-download-app, #btn-link-app, #btn-open-app { height: 32px; padding: 0 var(--sp-3); }
 }
 `;
 
@@ -194,7 +189,7 @@ function renderInfo(info) {
   // "Download" — there is no save dialog there.
   if (info.desktop !== false) {
     const b = $("btn-download-app");
-    if (b.dataset.saveas !== "1" && b.textContent.trim() !== "Saved") {
+    if (b.dataset.saveas !== "1" && b.dataset.state !== "saved") {
       b.dataset.saveas = "1";
       b.innerHTML = barLabel("save", S.settings.saveAs);
     }
@@ -228,66 +223,60 @@ function startRename() {
     } catch (e) { titleEl.textContent = orig; dlgAlert(e.message); }
   };
   titleEl.onkeydown = (e) => {
-    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    if (e.key === "Enter" && !isComposing(e)) { e.preventDefault(); finish(true); }
     if (e.key === "Escape") { e.preventDefault(); finish(false); }
   };
   titleEl.onblur = () => finish(true);
 }
 
-// The ⋮ dropdown holding the buttons that don't fit on narrow screens. Items
+// The ⋮ menu holding the buttons that don't fit on narrow screens. Items
 // just click their (hidden) source button, so every action and its enabled/
-// active logic lives in exactly one place.
-function buildMenu() {
-  const menu = $("topbar-menu");
-  const ITEMS = [
-    ["btn-files", "files", S.topbar.menuFiles],
-    ["btn-sql", "database", S.topbar.menuDatabase],
-    ["btn-tools", "wrench", S.topbar.menuTools],
-    ["btn-settings", "settings", S.topbar.menuSettings],
-    ["btn-chat", "message-square", S.topbar.menuChat],
-    null, // separator
-    ["btn-hidebar", "eye-off", S.toolbar.menuHide],
-    ["btn-reload", "rotate-cw", S.topbar.reloadApp],
-    ["btn-quit", "x", S.topbar.closeApp, "hide-native"],
-  ];
-  for (const it of ITEMS) {
-    if (!it) { menu.insertAdjacentHTML("beforeend", '<div class="menu-sep"></div>'); continue; }
-    const [src, icon, label, extra] = it;
-    const b = document.createElement("button");
-    b.dataset.src = src;
-    if (extra) b.className = extra;
-    b.innerHTML = I(icon, 16) + " " + label;
-    b.onclick = () => { closeMenu(); $(src).click(); };
-    menu.appendChild(b);
-  }
-  const closeMenu = () => menu.classList.add("hidden");
-  $("btn-menu").innerHTML = I("ellipsis-vertical", 18);
-  $("btn-menu").onclick = (e) => {
-    e.stopPropagation();
-    if (!menu.classList.contains("hidden")) return closeMenu();
-    // Mirror the panel buttons' active state onto the menu items.
-    for (const b of menu.querySelectorAll("button[data-src]")) {
-      b.classList.toggle("active", $(b.dataset.src).classList.contains("active"));
-    }
-    menu.classList.remove("hidden");
-  };
-  document.addEventListener("click", (e) => {
-    if (!e.target.closest("#topbar-menu, #btn-menu")) closeMenu();
-  });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+// active logic lives in exactly one place. Chat is not in it: it stays on
+// the bar at every width.
+function openBarMenu() {
+  const native = document.body.classList.contains("native");
+  const panel = (src, icon, label, keys) =>
+    ({ icon, label, keys: keys && shortcutLabel(keys), checked: $(src).classList.contains("active"), run: () => $(src).click() });
+  menuFrom($("btn-menu"), [
+    panel("btn-files", "files", S.topbar.menuFiles, PANEL_KEYS.files),
+    panel("btn-sql", "database", S.topbar.menuDatabase, PANEL_KEYS.database),
+    panel("btn-tools", "wrench", S.topbar.menuTools),
+    panel("btn-settings", "settings", S.topbar.menuSettings),
+    { sep: true },
+    { icon: "eye-off", label: S.toolbar.menuHide, run: () => $("btn-hidebar").click() },
+    { icon: "rotate-cw", label: S.topbar.reloadApp, run: () => $("btn-reload").click() },
+    ...(native ? [] : [{ icon: "x", label: S.topbar.closeApp, run: () => $("btn-quit").click() }]),
+  ], S.topbar.menuBtn);
+}
+
+// Panel buttons: icon only (named for assistive tech), Chat with a label on
+// wide screens. The tooltip names the shortcut, if the panel has one.
+function panelButton(id, icon, title, label, keys) {
+  const b = $(id);
+  b.innerHTML = I(icon, 18) + (label ? `<span class="bar-label">${label}</span>` : "");
+  b.title = keys ? `${title} (${shortcutLabel(keys)})` : title;
+  b.setAttribute("aria-label", label || title);
+  if (keys) b.setAttribute("aria-keyshortcuts", keys.replace("Mod", MAC ? "Meta" : "Control"));
 }
 
 function wire() {
-  buildMenu();
-  $("btn-tools").innerHTML = I("wrench");
-  $("btn-settings").innerHTML = I("settings");
-  $("btn-chat").innerHTML = I("message-square");
-  $("btn-files").innerHTML = I("files");
-  $("btn-sql").innerHTML = I("database");
-  $("btn-reload").innerHTML = I("rotate-cw");
-  $("btn-hidebar").innerHTML = I("eye-off");
-  $("btn-quit").innerHTML = I("x", 17);
+  panelButton("btn-files", "files", S.topbar.browseFiles, "", PANEL_KEYS.files);
+  panelButton("btn-sql", "database", S.topbar.browseDatabase, "", PANEL_KEYS.database);
+  panelButton("btn-tools", "wrench", S.topbar.toolsBtn);
+  panelButton("btn-settings", "settings", S.topbar.settingsBtn);
+  panelButton("btn-chat", "message-square", S.topbar.chatBtn, S.topbar.chatLabel, PANEL_KEYS.chat);
+  $("btn-menu").innerHTML = I("ellipsis-vertical", 18);
+  $("btn-menu").setAttribute("aria-haspopup", "menu");
+  $("btn-menu").setAttribute("aria-expanded", "false");
+  $("btn-menu").onclick = openBarMenu;
+  $("btn-reload").innerHTML = I("rotate-cw", 18);
+  $("btn-hidebar").innerHTML = I("eye-off", 18);
+  $("btn-quit").innerHTML = I("x", 18);
   $("btn-rename").innerHTML = I("pencil", 12);
+  // The app's icon: the window's own. A missing one just leaves the name.
+  const icon = $("app-icon");
+  icon.onerror = () => icon.remove();
+  icon.src = (window.__uappBase || "/") + "icon-256.png";
   $("unsaved-msg").innerHTML =
     I("circle-alert", 13) + ` <span class="bar-label">${S.topbar.notSaved}</span>`;
   // "Not linked" warning: an intent-opened doc whose changes stay in the
@@ -315,11 +304,12 @@ function wire() {
   // to "Save As…" on desktop.
   $("btn-download-app").innerHTML = barLabel("download", S.common.download);
 
-  $("btn-chat").onclick = () => togglePanel("sidebar");
-  $("btn-sql").onclick = () => togglePanel("sqlpanel");
-  $("btn-files").onclick = () => togglePanel("filebrowser");
-  $("btn-settings").onclick = () => togglePanel("settingspanel");
-  $("btn-tools").onclick = () => togglePanel("toolspanel");
+  const focus = { focus: true };
+  $("btn-chat").onclick = () => togglePanel("sidebar", focus);
+  $("btn-sql").onclick = () => togglePanel("sqlpanel", focus);
+  $("btn-files").onclick = () => togglePanel("filebrowser", focus);
+  $("btn-settings").onclick = () => togglePanel("settingspanel", focus);
+  $("btn-tools").onclick = () => togglePanel("toolspanel", focus);
   $("btn-reload").onclick = () => emit("reload-app");
   // Hiding leaves the app filling the window. The tooltip names the keystroke
   // that brings it back — that is the only place most people will ever read
@@ -328,6 +318,7 @@ function wire() {
   const hideTitle = () => {
     const keys = shortcutLabel(toolbarDefault().shortcut);
     $("btn-hidebar").title = S.toolbar.hideTitle + (keys ? ` (${keys})` : "");
+    $("btn-hidebar").setAttribute("aria-label", S.toolbar.hideTitle);
   };
   hideTitle();
   on("toolbar-state", hideTitle);
@@ -351,7 +342,8 @@ function wire() {
       const r = await rpc("app.save");
       if (r && r.saved) {
         btn.innerHTML = barLabel("check", S.topbar.saved);
-        setTimeout(() => { btn.innerHTML = orig; }, 1800);
+        btn.dataset.state = "saved";
+        setTimeout(() => { btn.innerHTML = orig; delete btn.dataset.state; }, 1800);
       } else {
         btn.innerHTML = orig; // cancelled
       }
@@ -376,7 +368,7 @@ function wire() {
 
   // ---- native window controls (frameless desktop window) ----
   $("win-min").innerHTML = I("minus", 16);
-  $("win-max").innerHTML = I("square", 13);
+  $("win-max").innerHTML = I("square", 14);
   $("win-close").innerHTML = I("x", 16);
   $("win-min").onclick = () => rpc("win.minimize").catch(() => {});
   $("win-max").onclick = () => rpc("win.maximize").catch(() => {});

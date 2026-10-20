@@ -13,6 +13,7 @@ export const S = {
     loading: "loading…",
     checking: "checking…",
     retry: "Retry",
+    showHide: "Show or hide",
   },
 
   chat: {
@@ -109,6 +110,20 @@ export const S = {
     diffEditNotFound: (name) => `edits ${name}, old text not found (will fail)`,
 
     stepCount: (n) => `${n} step${n === 1 ? "" : "s"}`,
+    inputLabel: "Message",
+    emptyTitle: "Ask the assistant",
+    emptyHint: "It can read and change this app's files and data, and explain how things work.",
+    suggestExplain: "Explain how this app works",
+    suggestFeature: "Suggest a useful new feature",
+    suggestData: "Summarize the data in this app",
+    archivedLabel: (title) => `${title} (archived)`,
+    diffMore: (n) => `…${n} more`,
+    aiError: (msg) => `AI error: ${msg}`,
+    emptyTitleBlank: "What should this app do?",
+    emptyHintBlank: "Describe it and the assistant builds it here. You can change anything later.",
+    suggestTasks: "Build a simple task tracker",
+    suggestContacts: "Make a contact list with search",
+    suggestSheet: "Turn a spreadsheet into an app",
   },
 
   settings: {
@@ -136,7 +151,7 @@ export const S = {
     openApp: "Load uApp file…",
     openFailed: (msg) => `Could not open that file: ${msg}`,
     language: "Language",
-    languageHint: "This setting is local to your computer. The page reloads when you change it.",
+    languageHint: "The page reloads when you change it.",
     aiHint: "AI settings are saved in the .uapp file and shared with everyone who opens it.",
     aiProvider: "AI provider",
     providerNone: "(none)",
@@ -207,6 +222,16 @@ export const S = {
     saveAs: "Save As…",
     unsavedTitle: "This app isn't saved to a file yet",
     unsavedTitleBrowser: "This app isn't saved to a file yet",
+    aiSection: "AI assistant",
+    groupApp: "This app (saved in the file)",
+    groupDevice: "This device",
+    appearance: "Appearance",
+    themeSystem: "System",
+    themeLight: "Light",
+    themeDark: "Dark",
+    failed: (msg) => `Failed: ${msg}`,
+    launcherInstalledMsg: "Installed.",
+    launcherRemovedMsg: "Removed.",
   },
 
   files: {
@@ -259,6 +284,9 @@ export const S = {
     restoreConfirm: (name, time) => `Restore ${name} to the version from ${time}? This becomes a new version for everyone.`,
     listView: "List view",
     gridView: "Grid view",
+    actions: "Actions",
+    histDeleted: "deleted",
+    histEdited: "edited",
   },
 
   toolbar: {
@@ -296,6 +324,7 @@ export const S = {
     menuChat: "AI chat",
     appClosed: "App closed.",
     reopenHint: "Reopen the file to start it again.",
+    chatLabel: "Chat",
   },
 
   sql: {
@@ -373,6 +402,18 @@ export const S = {
     filterValue: "value",
     filterCombine: "Combine with the previous condition",
     filterRemove: "Remove condition",
+    tablesLabel: "Tables",
+    opContains: "contains",
+    opStarts: "starts with",
+    opEnds: "ends with",
+    opIn: "in list (a, b, c)",
+    opEmpty: "is empty",
+    opNotEmpty: "not empty",
+    exportResult: "Export this result",
+    range: (a, b, total) => `${a}–${b} of ${total}`,
+    keyColsMissing: "The key columns are missing from the result.",
+    kindTable: "table",
+    kindView: "view",
   },
 
   tools: {
@@ -394,6 +435,9 @@ export const S = {
     nameUrlRequired: "Name and URL are required.",
     connecting: "Connecting…",
     connected: (name, n) => `Connected ${name}: ${n} tool${n === 1 ? "" : "s"}.`,
+    off: "off",
+    withAuth: "with token",
+    urlLabel: "Server URL",
   },
 
   viewer: {
@@ -423,6 +467,7 @@ export const S = {
     appClosed: "App closed.",
     reopenHint: "Reopen the file to start it again.",
     windowCloseHint: "This window will close itself if the browser allows it.",
+    openFailed: (url, msg) => `Couldn't open ${url}: ${msg}`,
   },
 
   // Updating this app from a template .uapp (drag one onto the window).
@@ -463,6 +508,10 @@ export const S = {
     downloadingName: (name) => `Downloading ${name}…`,
     downloadFailed: (msg) => `Download failed: ${msg}`,
     resizerTitle: "Drag to resize, double-click to reset",
+    pinPanel: "Pin beside the app",
+    unpinPanel: "Unpin (float over the app)",
+    appFiles: "App files",
+    dataFiles: "Data files",
   },
 
   toolMeta: {
