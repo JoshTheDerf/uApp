@@ -62,11 +62,13 @@ fn status(url: &str) -> u16 {
 fn body(url: &str) -> String {
     ureq::get(url).call().unwrap().into_string().unwrap()
 }
+/// The body whatever the status (ureq hands a 4xx back as an error), so a
+/// negative check reads what was really served.
 fn body_or_empty(url: &str) -> String {
-    ureq::get(url)
-        .call()
-        .map(|r| r.into_string().unwrap_or_default())
-        .unwrap_or_default()
+    match ureq::get(url).call() {
+        Ok(r) | Err(ureq::Error::Status(_, r)) => r.into_string().unwrap_or_default(),
+        Err(_) => String::new(),
+    }
 }
 fn bytes(url: &str) -> Vec<u8> {
     let mut out = Vec::new();
@@ -167,7 +169,7 @@ fn serves_pages_at_real_urls() {
     assert!(body(&format!("{base}/app/posts/hello")).contains("hello"));
     // A missing page gets the site's 404 document, with a 404 status...
     assert_eq!(status(&format!("{base}/nope")), 404);
-    assert!(body_or_empty(&format!("{base}/nope")).is_empty() || true);
+    assert!(body_or_empty(&format!("{base}/nope")).contains("no such page"));
     // ...but 404.html requested directly is a normal page.
     assert_eq!(status(&format!("{base}/404.html")), 200);
     // The viewport meta is injected; `/uapp.js` (the privileged console
