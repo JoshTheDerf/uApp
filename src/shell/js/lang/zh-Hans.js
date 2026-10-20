@@ -226,6 +226,7 @@ export const S = {
     unsavedTitle: "此应用尚未保存到文件",
     unsavedTitleBrowser: "此应用尚未保存到文件",
     aiSection: "AI 助手",
+    notIsolated: "此应用未与编辑器隔离。请只在这里打开你信任的应用。",
     groupApp: "此应用（保存在文件中）",
     groupDevice: "此设备",
     appearance: "外观",

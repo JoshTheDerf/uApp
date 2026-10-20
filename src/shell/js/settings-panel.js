@@ -12,6 +12,7 @@ import { S, LOCALES, getLocale, setLocale } from "./strings.js";
 import { getTheme, setTheme } from "./theme.js";
 import { MAC } from "./toolbar-visibility.js";
 import { pickTemplate } from "./template-update.js";
+import { isolated } from "./frame.js";
 
 const TPL = /* html */ `
   <div class="panel-head">
@@ -20,6 +21,9 @@ const TPL = /* html */ `
     <button id="btn-settings-close" class="icon-btn" title="${S.common.closeEsc}" aria-label="${S.common.close}"></button>
   </div>
   <div class="panel-body" id="settings-form">
+    <!-- Shown when the app runs on this page's origin (the browser build, a
+         public site's editor): its code can then reach the editor. -->
+    <p id="st-isolation" class="hidden">${S.settings.notIsolated}</p>
     <!-- Two groups, because the difference matters: what is saved in the
          .uapp travels to everyone who opens it, the rest stays here. -->
     <h3 class="st-group"><span class="st-gicon" id="st-gicon-app"></span>${S.settings.groupApp}</h3>
@@ -170,6 +174,11 @@ const CSS = /* css */ `
 .st-sect { padding: var(--sp-4) 0 var(--sp-1); }
 .st-sect + .st-sect { border-top: 1px solid var(--line-soft); }
 .st-sect .hint { margin: var(--sp-1) 0; }
+#st-isolation {
+  margin: var(--sp-3) 0 0; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-m);
+  background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-ink);
+  font-size: var(--fs-sm);
+}
 .sect-head { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-md); }
 .sect-badge { font-size: var(--fs-xs); border-radius: var(--r-pill); padding: 2px var(--sp-2); font-weight: 600; }
 .sect-badge.on { background: var(--ok-soft); color: var(--ok-ink); }
@@ -451,6 +460,7 @@ function syncLocalHint() {
 }
 async function loadSettings() {
   stopRecording();
+  $("st-isolation").classList.toggle("hidden", isolated());
   try {
     const tb = (await rpc("toolbar.get")) || {};
     $("cfg-toolbar").value = tb.hidden ? "hidden" : "shown";

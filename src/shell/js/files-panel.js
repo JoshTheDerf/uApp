@@ -10,6 +10,7 @@ import {
   showMenu, dlgAlert, dlgConfirm, dlgInput, dlgPickRoot, makeDialog, footBtn,
   registerPanel, closePanel, panelOpen, fileKind, KIND_ICON, menuFrom,
 } from "./ui.js";
+import { tabUrl } from "./frame.js";
 import { openViewer } from "./viewer.js";
 import { pickTemplate } from "./template-update.js";
 import { S } from "./strings.js";
@@ -400,7 +401,7 @@ function entryMenu(e, x, y, opts) {
     { icon: "eye", label: S.files.ctxOpen, run: () => openViewer(e.name) },
     { icon: "code", label: S.files.ctxOpenRaw, run: () => openViewer(e.name, "raw") },
     { icon: "file-pen", label: S.files.ctxEdit, run: () => openViewer(e.name, "edit") },
-    { icon: "external-link", label: S.files.ctxNewTab, run: () => window.open(appUrl(e.name), "_blank", "noopener") },
+    { icon: "external-link", label: S.files.ctxNewTab, run: () => window.open(tabUrl(appUrl(e.name)), "_blank", "noopener") },
     { sep: true },
     { icon: "type", label: S.files.ctxRename, run: () => renameEntry(e.name, false) },
     { icon: "folder-input", label: S.files.ctxMoveTo(ROOTS[otherRoot(e.name)]),

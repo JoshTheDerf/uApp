@@ -57,6 +57,17 @@ class Instance {
     const r = await fetch(`http://127.0.0.1:${this.port}${path}`, { headers: { Cookie: `uapp_t_${this.port}=${this.token}` } });
     return { status: r.status, ct: r.headers.get("content-type"), buf: Buffer.from(await r.arrayBuffer()) };
   }
+  // The app's own origin (http://localhost:<port>), where root-absolute
+  // references resolve; its token is in the shell's frame src.
+  async appHttp(path, auth = true) {
+    if (!this.appToken) {
+      const html = await (await fetch(`http://127.0.0.1:${this.port}/?t=${this.token}`)).text();
+      this.appToken = new URL(/id="appframe" src="([^"]+)"/.exec(html)[1]).searchParams.get("a");
+    }
+    const headers = auth ? { Cookie: `uapp_a_${this.port}=${this.appToken}` } : {};
+    const r = await fetch(`http://localhost:${this.port}${path}`, { headers });
+    return { status: r.status, ct: r.headers.get("content-type"), buf: Buffer.from(await r.arrayBuffer()) };
+  }
   async stop() { this.proc.kill("SIGINT"); await sleep(300); this.proc.kill("SIGKILL"); }
 }
 const waitFor = async (fn, ms = 15000) => { const e = Date.now() + ms; while (Date.now() < e) { try { const v = await fn(); if (v) return v; } catch {} await sleep(300); } return null; };
@@ -95,23 +106,24 @@ console.log("\n[3] a second open reuses the running server, same bytes");
   await B.stop();
 }
 
-console.log("\n[3b] root-absolute references (/styles.css, /js/app.js) serve too");
+console.log("\n[3b] root-absolute references (/styles.css, /js/app.js) serve too, on the app's origin");
 {
   await A.rpc("files.write", { name: "styles.css", text: "body{margin:0}" });
   await A.rpc("files.write", { name: "js/core.js", text: "window.core=1;" });
   await A.rpc("files.write", { name: "shell.css", text: "/* app file that shadows nothing */" });
-  const css = await A.http("/styles.css");
+  const css = await A.appHttp("/styles.css");
   ok(css.status === 200 && css.ct.includes("css"), "/styles.css served from archive at root");
-  const js = await A.http("/js/core.js");
+  const js = await A.appHttp("/js/core.js");
   ok(js.status === 200 && js.buf.toString().includes("core=1"), "/js/core.js served from archive at root");
-  const wasmRoot = await A.http("/vendor/engine.wasm");
+  const wasmRoot = await A.appHttp("/vendor/engine.wasm");
   ok(wasmRoot.ct === "application/wasm", "root-absolute wasm keeps its MIME");
-  const shell = await A.http("/shell.css");
+  const shell = await A.appHttp("/shell.css");
   ok(!shell.buf.toString().includes("shadows nothing"), "shell routes still win over same-named app files");
-  const miss = await A.http("/definitely-missing.js");
+  const miss = await A.appHttp("/definitely-missing.js");
   ok(miss.status === 404, "missing files still 404");
-  const noauth = await fetch(`http://127.0.0.1:${A.port}/js/core.js`);
+  const noauth = await A.appHttp("/js/core.js", false);
   ok(noauth.status === 403, "root fallback still requires auth");
+  ok((await A.http("/js/core.js")).status === 404, "...and isn't on the shell's origin");
 }
 
 console.log("\n[4] guardrails + tool registration");

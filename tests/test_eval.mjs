@@ -90,14 +90,18 @@ const shell = client([]); // plain client, no contexts (like the shell itself)
 await shell.ready;
 const rpc = shell.rpc;
 
-console.log("\n[1] /scratch/ route");
+console.log("\n[1] /scratch/ route (on the app's origin, with the app's token)");
 {
-  const r = await fetch(`http://127.0.0.1:${info.port}/scratch/?t=${TOKEN}`);
+  const html = await (await fetch(`http://127.0.0.1:${info.port}/?t=${TOKEN}`)).text();
+  const A = new URL(/id="appframe" src="([^"]+)"/.exec(html)[1]).searchParams.get("a");
+  const r = await fetch(`http://localhost:${info.port}/scratch/?a=${A}`);
   const t = await r.text();
   ok(r.status === 200 && t.includes('__uappContext = "scratchpad"'), "scratch page served, sets context");
   ok((r.headers.get("cache-control") || "").includes("no-store"), "scratch page no-store");
-  const bad = await fetch(`http://127.0.0.1:${info.port}/scratch/`);
+  const bad = await fetch(`http://localhost:${info.port}/scratch/`);
   ok(bad.status === 403, "scratch page requires auth");
+  const shellSide = await fetch(`http://127.0.0.1:${info.port}/scratch/?t=${TOKEN}`);
+  ok(shellSide.status === 404, "no scratch page on the shell's origin");
 }
 
 console.log("\n[2] no context connected -> clear error");

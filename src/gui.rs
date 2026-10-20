@@ -191,12 +191,12 @@ fn install_drop_forwarding<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
 /// Install the NATIVE permission dialog.
 ///
 /// This is the whole security boundary, so it is worth being explicit about why
-/// it is not shell UI. The shell and the app iframe share one origin: app code
-/// can reach `window.parent`, and a dynamic `import()` from the parent realm
-/// hands it the same live module instances (and therefore the same privileged
-/// socket) the shell uses. A prompt drawn by the page can be answered by the
-/// page. So the decision is made in an OS dialog instead — the same reason a
-/// browser paints permission prompts in its chrome and not in the document.
+/// it is not shell UI. Whenever the app frame shares the shell's origin (see
+/// docs/design/app-isolation.md), app code can reach `window.parent` and the
+/// shell's privileged socket, and a prompt drawn by the page can be answered
+/// by the page. So the decision is made in an OS dialog instead — the same
+/// reason a browser paints permission prompts in its chrome and not in the
+/// document.
 ///
 /// Runs on a worker thread (see `permissions::decide`), which is what the
 /// `blocking_*` dialog API requires; calling it on the UI thread would deadlock
@@ -417,6 +417,10 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
             if ask.is_empty() {
                 return false;
             }
+            // WebKitGTK doesn't say which frame asked, so the request is the
+            // open app's: the shell asks for nothing, and the app frame is
+            // the only one `allow=` delegates these to (a frame the app
+            // embeds gets them only if the app delegates them on).
 
             // Pointer lock is checked against the focused window at the
             // instant it is granted, and any dialog we show takes that focus —
@@ -521,6 +525,12 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
                 } else {
                     return Ok(()); // not ours; leave WebView2's default
                 };
+                // Which page asked: the app frame is on its own origin, and
+                // the broker only asks about the open app's (see
+                // permissions::origin_accepted).
+                let mut uri = Default::default();
+                args.Uri(&mut uri)?;
+                let ask = Ask::one(feature).from_origin(webview2_com::take_pwstr(uri));
                 // WebView2 lets us answer after the handler returns, which is
                 // what keeps the prompt (painted in this same webview) from
                 // deadlocking against the request.
@@ -545,7 +555,7 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
                 // it completes belong to this one.
                 let handle = handle.clone();
                 std::thread::spawn(move || {
-                    let allow = crate::permissions::decide(Ask::one(feature));
+                    let allow = crate::permissions::decide(ask);
                     let _ = handle.run_on_main_thread(move || {
                         if let Some(answer) = OPEN.with(|m| m.borrow_mut().remove(&id)) {
                             answer(allow);

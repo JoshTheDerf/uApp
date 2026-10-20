@@ -64,6 +64,73 @@
   // UappError whose code is "no_host".
   const hostedTop = !wasmMode && window.top === window
     && !!document.querySelector('script[src^="/chrome.js"]');
+  // Desktop: the app frame has an origin of its own, http://localhost:<port>,
+  // and the shell hosting it is http://127.0.0.1:<port> (see
+  // docs/design/app-isolation.md). Neither can reach into the other; they
+  // talk with postMessage, each addressing exactly the other's origin. Where
+  // the shell and the app share an origin (the browser build, a public site's
+  // editor) the same messages go to this origin.
+  const crossTop = (() => {
+    if (window.top === window) return false;
+    try { void window.top.location.href; return false; } catch { return true; }
+  })();
+  const isolatedFrame = !wasmMode && crossTop && location.hostname === "localhost";
+  const shellOrigin = isolatedFrame ? `${location.protocol}//127.0.0.1:${location.port}` : location.origin;
+  // The app token. A load the shell starts carries it as ?a=, and it stays
+  // in the page's URL: the page's scripts, images and fetches send that URL
+  // as their Referer, which is how the server knows they may have the app's
+  // data files (see app_access in server.rs). This tab's later pages also
+  // find it in sessionStorage, and failing that, the shell tells us. Only a
+  // 64-hex-digit `a` is ours: an app's own ?a=foo is left alone, and ours
+  // goes after it.
+  const isToken = (v) => /^[0-9a-f]{64}$/.test(v || "");
+  let appToken = "";
+  try { appToken = new URL(location.href).searchParams.getAll("a").find(isToken) || ""; } catch {}
+  if (appToken) { try { sessionStorage.setItem("uapp.a", appToken); } catch {} }
+  else if (location.hostname === "localhost") { try { appToken = sessionStorage.getItem("uapp.a") || ""; } catch {} }
+  /// `url` (any form history.pushState takes) with the token added when it
+  /// is one of this origin's pages and doesn't carry it yet.
+  const withToken = (url) => {
+    if (!appToken || url === undefined || url === null) return url;
+    try {
+      const u = new URL(String(url), location.href);
+      if (!/^https?:$/.test(u.protocol) || u.origin !== location.origin
+        || u.searchParams.getAll("a").some(isToken)) return url; // blob: workers too
+      u.searchParams.append("a", appToken);
+      return u.href;
+    } catch { return url; }
+  };
+  if (location.hostname === "localhost") {
+    // Single-page routing must not drop it: this runs at the top of <head>,
+    // before the app's own scripts.
+    for (const name of ["pushState", "replaceState"]) {
+      const real = history[name].bind(history);
+      history[name] = (state, title, url) => real(state, title, withToken(url));
+    }
+    // A worker's requests send the worker script's URL as their Referer, so
+    // that URL gets the token too.
+    for (const name of ["Worker", "SharedWorker"]) {
+      const Real = window[name];
+      if (typeof Real !== "function") continue;
+      window[name] = class extends Real {
+        constructor(url, opts) { super(withToken(url), opts); }
+      };
+    }
+    // A page reached without it (a link with rel=noreferrer, say).
+    if (appToken && withToken(location.href) !== location.href) {
+      try { history.replaceState(history.state, "", location.href); } catch {}
+    }
+  }
+  // The shell hosting this page, at whatever frame depth it sits: in the
+  // browser build the nearest ancestor flagged as the wasm host (the shell may
+  // itself be a frame in someone's desktop, so `top` would be the wrong
+  // window); on the desktop the shell is the top document.
+  const shellWindow = () => (wasmHost || (window.top !== window ? window.top : null));
+  function toShell(msg) {
+    const w = shellWindow();
+    if (!w) return false; // no shell around this page (opened on its own)
+    try { w.postMessage(msg, shellOrigin); return true; } catch { return false; }
+  }
   let ws, nextId = 1, openp;
   // One raw-send for both transports; JSON objects in, transport framing here.
   const rawSend = (obj) => {
@@ -430,6 +497,22 @@
     if (document.readyState === "complete") send();
     else window.addEventListener("load", send, { once: true });
   }
+  // Ask the shell for the token (sessionStorage was cleared or blocked).
+  function tokenFromShell() {
+    return new Promise((resolve) => {
+      const w = shellWindow();
+      if (!isolatedFrame || !w) return resolve("");
+      const done = (t) => { window.removeEventListener("message", onMsg); clearTimeout(timer); resolve(t); };
+      const onMsg = (e) => {
+        if (e.origin !== shellOrigin || e.source !== w) return;
+        const t = e.data && e.data.__uappTokenIs;
+        if (typeof t === "string") done(t);
+      };
+      window.addEventListener("message", onMsg);
+      const timer = setTimeout(() => done(""), 3000);
+      toShell({ __uappToken: true });
+    });
+  }
   function connect() {
     if (hostedTop) {
       // The server's plain page (no editor around it): there is no host to
@@ -459,7 +542,19 @@
     // second connect (see the visibilitychange note below).
     if (ws) { const old = ws; ws = null; old.onclose = null; try { old.close(); } catch {} failPending("reconnecting"); }
     openp = new Promise((resolve) => {
-      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+      if (isolatedFrame && !appToken) {
+        tokenFromShell().then((t) => {
+          if (!t) { reconnectTimer = setTimeout(() => { connect(); openp.then(resolve); }, 1000); return; }
+          appToken = t;
+          try { sessionStorage.setItem("uapp.a", t); } catch {}
+          try { history.replaceState(history.state, "", location.href); } catch {} // adds it
+          connect();
+          openp.then(resolve);
+        });
+        return;
+      }
+      const q = appToken ? `?a=${appToken}` : "";
+      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws${q}`);
       ws.onopen = () => {
         ws.send(JSON.stringify({ method: "ctx.register", params: { context } }));
         announceLoaded();
@@ -536,14 +631,8 @@
   // nearest ancestor flagged as the wasm host (the shell may itself be a
   // frame in someone's desktop, so `top` would be the wrong window); in the
   // native window the shell is the top document.
-  const shellWindow = () => {
-    if (wasmHost) return wasmHost;
-    try { return window.top !== window ? window.top : null; } catch { return null; } // cross-origin top: not our shell
-  };
   function toolbarMsg(action, extra) {
-    const w = shellWindow();
-    if (!w) return false; // no shell around this page (opened on its own)
-    try { w.postMessage({ __uappToolbar: { action, ...extra } }, location.origin); return true; } catch { return false; }
+    return toShell({ __uappToolbar: { action, ...extra } });
   }
   function toolbarState() {
     const w = shellWindow();
@@ -552,14 +641,90 @@
       const id = "t" + Math.random().toString(36).slice(2);
       const done = (v) => { window.removeEventListener("message", onMsg); clearTimeout(timer); resolve(v); };
       const onMsg = (e) => {
-        if (e.origin !== location.origin) return;
+        if (e.origin !== shellOrigin || e.source !== w) return;
         const st = e.data && e.data.__uappToolbarState;
         if (st && st.id === id) done(st.state);
       };
       window.addEventListener("message", onMsg);
       const timer = setTimeout(() => done(null), 2000); // an older shell never answers
-      try { w.postMessage({ __uappToolbar: { action: "state", id } }, location.origin); } catch { done(null); }
+      if (!toShell({ __uappToolbar: { action: "state", id } })) done(null);
     });
+  }
+
+  // ---- what the shell needs from inside this page ---------------------------
+  // The shell can't see into this page, so the page reports in: where it is
+  // (for the address bar and for reloads), the shell's shortcuts pressed
+  // while it has focus, and links to other sites when the shell wants those.
+  let shellCfg = { keys: { toolbar: [], panels: [] }, links: null };
+  const keysOf = (e) => {
+    const out = [];
+    if (e.key) out.push(e.key.toLowerCase());
+    // Alt rewrites e.key on several layouts; match the physical key as well.
+    const m = /^Key([A-Z])$/.exec(e.code || "") || /^Digit(\d)$/.exec(e.code || "");
+    if (m) out.push(m[1].toLowerCase());
+    else if (/^F\d{1,2}$/.test(e.code || "")) out.push(e.code.toLowerCase());
+    return out;
+  };
+  const hits = (e, c) => !!c && e.ctrlKey === !!c.ctrl && e.altKey === !!c.alt
+    && e.shiftKey === !!c.shift && e.metaKey === !!c.meta && keysOf(e).includes(c.key);
+  if (shellWindow()) {
+    const nav = () => toShell({ __uappNav: location.href });
+    let heard = false;
+    window.addEventListener("message", (e) => {
+      if (e.origin !== shellOrigin || e.source !== shellWindow()) return;
+      const d = e.data;
+      if (!d || typeof d !== "object") return;
+      if (d.__uappShell && typeof d.__uappShell === "object") {
+        shellCfg = { ...shellCfg, ...d.__uappShell };
+        // The shell may not have been listening yet when we first said hello.
+        if (!heard) { heard = true; nav(); }
+      }
+      // The app's localStorage from before it had an origin of its own,
+      // handed over once by the shell. Reload so the app starts with it.
+      if (d.__uappStorage && typeof d.__uappStorage === "object" && context === "app") {
+        const keys = [];
+        try {
+          for (const [k, v] of Object.entries(d.__uappStorage)) {
+            if (typeof v === "string") { localStorage.setItem(k, v); keys.push(k); }
+          }
+        } catch {}
+        toShell({ __uappStorageDone: keys });
+        if (keys.length) location.reload();
+      }
+    });
+    nav();
+    window.addEventListener("hashchange", nav);
+    window.addEventListener("popstate", nav);
+    // The toolbar's shortcut wins over the app (capture phase)...
+    window.addEventListener("keydown", (e) => {
+      if (e.defaultPrevented || !(shellCfg.keys.toolbar || []).some((c) => hits(e, c))) return;
+      e.preventDefault();
+      toolbarMsg("toggle");
+    }, true);
+    // ...the panels' and Esc only when the app didn't use the key.
+    window.addEventListener("keydown", (e) => {
+      if (e.defaultPrevented) return;
+      if (e.key === "Escape") { toolbarMsg("escape"); return; }
+      if (e.repeat) return;
+      for (const [panel, c] of shellCfg.keys.panels || []) {
+        if (hits(e, c)) { e.preventDefault(); toolbarMsg("panel", { panel, focus: true }); return; }
+      }
+    });
+    // "system": the native window opens other sites in the browser; "top": a
+    // hosted site's editor leaves for them. Otherwise links behave as usual.
+    document.addEventListener("click", (e) => {
+      const mode = shellCfg.links;
+      if (!mode || e.defaultPrevented || e.button !== 0) return;
+      const a = e.target && e.target.closest && e.target.closest("a[href]");
+      if (!a) return;
+      if (mode === "top" && (a.target || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)) return;
+      let u;
+      try { u = new URL(a.href, a.baseURI); } catch { return; }
+      const ok = mode === "system" ? /^(https?|mailto):$/.test(u.protocol) : /^https?:$/.test(u.protocol);
+      if (!ok || u.origin === location.origin) return;
+      e.preventDefault();
+      toShell({ __uappOpen: u.href });
+    }, true);
   }
 
   const api = {
@@ -599,6 +764,9 @@
     /// MCP tools (mcp__server__tool), or app actions (app__name).
     tool: (name, input = {}) => rpc("tools.call", { name, input }),
     tools: () => rpc("tools.list"),
+    /// Show a system notification, through the uApp window (an app page
+    /// can't be given the browser's notification permission itself).
+    notify: (title, opts = {}) => rpc("notify.show", { title, body: (opts && opts.body) || "" }),
     /// Every on* subscription returns a function that unsubscribes it.
     onChange: subscribe(changeCbs),
     /// Run `cb` just before this page goes away (an edit reloads it). Dispose

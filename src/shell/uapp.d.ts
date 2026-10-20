@@ -188,6 +188,8 @@ declare namespace Uapp {
     /** Call any tool the assistant has: builtins, `mcp__server__tool`, `app__name`. */
     tool(name: string, input?: object): Promise<unknown>;
     tools(): Promise<ToolInfo[]>;
+    /** Show a system notification. The uApp window shows it for the page. */
+    notify(title: string, opts?: { body?: string }): Promise<{ ok: true }>;
 
     /** Run `cb` when this app's table data changes (from this page, another window or the assistant). */
     onChange(cb: (e: ChangeEvent) => void): Unsubscribe;
@@ -225,7 +227,8 @@ declare namespace Uapp {
       state(): Promise<PanelName | null>;
     };
 
-    /** Low-level call to any server method. */
+    /** Low-level call to a server method. App pages get the methods the
+     *  calls above use, plus `config.get` / `config.set` on `app.*` keys. */
     rpc<T = unknown>(method: string, params?: object): Promise<T>;
     /** Milliseconds before a call with no reply fails with code "timeout" (default 60000). */
     rpcTimeout?: number;

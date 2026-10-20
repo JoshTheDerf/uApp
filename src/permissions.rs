@@ -19,11 +19,11 @@
 //! ## Why the prompt is a native dialog, not shell UI
 //!
 //! It was shell UI first, and that was exploitable. The shell and the app
-//! iframe share one origin, so app code can reach `window.parent`, and a
-//! dynamic `import()` from the parent realm returns the *same live module
-//! instances* the shell uses. Anything the shell can do — call an RPC, hold a
-//! secret, answer a prompt — untrusted app code can do too. A prompt rendered
-//! by the page is decorative when the page is the attacker.
+//! iframe shared one origin then, so app code could reach `window.parent`,
+//! and a dynamic `import()` from the parent realm returned the *same live
+//! module instances* the shell uses. The app frame has its own origin now,
+//! but wherever it doesn't (the fallback, the browser build) a prompt
+//! rendered by the page is decorative when the page is the attacker.
 //!
 //! So the decision never touches JS: it is a native OS dialog, and the RPCs
 //! that could grant a permission no longer exist. This is the same reason a
@@ -111,6 +111,10 @@ pub struct Ask {
     /// domain, so "allow example.com its cookies" never becomes "allow every
     /// embed its cookies"; everything else is unscoped.
     pub scope: Option<String>,
+    /// The origin that asked, when the webview says (WebView2 does,
+    /// WebKitGTK's permission requests don't carry one). Only the open app's
+    /// origins are asked about at all, see [`origin_accepted`].
+    pub origin: Option<String>,
 }
 
 impl Ask {
@@ -119,7 +123,13 @@ impl Ask {
             features,
             detail: None,
             scope: None,
+            origin: None,
         }
+    }
+    /// Record which origin asked.
+    pub fn from_origin(mut self, origin: String) -> Ask {
+        self.origin = Some(origin);
+        self
     }
     pub fn one(f: Feature) -> Ask {
         Ask::new(vec![f])
@@ -162,6 +172,39 @@ static PROMPT: OnceLock<Prompt> = OnceLock::new();
 /// is the only thing that knows which .uapp is open.
 type AppIdFn = Box<dyn Fn() -> String + Send + Sync>;
 static APP_ID: OnceLock<AppIdFn> = OnceLock::new();
+
+/// The open app's origins: the shell's and the app frame's (see
+/// docs/design/app-isolation.md). Installed by the server.
+type OriginsFn = Box<dyn Fn() -> Vec<String> + Send + Sync>;
+static ORIGINS: OnceLock<OriginsFn> = OnceLock::new();
+
+/// Wire up the open app's origins (called once when the server starts).
+pub fn install_origins(origins: OriginsFn) {
+    let _ = ORIGINS.set(origins);
+}
+
+/// Is `origin` (or a URL on it) the open app's? A permission is filed per
+/// app, so a page the app framed or navigated to on some other site isn't
+/// asked about as "this app": it's refused.
+pub fn origin_accepted(origin: &str) -> bool {
+    let Some(ours) = ORIGINS.get() else {
+        return false;
+    };
+    let o = origin_of(origin);
+    ours().iter().any(|a| origin_of(a) == o)
+}
+
+/// `scheme://host[:port]` of a URL or origin, lowercased.
+fn origin_of(url: &str) -> String {
+    let url = url.trim().to_ascii_lowercase();
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            format!("{scheme}://{authority}")
+        }
+        None => url,
+    }
+}
 
 /// Wire up the native prompt (called once by the desktop shell at startup).
 pub fn install_prompt(prompt: Prompt) {
@@ -232,6 +275,9 @@ fn session_key(app_id: &str, ask: &Ask) -> String {
 /// validated against the focused window, and any dialog we show takes that
 /// focus away — this is the only usable path.
 pub fn known(ask: &Ask) -> Option<bool> {
+    if ask.origin.as_deref().is_some_and(|o| !origin_accepted(o)) {
+        return Some(false);
+    }
     let app_id = current_app_id();
     let key = session_key(&app_id, ask);
     if SESSION_ALLOW
@@ -286,6 +332,12 @@ pub fn ask_in_background(ask: Ask) {
 /// an untrusted app must not get a device because nobody was around to say no.
 pub fn decide(ask: Ask) -> bool {
     if ask.is_empty() {
+        return false;
+    }
+    if let Some(o) = &ask.origin
+        && !origin_accepted(o)
+    {
+        tracing::info!("refused a permission request from {o}: not this app's origin");
         return false;
     }
     let app_id = current_app_id();
@@ -602,6 +654,26 @@ mod tests {
         }
         let both = Ask::new(vec![Feature::Camera, Feature::Microphone]).prompt_text();
         assert!(both.body.to_lowercase().contains("microphone"));
+    }
+
+    #[test]
+    fn only_the_open_apps_origins_are_asked_about() {
+        install_origins(Box::new(|| {
+            vec![
+                "http://127.0.0.1:4100".into(),
+                "http://localhost:4100".into(),
+            ]
+        }));
+        assert!(origin_accepted("http://localhost:4100"));
+        assert!(origin_accepted("http://localhost:4100/app/index.html?x=1"));
+        assert!(origin_accepted("HTTP://127.0.0.1:4100/"));
+        assert!(!origin_accepted("http://localhost:4101"));
+        assert!(!origin_accepted("https://evil.example"));
+        assert!(!origin_accepted("http://localhost:4100.evil.example"));
+        // Refused without a prompt, and without a prompt installed at all.
+        let foreign = Ask::one(Feature::Camera).from_origin("https://evil.example".into());
+        assert_eq!(known(&foreign), Some(false));
+        assert!(!decide(foreign));
     }
 
     #[test]

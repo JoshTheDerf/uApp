@@ -226,6 +226,7 @@ export const S = {
     unsavedTitle: "Diese App ist noch nicht als Datei gespeichert",
     unsavedTitleBrowser: "Diese App ist noch nicht als Datei gespeichert",
     aiSection: "KI-Assistent",
+    notIsolated: "Diese App ist nicht vom Editor isoliert. Öffnen Sie hier nur Apps, denen Sie vertrauen.",
     groupApp: "Diese App (in der Datei gespeichert)",
     groupDevice: "Dieses Gerät",
     appearance: "Darstellung",

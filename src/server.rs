@@ -1,9 +1,12 @@
 //! HTTP + WebSocket server for one open .uapp — the one router, in two modes.
 //!
-//! Private (the desktop app, `uapp open`): binds 127.0.0.1 with a per-session
-//! token; every route requires it — through the [`Owner`] / [`Visitor`]
-//! extractors, never a handler-local check — and a request with a
-//! non-loopback Host is refused (DNS rebinding).
+//! Private (the desktop app, `uapp open`): binds 127.0.0.1 (and [::1]) with a
+//! per-session token; every route requires it — through the [`Owner`] /
+//! [`Visitor`] extractors, never a handler-local check — and a request with a
+//! non-loopback Host is refused (DNS rebinding). The app frame gets an origin
+//! of its own, `localhost:<port>`, told apart from the shell's `127.0.0.1` by
+//! Host, with its own token and an app-role socket (see `app_access`,
+//! `guard_and_headers` and docs/design/app-isolation.md).
 //!
 //! Public (`uapp serve`, `App::public` set): the same router faces the world
 //! as a website. Unauthenticated requests get exactly three things — the
@@ -32,7 +35,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use crate::app::App;
+use crate::app::{App, Role};
 pub use crate::app::{AppAction, ConsoleEntry, PendingApproval, PendingQuestion, RunHandle};
 
 const SHELL_HTML: &str = include_str!("shell/index.html");
@@ -53,6 +56,120 @@ fn cookie_name(app: &App) -> String {
         "uapp_t_{}",
         app.port.load(std::sync::atomic::Ordering::Relaxed)
     )
+}
+
+/// The app frame's cookie. Browsers drop it when the frame is cross-site
+/// with the shell (which it always is), so it mostly serves non-browser
+/// clients and a page opened in a tab of its own; [`app_access`] has the
+/// paths a framed page actually uses.
+fn app_cookie_name(app: &App) -> String {
+    format!(
+        "uapp_a_{}",
+        app.port.load(std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// Is this request addressed to the app frame's origin (`localhost:<port>`)?
+/// Decided by Host alone, so the shell (`127.0.0.1:<port>`) and the app
+/// never share a route, a cookie or a role.
+fn on_app_origin(app: &App, headers: &HeaderMap) -> bool {
+    if app.app_origin().is_none() {
+        return false;
+    }
+    let port = app.port.load(std::sync::atomic::Ordering::Relaxed);
+    headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| host_and_port(h, 80))
+        .is_some_and(|(h, p)| h == "localhost" && p == port)
+}
+
+/// Is one of the `a=` parameters in `query` the app token? (An app may use
+/// `?a=` for its own purposes too, so every one of them is looked at.)
+fn query_has_app_token(app: &App, query: Option<&str>) -> bool {
+    query
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|kv| kv.strip_prefix("a="))
+        .any(|t| crate::secrets::token_eq(t, &app.app_token))
+}
+
+/// Does the request carry the app token (`?a=` or the app cookie)?
+fn has_app_token(app: &App, headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    use crate::secrets::token_eq;
+    if query_has_app_token(app, uri.query()) {
+        return true;
+    }
+    let name = app_cookie_name(app);
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|c| c.to_str().ok())
+        .flat_map(|c| c.split(';'))
+        .filter_map(|kv| kv.trim().split_once('='))
+        .any(|(k, v)| k == name && token_eq(v, &app.app_token))
+}
+
+/// A `Referer` on the app origin whose URL carries the app token: a request
+/// made by one of the app's own pages. They keep `?a=` in their address
+/// (uapp.js sees to that) and are served with `Referrer-Policy: same-origin`,
+/// so their scripts, images and fetches all send it, and no other site does.
+fn referer_has_app_token(app: &App, headers: &HeaderMap) -> bool {
+    let Some(ours) = app.app_origin() else {
+        return false;
+    };
+    headers
+        .get(header::REFERER)
+        .and_then(|r| r.to_str().ok())
+        .and_then(|r| r.strip_prefix(ours.as_str()))
+        .filter(|rest| rest.starts_with('/'))
+        .and_then(|rest| rest.split('#').next())
+        .is_some_and(|rest| query_has_app_token(app, rest.split_once('?').map(|(_, q)| q)))
+}
+
+/// How much of the app an app-origin request may have.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AppAccess {
+    /// Shows the app token: the whole archive, `data/` included.
+    Full,
+    /// No token, but the request says it's the app's own (see
+    /// [`app_access`]): only the app's code, the files under `app/`.
+    Code,
+}
+
+/// What this app-origin request may have, if anything.
+///
+/// The shell loads the frame cross-site with `?a=<app token>`, every app page
+/// keeps it in its URL, and the page's requests carry it in their `Referer`
+/// (or on the URL, or in the app cookie where the browser keeps it). That's
+/// [`AppAccess::Full`].
+///
+/// Some of the app's requests can't carry it: a worker's own fetches and
+/// imports (its URL is the script's), `url()`s inside a stylesheet, nested
+/// module imports, anything under `referrerpolicy="no-referrer"`. They are
+/// same-origin, which `Sec-Fetch-Site` says (or, on an engine too old to send
+/// it, a same-origin `Referer`); `none` is a URL typed into the address bar.
+/// A browser page elsewhere can't fake either, but any local program can, so
+/// they only get [`AppAccess::Code`]: the app's code, never its data.
+fn app_access(app: &App, headers: &HeaderMap, uri: &axum::http::Uri) -> Option<AppAccess> {
+    let ours = app.app_origin()?;
+    if let Some(o) = headers.get(header::ORIGIN)
+        && o.to_str().ok() != Some(ours.as_str())
+    {
+        return None;
+    }
+    if has_app_token(app, headers, uri) || referer_has_app_token(app, headers) {
+        return Some(AppAccess::Full);
+    }
+    let own = match headers.get("sec-fetch-site").map(|v| v.to_str()) {
+        Some(site) => matches!(site, Ok("same-origin" | "none")),
+        None => headers
+            .get(header::REFERER)
+            .and_then(|r| r.to_str().ok())
+            .and_then(|r| r.strip_prefix(ours.as_str()))
+            .is_some_and(|rest| rest.starts_with('/')),
+    };
+    own.then_some(AppAccess::Code)
 }
 
 /// DNS-rebinding guard: the server binds 127.0.0.1 only, so a legitimate
@@ -205,6 +322,8 @@ pub struct Owner;
 pub enum Visitor {
     /// Holds the token: the shell, the raw archive, everything.
     Owner,
+    /// The app frame, on its own origin (see [`app_access`]).
+    App(AppAccess),
     /// Anonymous reader of a public site.
     Reader,
 }
@@ -215,7 +334,9 @@ impl axum::extract::FromRequestParts<Arc<App>> for Owner {
         parts: &mut axum::http::request::Parts,
         app: &Arc<App>,
     ) -> Result<Self, Response> {
-        if !authed(app, &parts.headers, &parts.uri) {
+        if on_app_origin(app, &parts.headers) {
+            Err(cross_origin())
+        } else if !authed(app, &parts.headers, &parts.uri) {
             Err(deny())
         } else if !from_own_origin(app, &parts.headers) {
             Err(cross_origin())
@@ -231,6 +352,12 @@ impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
         parts: &mut axum::http::request::Parts,
         app: &Arc<App>,
     ) -> Result<Self, Response> {
+        if on_app_origin(app, &parts.headers) {
+            return match app_access(app, &parts.headers, &parts.uri) {
+                Some(a) => Ok(Visitor::App(a)),
+                None => Err(deny()),
+            };
+        }
         // A token-holder's request from another origin is no owner's: on a
         // public site it still gets what any reader gets.
         if authed(app, &parts.headers, &parts.uri) && from_own_origin(app, &parts.headers) {
@@ -269,16 +396,28 @@ pub(crate) fn html_escape(s: &str) -> String {
 }
 
 async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) -> Response {
-    // A public site's front page is the site, not the shell.
-    if let Visitor::Reader = who {
-        return public_page(&app, "/", &headers);
+    match who {
+        // A public site's front page is the site, not the shell.
+        Visitor::Reader => return public_page(&app, "/", &headers),
+        // On the app's own origin, `/` simply is the app.
+        Visitor::App(a) => return serve_sqlar(&app, "index.html", &headers, a == AppAccess::Code),
+        Visitor::Owner => {}
     }
-    // A root-absolute `href="/"` followed INSIDE the app frame means the app's
-    // front page, not a second shell nested in the first. WebViews and
-    // browsers label frame navigations with Sec-Fetch-Dest: iframe.
-    if headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("iframe") {
-        return serve_sqlar(&app, "index.html", &headers);
+    // Sharing the shell's origin, a root-absolute `href="/"` followed INSIDE
+    // the app frame means the app's front page, not a second shell nested in
+    // the first. WebViews and browsers label frame navigations with
+    // Sec-Fetch-Dest: iframe.
+    if app.app_origin().is_none()
+        && headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("iframe")
+    {
+        return serve_sqlar(&app, "index.html", &headers, false);
     }
+    // Where the shell loads the app frame from: its own origin, with the app
+    // token for that first (cross-site) load, or next to the shell.
+    let app_src = match app.app_origin() {
+        Some(o) => format!("{o}/app/?a={}", app.app_token),
+        None => "/app/".to_string(),
+    };
     // Open with the toolbar this app saved for itself (see toolbar.rs). Set in
     // the HTML rather than by the shell after its first RPC: a class that
     // arrives a round trip late means the bar paints and then vanishes, which
@@ -297,7 +436,8 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
     let mut resp = Html(
         SHELL_HTML
             .replace("{{APP_NAME}}", &html_escape(&app.name))
-            .replace("{{TOPBAR_CLASS}}", topbar_class),
+            .replace("{{TOPBAR_CLASS}}", topbar_class)
+            .replace("{{APP_SRC}}", &app_src),
     )
     .into_response();
     // Refresh the cookie so the iframe + ws can auth without the token in URL
@@ -318,7 +458,7 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
     // stale-cached shells would keep showing the old UI.
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-    if let Ok(csp) = header::HeaderValue::from_str(&shell_csp(&headers)) {
+    if let Ok(csp) = header::HeaderValue::from_str(&shell_csp(&app, &headers)) {
         resp.headers_mut()
             .insert(header::CONTENT_SECURITY_POLICY, csp);
     }
@@ -330,11 +470,11 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
 /// into it (a hostile app name, chat markdown) can't run. Styles stay inline
 /// because the Web Components carry theirs in their templates. frame-src is
 /// broad on purpose: it governs where the APP frame may navigate, and an app
-/// may take its own frame anywhere. The socket is named explicitly since older
-/// WebKit doesn't count ws: as 'self'. Only the shell gets this; app pages run
-/// whatever their authors wrote and get just frame-ancestors (see
-/// `security_headers`).
-fn shell_csp(headers: &HeaderMap) -> String {
+/// may take its own frame anywhere; the app's own origin is named first
+/// anyway. The socket is named explicitly since older WebKit doesn't count
+/// ws: as 'self'. Only the shell gets this; app pages run whatever their
+/// authors wrote and get just frame-ancestors (see `security_headers`).
+fn shell_csp(app: &App, headers: &HeaderMap) -> String {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
@@ -345,10 +485,14 @@ fn shell_csp(headers: &HeaderMap) -> String {
     let sockets = host
         .map(|h| format!(" ws://{h} wss://{h}"))
         .unwrap_or_default();
+    let app_frame = app
+        .app_origin()
+        .map(|o| format!(" {o}"))
+        .unwrap_or_default();
     format!(
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; \
-         connect-src 'self'{sockets}; frame-src 'self' blob: http: https:; worker-src 'self'; \
+         connect-src 'self'{sockets}; frame-src 'self'{app_frame} blob: http: https:; worker-src 'self'; \
          object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"
     )
 }
@@ -441,10 +585,15 @@ fn parse_range(headers: &HeaderMap, len: u64) -> Option<Result<(u64, u64), ()>> 
     Some(Ok((start, end)))
 }
 
-fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
+/// One archive file for `name`. `code_only` (a request without the app
+/// token, see [`app_access`]) serves only what resolves under `app/`: a name
+/// that lands in `data/` (directly, through `/app/data/…`, or as a root-level
+/// name's fallback) is refused.
+fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap, code_only: bool) -> Response {
     if name.contains("..") {
         return deny();
     }
+    let mut needs_token = false;
     // Read + inflate under the lock, then release it: building the response
     // (and slicing a range out of a large video) must not block every other
     // request on the engine mutex.
@@ -453,7 +602,22 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
     // (and the public `uapp serve` router) link this way.
     let (data, name) = {
         let eng = app.eng();
-        let mut found = (crate::store::sqlar_read(&eng.db, name), name.to_string());
+        let read = |n: &str, needs_token: &mut bool| {
+            if !code_only {
+                return crate::store::sqlar_read(&eng.db, n);
+            }
+            match crate::store::resolve_name(&eng.db, n)? {
+                Some(r) if r.starts_with(crate::store::APP_DIR) => {
+                    crate::store::sqlar_read(&eng.db, &r)
+                }
+                Some(_) => {
+                    *needs_token = true;
+                    Ok(None)
+                }
+                None => Ok(None),
+            }
+        };
+        let mut found = (read(name, &mut needs_token), name.to_string());
         if matches!(found.0, Ok(None)) {
             let bare = name.trim_end_matches('/');
             let last = bare.rsplit('/').next().unwrap_or(bare);
@@ -463,7 +627,7 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
                     tries.insert(0, format!("{bare}.html"));
                 }
                 for t in tries {
-                    match crate::store::sqlar_read(&eng.db, &t) {
+                    match read(&t, &mut needs_token) {
                         Ok(Some(b)) => {
                             found = (Ok(Some(b)), t);
                             break;
@@ -529,6 +693,9 @@ fn serve_sqlar(app: &App, name: &str, headers: &HeaderMap) -> Response {
                     .into_response(),
             }
         }
+        Ok(None) if needs_token => {
+            (StatusCode::FORBIDDEN, "uapp: data files need the app token").into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             format!("no such file in app: {name}"),
@@ -550,12 +717,15 @@ async fn app_file(
     if let Visitor::Reader = who {
         return public_page(&app, &format!("/{path}"), &headers);
     }
+    // The shell can still read the archive at /app/ on its own origin (file
+    // previews, downloads), but a page from there never runs as the shell:
+    // `guard_and_headers` sandboxes HTML and SVG on that side.
     let name = if path.is_empty() {
         "index.html".to_string()
     } else {
         path
     };
-    serve_sqlar(&app, &name, &headers)
+    serve_sqlar(&app, &name, &headers, code_only(&who))
 }
 
 /// Inject `<script src="/uapp.js">` (unless the page already loads it) and a
@@ -608,6 +778,10 @@ fn inject_viewport(bytes: Vec<u8>) -> Vec<u8> {
         }
     }
     format!("{inject}\n{text}").into_bytes()
+}
+
+fn code_only(who: &Visitor) -> bool {
+    matches!(who, Visitor::App(AppAccess::Code))
 }
 
 pub(crate) fn percent_decode(s: &str) -> String {
@@ -664,14 +838,19 @@ async fn root_file(
         )
             .into_response();
     }
-    if let Visitor::Reader = who {
-        return public_page(&app, &path, &headers);
+    match who {
+        Visitor::Reader => return public_page(&app, &path, &headers),
+        // With the app on its own origin, root-absolute files are its business.
+        Visitor::Owner if app.app_origin().is_some() => {
+            return (StatusCode::NOT_FOUND, "not found").into_response();
+        }
+        _ => {}
     }
     let name = path.trim_start_matches('/');
     if name.is_empty() {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    serve_sqlar(&app, name, &headers)
+    serve_sqlar(&app, name, &headers, code_only(&who))
 }
 
 async fn app_root(state: State<Arc<App>>, who: Visitor, headers: HeaderMap) -> Response {
@@ -787,14 +966,48 @@ fn attachment(bytes: Vec<u8>, stem: &str) -> Response {
 /// The shell requests this only when a run_js scratchpad call needs it (see
 /// `invoke_eval` and main.js), so it is not fetched at all in a session that
 /// never uses the tool.
-async fn scratch_page(_who: Owner) -> Response {
+///
+/// It runs code the assistant wrote, so with isolation on it lives on the app
+/// origin and gets the app's role (`guard_and_headers` refuses it on the
+/// shell's).
+async fn scratch_page(who: Visitor) -> Response {
+    if let Visitor::Reader = who {
+        return deny();
+    }
     let mut resp = Html(SCRATCH_HTML).into_response();
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     resp
 }
 
-async fn ws_route(State(app): State<Arc<App>>, _who: Owner, ws: WebSocketUpgrade) -> Response {
+/// One socket route for both sides. The shell's connections are the owner's;
+/// on the app origin a connection needs the app token (`?a=` or its cookie)
+/// and the app's own Origin, and gets the app role.
+async fn ws_route(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let role = if on_app_origin(&app, &headers) {
+        let origin_ok = match headers.get(header::ORIGIN) {
+            Some(o) => o.to_str().ok() == app.app_origin().as_deref(),
+            None => true, // not a browser: the token alone
+        };
+        if !origin_ok {
+            return cross_origin();
+        }
+        if !has_app_token(&app, &headers, &uri) {
+            return deny();
+        }
+        Role::App
+    } else if !authed(&app, &headers, &uri) {
+        return deny();
+    } else if !from_own_origin(&app, &headers) {
+        return cross_origin();
+    } else {
+        Role::Owner
+    };
     // File uploads travel as base64 inside an RPC frame, so the socket has to
     // carry MAX_UPLOAD_BYTES * 4/3 plus JSON overhead (the defaults are 64/16
     // MiB, and an over-size frame kills the whole connection).
@@ -802,8 +1015,8 @@ async fn ws_route(State(app): State<Arc<App>>, _who: Owner, ws: WebSocketUpgrade
         .max_message_size(crate::rpc::MAX_UPLOAD_B64 + 4 * 1024 * 1024)
         .max_frame_size(crate::rpc::MAX_UPLOAD_B64 + 4 * 1024 * 1024);
     // Cross-origin WebSocket connects aren't blocked by the same-origin
-    // policy; the Owner extractor has already required our own Origin.
-    ws.on_upgrade(move |socket| ws_conn(app, socket))
+    // policy; the checks above have already required our own Origin.
+    ws.on_upgrade(move |socket| ws_conn(app, socket, role))
 }
 
 static CONN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -816,7 +1029,7 @@ static CONN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 /// in-flight calls are waiting for (an app action's result) arrive on it.
 const CONN_BUDGET: usize = 256;
 
-async fn ws_conn(app: Arc<App>, socket: WebSocket) {
+async fn ws_conn(app: Arc<App>, socket: WebSocket, role: Role) {
     struct ClientGuard(Arc<App>, u64);
     impl Drop for ClientGuard {
         fn drop(&mut self) {
@@ -848,6 +1061,7 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
         loop {
             tokio::select! {
                 ev = events.recv() => match ev {
+                    Ok(v) if role == Role::App && !App::app_may_see(&v) => continue,
                     Ok(v) => { if tx.send(Message::Text(v.to_string().into())).await.is_err() { break; } }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => break,
@@ -901,7 +1115,7 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
         tokio::spawn(async move {
             let _permit = permit;
             let result = tokio::task::spawn_blocking(move || {
-                crate::rpc::dispatch_untrusted(&app2, &method, params)
+                crate::rpc::dispatch_as(&app2, role, &method, params)
             })
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("task panic: {e}")));
@@ -913,6 +1127,37 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
         });
     }
     writer.abort();
+}
+
+/// Listen on `[::1]:<port>` next to `127.0.0.1:<port>`, for the app origin
+/// (`localhost` resolves to either). Returns the listener, if any, and
+/// whether the app frame can have its own origin at all:
+///   * no IPv6 here: `localhost` is 127.0.0.1, which we already have;
+///   * `[::1]:<port>` taken by someone else: `localhost` might reach THEM
+///     with the app token, so the app stays on the shell's origin (and the
+///     shell says it isn't isolated).
+pub async fn bind_app_v6(port: u16) -> (Option<tokio::net::TcpListener>, bool) {
+    match tokio::net::TcpListener::bind(("::1", port)).await {
+        Ok(l) => (Some(l), true),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            tracing::warn!(
+                "[::1]:{port} is in use by another program; the app frame shares the editor's origin this session"
+            );
+            (None, false)
+        }
+        Err(e) => {
+            use std::net::ToSocketAddrs;
+            let v4 = ("localhost", port)
+                .to_socket_addrs()
+                .is_ok_and(|mut a| a.any(|a| a.ip() == std::net::Ipv4Addr::LOCALHOST));
+            if !v4 {
+                tracing::warn!(
+                    "can't listen on [::1]:{port} ({e}) and localhost doesn't resolve to 127.0.0.1; the app frame shares the editor's origin this session"
+                );
+            }
+            (None, v4)
+        }
+    }
 }
 
 // ---- unlock gate for encrypted files ----------------------------------
@@ -1355,23 +1600,129 @@ pub fn router(app: Arc<App>) -> Router {
                 )),
         )
         .fallback(get(root_file))
-        .layer(axum::middleware::map_response_with_state(
+        .layer(axum::middleware::from_fn_with_state(
             app.clone(),
-            security_headers,
+            guard_and_headers,
         ))
         .with_state(app)
 }
 
+/// Routes that only exist on the shell's origin. On the app origin they 404
+/// (an app's own file of the same name was shadowed by them before, too).
+fn shell_only(path: &str) -> bool {
+    matches!(
+        path,
+        "/upload"
+            | "/shell.css"
+            | "/icons.js"
+            | "/icon-256.png"
+            | "/template.uapp"
+            | "/download.uapp"
+            | "/site.uapp"
+    ) || path.starts_with("/shell/")
+}
+
+/// Keep the two origins' routes apart, then add the security headers.
+async fn guard_and_headers(
+    State(app): State<Arc<App>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let app_side = on_app_origin(&app, req.headers());
+    let isolated = app.app_origin().is_some();
+    let path = req.uri().path().to_string();
+    if (app_side && shell_only(&path)) || (isolated && !app_side && path == "/scratch/") {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    // An app page navigating to another of its pages without `?a=` (a plain
+    // link, a form): send it back with the token, so that page's requests
+    // carry it too. The Referer says which page it came from.
+    if app_side
+        && req.method() == axum::http::Method::GET
+        && !query_has_app_token(&app, req.uri().query())
+        && req
+            .headers()
+            .get("sec-fetch-mode")
+            .and_then(|v| v.to_str().ok())
+            == Some("navigate")
+        && referer_has_app_token(&app, req.headers())
+    {
+        let to = match req.uri().query().filter(|q| !q.is_empty()) {
+            Some(q) => format!("{path}?{q}&a={}", app.app_token),
+            None => format!("{path}?a={}", app.app_token),
+        };
+        let resp = (
+            StatusCode::FOUND,
+            [
+                (header::LOCATION, to),
+                (header::CACHE_CONTROL, "no-store".into()),
+            ],
+        )
+            .into_response();
+        return security_headers(&app, resp);
+    }
+    // The shell's first load of the frame carries ?a=; hand the cookie over
+    // for clients that keep it (see `app_cookie_name`).
+    let set_app_cookie = app_side
+        && req.uri().query().unwrap_or("").split('&').any(|kv| {
+            kv.strip_prefix("a=")
+                .is_some_and(|t| crate::secrets::token_eq(t, &app.app_token))
+        });
+    let mut resp = next.run(req).await;
+    if app_side {
+        // Only our shell (and the app's own pages, for frames of its own)
+        // may frame the app. Same-origin referrers carry the token from the
+        // page's URL to its requests (see `app_access`), and nowhere else.
+        if !resp.headers().contains_key(header::CONTENT_SECURITY_POLICY)
+            && let Ok(v) = header::HeaderValue::from_str(&format!(
+                "frame-ancestors 'self' {}",
+                app.shell_origin()
+            ))
+        {
+            resp.headers_mut()
+                .insert(header::CONTENT_SECURITY_POLICY, v);
+        }
+        resp.headers_mut().insert(
+            header::REFERRER_POLICY,
+            header::HeaderValue::from_static("same-origin"),
+        );
+        if set_app_cookie
+            && let Ok(v) = header::HeaderValue::from_str(&format!(
+                "{}={}; Path=/; SameSite=Strict; HttpOnly",
+                app_cookie_name(&app),
+                app.app_token
+            ))
+        {
+            resp.headers_mut().append(header::SET_COOKIE, v);
+        }
+    } else if isolated && path.starts_with("/app/") {
+        // The archive as the shell reads it: an HTML or SVG file opened from
+        // here runs sandboxed, never as the shell.
+        let active = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("text/html") || v.starts_with("image/svg+xml"));
+        if active {
+            resp.headers_mut().insert(
+                header::CONTENT_SECURITY_POLICY,
+                header::HeaderValue::from_static("frame-ancestors 'self'; sandbox"),
+            );
+        }
+    }
+    security_headers(&app, resp)
+}
+
 /// Baseline security headers on every response. App pages get no script
 /// policy: they run their own JS/styles by design, so a restrictive one would
-/// break them (origin isolation of untrusted apps is a separate, larger
-/// change; see docs/design/app-isolation.md). They do get frame-ancestors.
+/// break them. Their isolation is the origin they're served from (see
+/// docs/design/app-isolation.md). They do get frame-ancestors.
 ///
 /// A public site that opted in (`--coi`) gets COOP/COEP on its documents so
 /// the editing chrome is cross-origin isolated from birth (SharedArrayBuffer
 /// for the wasm bridge) — credentialless rather than require-corp, so plain
 /// cross-origin `<script>`/`<img>` in the pages keep loading.
-async fn security_headers(State(app): State<Arc<App>>, mut resp: Response) -> Response {
+fn security_headers(app: &App, mut resp: Response) -> Response {
     let is_html = resp
         .headers()
         .get(header::CONTENT_TYPE)
@@ -1393,10 +1744,12 @@ async fn security_headers(State(app): State<Arc<App>>, mut resp: Response) -> Re
     }
     match app.public {
         None => {
-            h.insert(
-                header::REFERRER_POLICY,
-                header::HeaderValue::from_static("no-referrer"),
-            );
+            if !h.contains_key(header::REFERRER_POLICY) {
+                h.insert(
+                    header::REFERRER_POLICY,
+                    header::HeaderValue::from_static("no-referrer"),
+                );
+            }
         }
         Some(opts) => {
             h.insert(

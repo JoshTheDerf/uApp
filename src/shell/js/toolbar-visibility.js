@@ -31,6 +31,7 @@
 import { rpc, on, emit } from "./core.js";
 import { $, I, installStyle, closePanels, openPanel, closePanel, panelOpen, openPanelId } from "./ui.js";
 import { S } from "./strings.js";
+import { onFrame, setFrameConfig, toFrame } from "./frame.js";
 
 // Cmd on macOS, Ctrl everywhere else — what "Mod" in a shortcut means, so one
 // stored string reads right on whichever machine opens the app. Exported so
@@ -232,78 +233,39 @@ function onPanelKey(e) {
   }
 }
 
-/// Esc pressed inside the app closes the open panel, the same as it does
-/// anywhere else in the shell, unless the app used the key itself.
-function onFrameEscape(e) {
-  if (e.key !== "Escape" || e.defaultPrevented) return;
-  const id = openPanelId();
-  if (id) closePanel(id);
-}
-
 function bindShortcut(spec) {
   combos = String(spec || "").split(",").map((s) => s.trim()).filter(Boolean)
     .map(parseCombo).filter(Boolean);
-}
-
-// Key events inside the app frame never reach this document, and the frame is
-// where focus almost always is — without this the shortcut would only work in
-// the moments nobody is using the app.
-function bindFrame() {
-  const f = $("appframe");
-  if (!f) return;
-  const attach = () => {
-    let d = null;
-    try { d = f.contentDocument; } catch { return; } // a cross-origin page: nothing to do
-    if (!d || d.__uappToolbarKeys) return;
-    d.__uappToolbarKeys = true;
-    d.addEventListener("keydown", onKey, true);
-    // Bubble phase: the app's own handlers run first and can claim the key.
-    d.addEventListener("keydown", onPanelKey);
-    d.addEventListener("keydown", onFrameEscape);
-  };
-  f.addEventListener("load", attach);
-  attach(); // already loaded (a reconnect, or a late import)
+  // Key events inside the app frame never reach this document, and the frame
+  // is where focus almost always is. uapp.js there matches these itself and
+  // sends the hits back as __uappToolbar messages (below): the toolbar's in
+  // the capture phase, before the app sees the key; the panels' and Esc after
+  // the app had its chance to claim them.
+  setFrameConfig({ keys: { toolbar: combos, panels: panelCombos } });
 }
 
 // ---- app pages asking, over postMessage ----------------------------------
-// uapp.toolbar.show()/hide()/toggle() from app code. Deliberately NOT an RPC:
-// the archive is shared, and an app hiding the toolbar in someone else's
-// window on another device would be indefensible. This reaches exactly the
-// shell hosting the page that asked.
-function insideOurFrames(w) {
-  try {
-    for (let i = 0; w && i < 16; i++) {
-      if (w.parent === window) return true;
-      if (w === w.parent) return false;
-      w = w.parent;
-    }
-  } catch {}
-  return false;
-}
-
-function bindPages() {
-  window.addEventListener("message", (e) => {
-    // Same-origin only: that means a page this shell itself served out of the
-    // archive. Anything else has no business driving the shell's UI.
-    // And only from a window inside this shell's own frames: another tab on
-    // the same origin (another app in the browser build) must not reach it.
-    if (e.origin !== location.origin || !insideOurFrames(e.source)) return;
-    const m = e.data && e.data.__uappToolbar;
-    if (!m || typeof m !== "object") return;
-    if (m.action === "show") setToolbar(true);
-    else if (m.action === "hide") setToolbar(false);
-    else if (m.action === "toggle") toggleToolbar();
-    else if (m.action === "panel") setPanel(m.panel, m.open);
-    else if (m.action === "state" && e.source) {
-      try {
-        e.source.postMessage(
-          { __uappToolbarState: { id: m.id, state: { visible, ...def, panel: openPanelName() } } },
-          e.origin,
-        );
-      } catch {}
-    }
-  });
-}
+// uapp.toolbar.show()/hide()/toggle() from app code, and the shortcuts
+// forwarded from inside the frame. Deliberately NOT an RPC: the archive is
+// shared, and an app hiding the toolbar in someone else's window on another
+// device would be indefensible. This reaches exactly the shell hosting the
+// page that asked. frame.js has already checked it came from the app's
+// origin and from inside our own frames.
+onFrame("__uappToolbar", (m, e) => {
+  if (!m || typeof m !== "object") return;
+  if (m.action === "show") setToolbar(true);
+  else if (m.action === "hide") setToolbar(false);
+  else if (m.action === "toggle") toggleToolbar();
+  else if (m.action === "panel") setPanel(m.panel, m.open, { focus: !!m.focus });
+  else if (m.action === "escape") {
+    // Esc pressed inside the app closes the open panel, the same as it does
+    // anywhere else in the shell (the app didn't use the key itself).
+    const id = openPanelId();
+    if (id) closePanel(id);
+  } else if (m.action === "state" && e.source) {
+    toFrame(e.source, { __uappToolbarState: { id: m.id, state: { visible, ...def, panel: openPanelName() } } });
+  }
+});
 
 // ---- boot ----------------------------------------------------------------
 on("toolbar", (p) => {
@@ -343,8 +305,7 @@ on("ws-open", async () => {
 
 document.addEventListener("keydown", onKey, true);
 document.addEventListener("keydown", onPanelKey);
-bindFrame();
-bindPages();
+bindShortcut(def.shortcut);
 // Right away, before any RPC: an app served with the bar already hidden must
 // have its reveal handle even if the connection never comes up. Waiting for
 // toolbar.get would mean a hidden bar and no way at all to bring it back.

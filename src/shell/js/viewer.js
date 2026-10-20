@@ -7,6 +7,7 @@ import {
   $, I, esc, div, fmtSize, appUrl, downloadUrl, installStyle,
   dlgConfirm, dlgAlert, fileKind, KIND_ICON, extOf,
 } from "./ui.js";
+import { tabUrl } from "./frame.js";
 import { mdRender, hlCode } from "./markdown.js";
 import { S } from "./strings.js";
 
@@ -392,7 +393,7 @@ function wire(dlg) {
   $("vw-tab").innerHTML = I("external-link", 16);
   $("vw-close").innerHTML = I("x", 16);
   $("vw-dl").onclick = () => vw.name && downloadUrl(appUrl(vw.name));
-  $("vw-tab").onclick = () => vw.name && window.open(appUrl(vw.name), "_blank", "noopener");
+  $("vw-tab").onclick = () => vw.name && window.open(tabUrl(appUrl(vw.name)), "_blank", "noopener");
   $("vw-toggle").onclick = () => { vw.mode = vw.mode === "raw" ? "pretty" : "raw"; renderViewer(); };
   $("vw-edit").onclick = () => { vw.mode = "edit"; renderViewer(); };
   $("vw-save").onclick = () => saveEditor();

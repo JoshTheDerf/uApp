@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::app::App;
+use crate::app::{App, Role};
 use crate::{secrets, store};
 
 /// Entry point for anything that arrived over a transport (WebSocket, the
@@ -21,6 +21,87 @@ pub fn dispatch_untrusted(app: &Arc<App>, method: &str, mut p: Value) -> Result<
         o.remove("_assistant");
     }
     dispatch(app, method, p)
+}
+
+/// [`dispatch_untrusted`] for a connection with a known [`Role`]. The owner
+/// (the shell) gets everything; an app page gets [`app_may_call`]'s list,
+/// with its config confined to `app.*` keys and `app.info` without the path.
+pub fn dispatch_as(app: &Arc<App>, role: Role, method: &str, p: Value) -> Result<Value> {
+    if role == Role::Owner {
+        return dispatch_untrusted(app, method, p);
+    }
+    if !app_may_call(method) {
+        bail!("{method} is only available to the uApp editor, not to app pages");
+    }
+    match method {
+        "config.get" | "config.set" => {
+            let key = need_str(&p, "key")?;
+            if !app_config_key(key) {
+                bail!("apps can only use config keys that start with \"app.\" (got '{key}')");
+            }
+        }
+        // Sub-agents run on the user's AI provider and key. A page can't
+        // start one without asking (they're ungated for the assistant).
+        "tools.call" => {
+            let name = need_str(&p, "name")?;
+            if matches!(name, "agent_run" | "agent_send")
+                && !crate::ai::app_approval_gate(app, name, &p["input"])?
+            {
+                bail!(
+                    "denied: '{name}' was not allowed to run (the user said no, or the prompt timed out)"
+                );
+            }
+        }
+        _ => {}
+    }
+    let mut out = dispatch_untrusted(app, method, p)?;
+    if method == "app.info"
+        && let Some(o) = out.as_object_mut()
+    {
+        o.remove("path");
+    }
+    Ok(out)
+}
+
+/// What an app page may call. Its own data and files, the tools (gated ones
+/// still prompt in the shell, and only the owner can answer), the toolbar and
+/// panels, and its own `app.*` config. Transport messages (`ctx.*`,
+/// `actions.*`, `eval.result`, `log.write`) never reach dispatch at all.
+pub fn app_may_call(method: &str) -> bool {
+    matches!(
+        method,
+        "sql.query"
+            | "sql.exec"
+            | "sql.batch"
+            | "files.list"
+            | "files.read"
+            | "files.write"
+            | "files.delete"
+            | "files.rename"
+            | "files.history"
+            | "files.revert"
+            | "files.fetch"
+            | "files.present"
+            | "import.csv"
+            | "tools.list"
+            | "tools.call"
+            | "app.info"
+            | "app.reload"
+            | "toolbar.get"
+            | "toolbar.set"
+            | "toolbar.setDefault"
+            | "panel.set"
+            | "config.get"
+            | "config.set"
+            | "notify.show"
+            | "ping"
+    )
+}
+
+/// The config keys an app page may read and write: `app.<name>`.
+fn app_config_key(key: &str) -> bool {
+    key.strip_prefix("app.")
+        .is_some_and(|k| !k.is_empty() && key.len() <= 128)
 }
 
 pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
@@ -753,6 +834,23 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 json!({"b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
                       "bytes": bytes.len(), "name": name}),
             )
+        }
+        // A system notification, shown by the shell. App pages are on their
+        // own origin and a cross-origin frame can't be given the browser's
+        // notification permission, so they ask through here.
+        "notify.show" => {
+            let title: String = need_str(&p, "title")?.trim().chars().take(200).collect();
+            if title.is_empty() {
+                bail!("a notification needs a title");
+            }
+            let body: String = p["body"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(1000)
+                .collect();
+            app.notify("notification", json!({"title": title, "body": body}));
+            Ok(json!({"ok": true}))
         }
         // Liveness probe for the shell/app clients (background/resume recovery).
         "ping" => Ok(json!({ "ok": true })),

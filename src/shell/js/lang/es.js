@@ -226,6 +226,7 @@ export const S = {
     unsavedTitle: "Esta app aún no se ha guardado en un archivo",
     unsavedTitleBrowser: "Esta app aún no se ha guardado en un archivo",
     aiSection: "Asistente de IA",
+    notIsolated: "Esta app no está aislada del editor. Abre aquí solo apps de confianza.",
     groupApp: "Esta app (se guarda en el archivo)",
     groupDevice: "Este dispositivo",
     appearance: "Apariencia",

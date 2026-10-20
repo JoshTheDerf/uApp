@@ -1,127 +1,92 @@
 # App isolation
 
-An app's own JavaScript runs on the same origin as the shell that wraps it. This doc describes what that means today, what the October 2026 hardening pass closed anyway, and how to give the app frame an origin of its own. That last part is a design, not something that's been built yet.
+On the desktop and Android, an app's own JavaScript runs on an origin of its own, apart from the uApp editor (the shell) around it. It can use its own data and files and the tools, but it can't reach into the shell, change your AI or MCP setup, read your chats, or answer its own approval prompts. This page describes how that works and where it doesn't apply.
 
-## The trust model today
+## Two origins
 
-The desktop server listens on `http://127.0.0.1:<port>`. The shell is served at `/`, and the app is an iframe of `/app/` on that same origin. Both talk to the core over the same WebSocket (`/ws`), authenticated by the same HttpOnly cookie.
-
-Same origin means the app can do anything the shell can:
-
-- Open its own socket and call any RPC, including `ai.approve`, `ai.answer`, `config.set`, `mcp.add`, `chat.send`, `crypt.set` and `template.apply`.
-- Reach into the shell's DOM through `parent.document`, read what the panels show, and click their buttons.
-- Answer its own approval prompt. When an app calls a gated tool through `uapp.tool()`, the prompt it triggers is just another pending entry, and `ai.approve` with that id is an RPC the app can send too. The prompt is only a real check against an app that plays fair.
-
-That's fine for an app you built yourself. It isn't fine for a `.uapp` someone sent you, which is the whole point of the format. Until the frame is isolated, opening a shared `.uapp` means trusting its author about as much as running a program they sent you (with the difference that it can't leave the sandbox the core gives it: no arbitrary files, no shell commands).
-
-The browser build (`src/wasm.rs`, the demo and `uapp serve --chrome`) has the same shape. The shell, the worker that runs the engine, and the app frame all share one origin, and the service worker serves `/app/` from the copy in the browser.
-
-## What this pass closed
-
-These hold even with the app on the shell's origin:
-
-- **Deny means deny.** An app-triggered tool call that is denied or times out fails with a "denied" error. It used to run anyway.
-- **Secrets moved off the file.** The AI API key, MCP credentials and "always allow" answers live in `<config_dir>/uapp/secrets/<file key>.json` (owner-only, written atomically), keyed by the file's path. A shared file can't arrive pre-approved, a copy doesn't carry your key, and `config.get` returns `has_api_key` / `hasAuth` instead of the values. The key is bound to the provider and base URL it was saved for, and MCP headers to their server URL, so rewriting the config to point somewhere else drops the credential instead of sending it there. The browser build has nowhere else to put them and still keeps them in the file (redacted in `config.get`).
-- **No arbitrary deletes.** `prefs.set` only takes the `shell` preference, and launcher removal only deletes entries the installer could have created.
-- **No arbitrary programs.** `browser.open` takes http(s) and `mailto:` only.
-- **Other localhost origins are refused.** Owner routes and the socket require `Sec-Fetch-Site` to be `same-origin` or `none` and `Origin`, when sent, to be exactly ours. Cookies aren't port-scoped, so a page on another loopback port used to be able to post to `/upload` with our cookie attached.
-- **Framing.** Every response sends `frame-ancestors 'self'`, and the shell document gets a full CSP (`script-src 'self'`, no inline script).
-- **Tokens.** 32 bytes from the OS CSPRNG, compared in constant time, dropped from the address bar once the cookie is set.
-- **SSRF in the fetch tools.** `web.fetch` and `files.fetch` check every resolved address at connect time and follow redirects by hand, one checked hop at a time.
-
-## What's still open
-
-Everything in the first list above, mainly. An app can still:
-
-- approve its own tool prompts (`ai.approve`) or answer `ask_user` questions;
-- change the AI config. Moving the base URL drops the saved key, but with `provider: "local"` no key is needed, so the app can still send your chats (and with them your files and tables) to a server it picks;
-- add an MCP server at any URL, local ones included. Listing its tools makes the core POST JSON to that URL, which is a request into your network that the fetch tools would have refused. Local endpoints are allowed on purpose, since a local Ollama or MCP server is a normal setup the user configured. The only real fix is that app code can't configure them, which is what isolation gives you;
-- read chat history and everything else the shell can see.
-
-## Design: the app frame on its own origin
-
-### Origins
-
-Serve the app frame from a second origin that shares nothing with the shell's:
+The server listens on `127.0.0.1:<port>` and `[::1]:<port>` and tells requests apart by their `Host`:
 
 | | Shell | App frame |
 |---|---|---|
 | Origin | `http://127.0.0.1:<port>` | `http://localhost:<port>` |
-| Cookie | `uapp_t_<port>` (owner token) | `uapp_a_<port>` (app token) |
+| Token | owner token (`?t=`, cookie `uapp_t_<port>`) | app token (`?a=`, cookie `uapp_a_<port>`) |
+| Routes | `/` (the shell), `/shell/*`, `/upload`, the downloads, `/ws` | `/` (the app), `/app/*`, root-level files, `/uapp.js`, `/scratch/`, `/ws` |
 
-`localhost` and `127.0.0.1` are different sites, not just different origins, so a `SameSite=Strict` cookie set by one is never sent with requests from the other. Both count as secure contexts, so camera, microphone and the like keep working.
+`localhost` and `127.0.0.1` are different sites, so the owner cookie (`SameSite=Strict`) never goes along with the app's requests and neither page can script the other. Both are secure contexts, so camera, microphone and the like keep working.
 
-Two things to handle:
+The shell's routes 404 on the app origin, and the app's root-level files and the scratch page 404 on the shell's. The shell can still read the archive under `/app/` on its own origin (file previews, downloads), but HTML and SVG from there are served with `sandbox`, so a page opened that way never runs as the shell. "Open in new tab" opens the app origin instead.
 
-- `localhost` can resolve to `::1`. The server should listen on `[::1]:<port>` as well as `127.0.0.1:<port>`, or the shell should probe and fall back.
-- A second port on 127.0.0.1 would also be a separate origin, but it's the same site, so the owner cookie would ride along with the app's requests. The checks added in this pass would refuse them, but `localhost` doesn't depend on getting those checks right.
+### Recognizing the app's requests
 
-Per-app subdomains (`<app_id>.localhost:<port>`) would separate apps from each other as well as from the shell. Chromium and Firefox resolve `*.localhost` to loopback themselves. WebKitGTK and Android's WebView need checking before relying on it.
+The shell loads the frame cross-site, so that load (and every reload the shell starts) carries `?a=<app token>`, and app pages keep it in their address. Only a 64-digit hex value counts, so an app's own `?a=` is left alone and the token goes after it.
 
-The host check (`host_is_local`) already accepts `localhost`. The router needs to know which origin a request was made to, from its `Host`, and serve shell routes only on the shell origin and app routes only on the app origin.
+- **With the token, the whole archive.** It's on the URL, in the `Referer` of the page's own requests (app pages are served with `Referrer-Policy: same-origin`, so other sites never see it), or in the app cookie. uapp.js keeps it on the URL across `history.pushState` / `replaceState`, adds it to same-origin worker script URLs (a worker's requests send the script's URL as their `Referer`), and puts it back on a page reached without it, from sessionStorage or by asking the shell. A navigation that arrives without it but with a token-bearing `Referer` (a plain link) is redirected to the same URL with `?a=` added.
+- **Without it, only the app's code.** Some of the app's own requests can't carry it: `url()`s inside a stylesheet, nested module imports, anything under `referrerpolicy="no-referrer"`. They're same-origin, which `Sec-Fetch-Site` says (or a same-origin `Referer` on an engine too old to send that header; `none` is a typed-in URL). A browser page elsewhere can't fake that, but any local program can, so these requests only get files that resolve under `app/` (plus `uapp.js`). Anything that lands in `data/`, directly, through `/app/data/…` or as a root-level name's fallback, is a 403. App pages themselves are code, so they load either way.
+- **The socket** needs the token and the app's own `Origin`.
+- The app cookie is set on the `?a=` load, but browsers drop `SameSite=Strict` cookies in a cross-site frame (and several block third-party cookies outright), so it mostly helps non-browser clients and a page opened in a tab of its own.
 
-### Tokens and what each one may call
+The shell never copies the token into its own address bar or history.
 
-The server mints an app token per session next to the owner token. The shell loads the frame as `http://localhost:<port>/app/?a=<app token>`; that response sets the app cookie (HttpOnly, `SameSite=Strict`, scoped to the app origin) and `uapp.js` drops `?a=` from the frame's URL, as `core.js` now does for `?t=`.
+App responses carry `Content-Security-Policy: frame-ancestors 'self' http://127.0.0.1:<port>`, and the shell's `frame-src` names the app origin.
 
-Each WebSocket connection is tagged with the token that opened it, and `rpc::dispatch` checks the method against the connection's role. An app connection gets an allowlist:
+### When the app stays on the shell's origin
 
-- `sql.query`, `sql.exec`, `sql.batch` (the core's authorizer keeps them off `uapp_*` and `sqlar`);
-- `files.*` on the archive, `import.csv`;
-- `tools.list`, `tools.call` (the approval prompt shows in the shell, and only an owner connection can answer it);
-- action registration, invoke replies, `eval.result`, console forwarding;
-- `app.info` (minus `path`), `toolbar.*`, `panel.set`, `files.present`, `app.reload`, `ping`;
-- `browser.open`, behind a prompt.
+If `[::1]:<port>` is taken by another program, `localhost` could reach that program (with the app token) instead of us, so the app shares the shell's origin for that session. The same goes for a machine without IPv6 where `localhost` doesn't resolve to 127.0.0.1. (No IPv6 at all is fine otherwise: `localhost` is 127.0.0.1 then.) Settings says when the app isn't isolated.
 
-Everything else (`ai.*`, `chat.*`, `sessions.*`, `config.*`, `mcp.*`, `prefs.*`, `crypt.set`, `template.*`, `app.save`, `app.openFile`, `app.quit`, shortcuts, `win.*`) is owner-only. Events get the same split: an app connection receives `changes`, `toolbar`, `panel`, `reload` and its own invocations, never `approval`, `question` or chat events.
+## What an app connection may call
 
-`config.set` needs a closer look before it goes owner-only. `toolbar.setDefault` already covers the one config write apps are documented to make, but app code in the wild may use `config.*` for its own settings. A per-app namespace (`app.<key>`) on the allowlist would keep that working.
+Each socket has a role, owner or app, from the token that opened it, and `rpc::dispatch_as` checks app connections against `rpc::app_may_call`:
 
-### Replacing same-origin reach with postMessage
+- `sql.query`, `sql.exec`, `sql.batch` (the SQL sandbox still applies);
+- `files.*` and `import.csv`;
+- `tools.list` and `tools.call`. A gated tool's prompt shows in the shell, and only an owner connection can answer it. `agent_run` and `agent_send` ask first too, since they run on your AI provider;
+- `app.info` (without the file's `path`), `app.reload`, `toolbar.*`, `panel.set` and `ping`;
+- `config.get` and `config.set` on `app.<name>` keys;
+- `notify.show`.
 
-The shell reaches into the frame in a few places. Each becomes a message, with both sides checking `event.origin` against the one origin they expect.
+The transport messages (`ctx.*`, `actions.*`, `eval.result`, `log.write`) work as before. Everything else is owner-only: `ai.*`, `chat.*`, `sessions.*`, the rest of `config.*`, `mcp.*`, `prefs.*`, `crypt.set`, `template.*`, `app.save`, `app.openFile`, `app.quit`, `app.rename`, `drop.ingest`, `eval.run`, `console.read`, `browser.open`, `web.*`, the launcher shortcuts and `win.*`.
 
-- **run_js in the app context.** Already independent of the parent: `uapp.js` in the frame runs `eval.invoke` from its own socket and replies with `eval.result`. It moves to the app socket unchanged.
-- **Console capture.** Also already on the frame's own socket.
-- **URL mirroring** (`main.js`, hosted-site mode). The frame posts `{__uappNav: href}` on load, `hashchange` and `popstate`, and the shell posts back `{__uappGo: path}` for back/forward instead of setting `contentWindow.location`. The frame's `src` can still be set from outside for reloads.
-- **External link clicks** (`main.js`). `uapp.js` intercepts clicks on links to other origins and posts `{__uappOpen: href}`; the shell decides between `browser.open` and a top-level navigation as it does now.
-- **Toolbar shortcut.** `toolbar-visibility.js` listens for keys in `contentDocument`. Instead, `uapp.js` listens for the configured shortcut and posts `{__uappToolbar: {action: "toggle"}}`, the message it already sends for `uapp.toolbar.*`. The shell sends the shortcut to the frame when it loads and when it changes.
-- **The `Sec-Fetch-Dest: iframe` fallback** in `shell()` (a root `href="/"` followed inside the frame) goes away: on the app origin, `/` simply is the app.
+Events are split the same way. App connections get `changes`, `present`, `toolbar`, `panel` and `reload`, plus the invocations addressed to them. Approval prompts, questions, chat and the rest go to owner connections only.
 
-### Permissions and the iframe
+## The frame and the shell talk with postMessage
 
-A cross-origin frame only gets powerful features its embedder delegates. The `allow` attribute on `#appframe` already names camera, microphone, display capture, geolocation and clipboard read, and those apply to the frame's own origin by default, so nothing changes there. Notifications have no Permissions-Policy token and can't be delegated to a cross-origin frame at all, so they would go through an RPC that the shell shows.
+Both sides check `event.origin` against exactly the other's origin, and the shell also requires the sender to be inside its own frames (`src/shell/js/frame.js` and `uapp.js`).
 
-The native prompts in `permissions.rs` file grants per app id. The webviews report the requesting origin, which becomes the app origin, and the broker should accept that origin for the current app (and nothing else).
+- **`__uappNav`** (frame to shell): the page's URL, on load, `hashchange` and `popstate`. The shell keeps it for reloads, which go through `contentWindow.location.replace()` with the token (allowed across origins, and it doesn't add history entries). On a hosted site it also mirrors the address bar, and back/forward drive the frame the same way.
+- **`__uappShell`** (shell to frame): the toolbar shortcut, the panel shortcuts and the link policy. uapp.js matches the shortcuts itself, the toolbar's in the capture phase and the panels' and Esc only when the app didn't use the key, and sends hits back as `__uappToolbar`.
+- **`__uappToolbar`** (frame to shell): `uapp.toolbar.*`, `uapp.panel.*` and the forwarded shortcuts. `state` is answered with `__uappToolbarState`.
+- **`__uappOpen`** (frame to shell): a click on a link to another site. The native window opens it in your browser, and a hosted site's editor leaves for it.
+- **`__uappToken`**: asks for the token when sessionStorage lost it. The shell answers with `__uappTokenIs`.
+- **`__uappStorage`**: the localStorage handoff below.
 
-### Headers on the app origin
+Either page may be ready first, so the frame says hello on load and again when it first hears from the shell, and the shell sends its config to the frame when it starts. On a hosted site the frame can also land on one of the server's own pages, which has no uapp.js; that frame shares the shell's origin, so the shell reads it directly.
 
-- `Content-Security-Policy: frame-ancestors http://127.0.0.1:<port>`, so only our shell can frame the app.
-- The shell's `frame-src` names the app origin.
-- No script policy for the app itself; it runs what its author wrote.
+run_js and console capture never went through the parent: uapp.js answers `eval.invoke` and forwards the console on its own socket. The scratch frame (run_js's "scratchpad" context) is on the app origin, so code the assistant writes there has the app's role.
 
-### Data that moves with the origin
+## Permissions
 
-`localStorage`, IndexedDB and cookies an app set belong to the old origin and won't be visible on the new one. Most apps keep their data in the `.uapp`, but some will have used `localStorage`. A one-time handoff would cover them: on first load after the switch, the shell (still on the old origin) reads the old origin's storage for that app and posts it to the frame, which writes it into its own.
+The frame's `allow=` delegates camera, microphone, display capture, geolocation and clipboard read to the app origin. The broker in `permissions.rs` knows the open app's two origins and refuses a request from any other origin without asking. WebView2 reports the requesting origin. WebKitGTK doesn't, so on Linux a request counts as the open app's (the shell never asks for anything, and only the app frame gets these delegated). macOS, iOS and Android are left to the OS, as before.
 
-### The browser build
+Notifications can't be delegated to a cross-origin frame, so apps call `uapp.notify(title, {body})` (the `notify.show` RPC) and the shell shows it, as a system notification when it's allowed and as a toast otherwise.
 
-The wasm build is a static bundle on one origin: the shell, the worker running the engine and the service worker that serves `/app/` from the browser's copy. There is no server to mint tokens or tag sockets, and a sandboxed iframe (`sandbox` without `allow-same-origin`) gets an opaque origin that no service worker controls, so the app's own files wouldn't load.
+## Data that moved with the origin
 
-What works is a second origin the deployer provides, for example `apps.example.com` next to `example.com`, serving the same bundle:
+localStorage an app wrote used to land in the shell's storage. On the first load with the app on its own origin, the shell hands every key that isn't its own (`uapp.*`) to the frame, which writes them and reloads once, and then the shell deletes them. The port is random unless you pass `--port`, so this only finds what an earlier session on the same port left. IndexedDB and cookies aren't moved.
 
-- The app frame loads from the app origin, where a service worker serves `/app/` like today. It gets the files by asking its page, which relays to the shell over `postMessage` (the frame's `uapp.js` already speaks `postMessage` to the shell in wasm mode).
-- The worker on the shell origin applies the same owner/app allowlist to messages by the frame they came from, which it can tell apart there, unlike sockets on the desktop.
-- Without a configured app origin, the build falls back to today's single-origin mode, and the shell should say so (for example, in Settings: "This app isn't isolated from the editor").
+## Where it doesn't apply
 
-This is the bigger part of the work and can come after the desktop server, where the change is mostly in `server.rs`, `rpc.rs` and the frame plumbing in `main.js` and `uapp.js`.
+- **The browser build and `uapp serve`** (`src/wasm.rs`, the demo, and a served site's editor) keep everything on one origin. There's no server to mint tokens or tag sockets, and a sandboxed frame gets an opaque origin that no service worker controls, so the app's files wouldn't load. Settings there says "This app isn't isolated from the editor. Only open apps you trust here." A second origin the deployer provides (`apps.example.com` next to `example.com`) would fix it; see [web-build-isolation.md](web-build-isolation.md).
+- **Apps from each other.** Every app on a port shares `localhost:<port>`. Per-app subdomains (`<app id>.localhost`) would separate them, but WebKitGTK and Android's WebView need checking first.
+- **A tab left open after its server exits.** If a later server for another app gets the same port, that old page can read the new app's code (not its data) with same-origin requests. It can't open a socket, since the token changed. Ports are random, so this takes bad luck and a browser tab (the native window closes with its server).
+- **Data files from a stylesheet or a no-referrer request.** `background: url(/data/x.png)` in a CSS file, or a `/data/` request under `referrerpolicy="no-referrer"`, has no token and gets a 403. Load those from the page itself.
 
-### Order of work
+## Also in place
 
-1. Server: listen on `[::1]` too, tell shell and app origins apart by `Host`, app token and cookie, role on each connection, the RPC and event allowlist.
-2. `uapp.js` and the shell: the `postMessage` replacements above, the frame loaded from the app origin.
-3. Permissions: accept the app origin in the native prompts.
-4. `localStorage` handoff.
-5. The browser build's second origin.
+These hold whichever origin the app is on:
 
-Until step 1 ships, the practical advice for users stays the same: open a `.uapp` from someone you don't trust the way you'd run a program from them.
+- An app-triggered tool call that is denied or times out fails with a "denied" error.
+- The AI API key, MCP credentials and "always allow" answers live in `<config_dir>/uapp/secrets/<file key>.json`, not in the file, and `config.get` returns `has_api_key` / `hasAuth` instead of the values. A key only goes to the provider and base URL it was saved for. (The browser build keeps them in its copy of the file, redacted in `config.get`.)
+- `prefs.set` only takes the `shell` preference, launcher removal only deletes entries uApp made, and `browser.open` takes http(s) and `mailto:` only.
+- Owner routes and the owner socket require `Sec-Fetch-Site` to be `same-origin` or `none` and `Origin`, when sent, to be exactly the shell's, so a page on another loopback port can't use the owner cookie.
+- Tokens are 32 bytes from the OS CSPRNG, compared in constant time and dropped from the address bar once used.
+- `web.fetch` and `files.fetch` check every resolved address at connect time and follow redirects one checked hop at a time.

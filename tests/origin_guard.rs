@@ -187,3 +187,23 @@ fn every_response_refuses_foreign_framing() {
         );
     }
 }
+
+#[test]
+fn app_origin_pages_may_only_be_framed_by_our_shell() {
+    let (port, _dir) = spawn();
+    // The app's own same-origin request (what its page sends for a script).
+    let (st, head) = raw(
+        port,
+        &format!(
+            "GET /uapp.js HTTP/1.1\r\nHost: localhost:{port}\r\nSec-Fetch-Site: same-origin\r\n\
+             Connection: close\r\n\r\n"
+        ),
+    );
+    assert_eq!(st, 200, "{head}");
+    assert!(
+        head.to_ascii_lowercase().contains(&format!(
+            "content-security-policy: frame-ancestors 'self' http://127.0.0.1:{port}"
+        )),
+        "{head}"
+    );
+}

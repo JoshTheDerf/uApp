@@ -75,6 +75,15 @@ if (info.reused) { console.error("FAIL: a uapp from an earlier run still has the
       headers: { Cookie: `uapp_t_${this.port}=${this.token}`, ...headers },
     });
   }
+  // The app's own origin, where root-absolute references resolve. Its token
+  // is in the shell's frame src.
+  async appFetch(path) {
+    if (!this.appToken) {
+      const html = await (await this.fetch("/")).text();
+      this.appToken = new URL(/id="appframe" src="([^"]+)"/.exec(html)[1]).searchParams.get("a");
+    }
+    return fetch(`http://localhost:${this.port}${path}`, { headers: { Cookie: `uapp_a_${this.port}=${this.appToken}` } });
+  }
   async stop() { try { this.ws?.close(); } catch {} this.proc.kill("SIGINT"); await sleep(300); this.proc.kill("SIGKILL"); }
 }
 
@@ -226,9 +235,9 @@ console.log("\n[6] the archive's two roots: app/ (code) and data/ (user content)
   const legacy = await A.rpc("files.read", { name: "/css/site.css" });
   ok(legacy.name === "app/css/site.css" && legacy.text === "body{}",
     "a root-absolute reference resolves into app/", legacy.name);
-  const served = await A.fetch("/css/site.css");
+  const served = await A.appFetch("/css/site.css");
   ok(served.status === 200 && (await served.text()) === "body{}",
-    "and it is still served at the root path", served.status);
+    "and it is still served at the root path (on the app's origin)", served.status);
 }
 
 console.log("\n[7] folder rename moves everything under it");
