@@ -49,19 +49,31 @@ fn spawn(dir: &std::path::Path, coi: bool, open: Option<&str>) -> String {
     format!("http://127.0.0.1:{}", rx.recv().unwrap())
 }
 
+/// Every status comes back as a response (ureq's default makes a 4xx an
+/// error), so a negative check reads what was really served.
+fn agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    )
+}
 fn get(url: &str) -> (u16, Vec<(String, String)>, String) {
-    let r = match ureq::get(url).call() {
+    let r = match agent().get(url).call() {
         Ok(r) => r,
-        Err(ureq::Error::Status(_, r)) => r,
         Err(e) => panic!("GET {url}: {e}"),
     };
-    let status = r.status();
+    let status = r.status().as_u16();
     let headers: Vec<(String, String)> = r
-        .headers_names()
-        .into_iter()
-        .map(|n| (n.to_lowercase(), r.header(&n).unwrap_or("").to_string()))
+        .headers()
+        .iter()
+        .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    (status, headers, r.into_string().unwrap_or_default())
+    (
+        status,
+        headers,
+        r.into_body().read_to_string().unwrap_or_default(),
+    )
 }
 fn header<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
     h.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
@@ -101,10 +113,11 @@ fn serves_the_bundle_with_index_and_launcher_and_nothing_else() {
     let (st, _, body2) = get(&format!("{base}/index.html"));
     assert_eq!(st, 200);
     assert_eq!(body, body2);
-    let r = ureq::get(&format!("{base}/"))
-        .set("If-None-Match", &etag)
+    let r = agent()
+        .get(&format!("{base}/"))
+        .header("If-None-Match", &etag)
         .call();
-    assert_eq!(r.as_ref().map(|r| r.status()).ok(), Some(304), "{r:?}");
+    assert_eq!(r.map(|r| r.status().as_u16()).ok(), Some(304));
 
     // The bundle, launcher included; non-HTML gets no COI headers.
     let (st, h, body) = get(&format!("{base}/launcher.uapp"));
@@ -123,8 +136,8 @@ fn serves_the_bundle_with_index_and_launcher_and_nothing_else() {
     assert_eq!(get(&format!("{base}/app/index.html")).0, 404);
     assert_eq!(get(&format!("{base}/ws")).0, 404);
     // Writes have no home here: publishing goes to wherever the archive came from.
-    let r = ureq::put(&format!("{base}/site.uapp")).send_bytes(b"x");
-    assert!(matches!(r, Err(ureq::Error::Status(405, _))), "{r:?}");
+    let r = ureq::put(&format!("{base}/site.uapp")).send(b"x");
+    assert!(matches!(r, Err(ureq::Error::StatusCode(405))), "{r:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

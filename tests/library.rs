@@ -59,6 +59,15 @@ fn sample_app(dir: &std::path::Path) -> Vec<u8> {
     bytes
 }
 
+/// Every status comes back as a response (ureq's default makes a 4xx an
+/// error), so a negative check reads what was really served.
+fn agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    )
+}
 fn req(
     method: &str,
     url: &str,
@@ -66,30 +75,29 @@ fn req(
     if_match: Option<&str>,
     body: Option<&[u8]>,
 ) -> (u16, Vec<(String, String)>, Vec<u8>) {
-    let mut r = ureq::request(method, url);
+    let mut r = ureq::http::Request::builder().method(method).uri(url);
     if let Some(t) = token {
-        r = r.set("Authorization", &format!("Bearer {t}"));
+        r = r.header("Authorization", format!("Bearer {t}"));
     }
     if let Some(m) = if_match {
-        r = r.set("If-Match", m);
+        r = r.header("If-Match", m);
     }
     let resp = match body {
-        Some(b) => r.send_bytes(b),
-        None => r.call(),
+        Some(b) => agent().run(r.body(b).unwrap()),
+        None => agent().run(r.body(()).unwrap()),
     };
     let resp = match resp {
         Ok(r) => r,
-        Err(ureq::Error::Status(_, r)) => r,
         Err(e) => panic!("{method} {url}: {e}"),
     };
-    let status = resp.status();
+    let status = resp.status().as_u16();
     let headers: Vec<(String, String)> = resp
-        .headers_names()
-        .into_iter()
-        .map(|n| (n.to_lowercase(), resp.header(&n).unwrap_or("").to_string()))
+        .headers()
+        .iter()
+        .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
     let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut resp.into_reader(), &mut out).unwrap();
+    std::io::Read::read_to_end(&mut resp.into_body().into_reader(), &mut out).unwrap();
     (status, headers, out)
 }
 fn header<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -199,8 +207,8 @@ fn publish_fetch_conflict_delete() {
     let _ = std::fs::remove_file(&check);
 
     // Validators: a matching one is a 304; the listing carries the same ETag.
-    let r = ureq::get(&url).set("If-None-Match", &etag).call();
-    assert_eq!(r.as_ref().map(|r| r.status()).ok(), Some(304), "{r:?}");
+    let r = agent().get(&url).header("If-None-Match", &etag).call();
+    assert_eq!(r.map(|r| r.status().as_u16()).ok(), Some(304));
     let (_, _, b) = req("GET", &format!("{base}/index.json"), None, None, None);
     let apps = json(&b)["apps"].clone();
     assert_eq!(apps.as_array().unwrap().len(), 1);

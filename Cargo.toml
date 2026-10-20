@@ -66,14 +66,17 @@ tauri-plugin-dialog = { version = "2", optional = true }
 rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl", "backup", "functions", "hooks", "limits"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util"] }
-ureq = { version = "2", features = ["tls", "json"] }
+# `~`: the SSRF guard in net.rs uses ureq's `unversioned` resolver and
+# transport API, which can change in a minor release.
+ureq = "~3.4"
 whoami = "1"
 open = "5"
 fs2 = "0.4"
 # Session and publish tokens come from the OS CSPRNG.
 getrandom = "0.2"
-# Redirects of app/model-chosen fetches are followed by hand (net.rs), which
-# needs relative Location resolution. Already in the tree through ureq.
+# net.rs parses URLs with it (WHATWG rules) before ureq sees them, and follows
+# redirects of app/model-chosen fetches by hand, which needs relative Location
+# resolution.
 url = "2"
 futures-util = "0.3"
 dirs = "6"

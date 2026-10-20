@@ -50,55 +50,75 @@ fn spawn(path: &std::path::Path, opts: PublicOpts) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-fn status_of(r: Result<ureq::Response, ureq::Error>, url: &str) -> u16 {
+/// Every status comes back as a response (ureq's default makes a 4xx an
+/// error), so a negative check reads what was really served.
+fn agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    )
+}
+fn status_of(r: Result<ureq::http::Response<ureq::Body>, ureq::Error>, url: &str) -> u16 {
     match r {
-        Ok(r) => r.status(),
-        Err(ureq::Error::Status(s, _)) => s,
+        Ok(r) => r.status().as_u16(),
         Err(e) => panic!("request to {url} failed: {e}"),
     }
 }
 fn status(url: &str) -> u16 {
-    status_of(ureq::get(url).call(), url)
+    status_of(agent().get(url).call(), url)
 }
 fn body(url: &str) -> String {
-    ureq::get(url).call().unwrap().into_string().unwrap()
+    ureq::get(url)
+        .call()
+        .unwrap()
+        .into_body()
+        .read_to_string()
+        .unwrap()
 }
-/// The body whatever the status (ureq hands a 4xx back as an error), so a
-/// negative check reads what was really served.
+/// The body whatever the status.
 fn body_or_empty(url: &str) -> String {
-    match ureq::get(url).call() {
-        Ok(r) | Err(ureq::Error::Status(_, r)) => r.into_string().unwrap_or_default(),
+    match agent().get(url).call() {
+        Ok(r) => r.into_body().read_to_string().unwrap_or_default(),
         Err(_) => String::new(),
     }
+}
+fn header(r: &ureq::http::Response<ureq::Body>, name: &str) -> Option<String> {
+    Some(r.headers().get(name)?.to_str().ok()?.to_string())
 }
 /// GET as the site owner: `Authorization: Bearer`, the way a script or the
 /// CLI would (`?t=` only opens the shell on a public site).
 fn owner_bytes(url: &str) -> Vec<u8> {
     let mut out = Vec::new();
     let resp = ureq::get(url)
-        .set("Authorization", &format!("Bearer {TOKEN}"))
+        .header("Authorization", &format!("Bearer {TOKEN}"))
         .call()
         .unwrap();
-    std::io::Read::read_to_end(&mut resp.into_reader(), &mut out).unwrap();
+    std::io::Read::read_to_end(&mut resp.into_body().into_reader(), &mut out).unwrap();
     out
 }
 fn bytes(url: &str) -> Vec<u8> {
     let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut ureq::get(url).call().unwrap().into_reader(), &mut out)
-        .unwrap();
+    std::io::Read::read_to_end(
+        &mut ureq::get(url).call().unwrap().into_body().into_reader(),
+        &mut out,
+    )
+    .unwrap();
     out
 }
 fn put(url: &str, token: Option<&str>, if_match: Option<&str>, body: &[u8]) -> (u16, String) {
-    let mut req = ureq::put(url);
+    let mut req = agent().put(url);
     if let Some(t) = token {
-        req = req.set("Authorization", &format!("Bearer {t}"));
+        req = req.header("Authorization", &format!("Bearer {t}"));
     }
     if let Some(m) = if_match {
-        req = req.set("If-Match", m);
+        req = req.header("If-Match", m);
     }
-    match req.send_bytes(body) {
-        Ok(r) => (r.status(), r.into_string().unwrap_or_default()),
-        Err(ureq::Error::Status(s, r)) => (s, r.into_string().unwrap_or_default()),
+    match req.send(body) {
+        Ok(r) => (
+            r.status().as_u16(),
+            r.into_body().read_to_string().unwrap_or_default(),
+        ),
         Err(e) => panic!("PUT {url} failed: {e}"),
     }
 }
@@ -192,19 +212,20 @@ fn serves_pages_at_real_urls() {
     // Byte ranges, so audio/video on a site can seek.
     let full = bytes(&format!("{base}/posts/hello.html"));
     let r = ureq::get(&format!("{base}/posts/hello.html"))
-        .set("Range", "bytes=2-9")
+        .header("Range", "bytes=2-9")
         .call()
         .unwrap();
     assert_eq!(r.status(), 206);
     assert_eq!(
-        r.header("content-range"),
-        Some(format!("bytes 2-9/{}", full.len()).as_str())
+        header(&r, "content-range"),
+        Some(format!("bytes 2-9/{}", full.len()))
     );
     let mut part = Vec::new();
-    std::io::Read::read_to_end(&mut r.into_reader(), &mut part).unwrap();
+    std::io::Read::read_to_end(&mut r.into_body().into_reader(), &mut part).unwrap();
     assert_eq!(part, full[2..=9]);
-    let past = ureq::get(&format!("{base}/posts/hello.html"))
-        .set("Range", &format!("bytes={}-", full.len() + 10))
+    let past = agent()
+        .get(&format!("{base}/posts/hello.html"))
+        .header("Range", &format!("bytes={}-", full.len() + 10))
         .call();
     assert_eq!(status_of(past, "range past the end"), 416);
     // The viewport meta is injected; `/uapp.js` (the privileged console
@@ -221,11 +242,12 @@ fn serves_pages_at_real_urls() {
     );
     // Public pages carry validators; a matching If-None-Match is a 304.
     let r = ureq::get(&format!("{base}/")).call().unwrap();
-    let etag = r.header("etag").unwrap().to_string();
+    let etag = header(&r, "etag").unwrap();
     assert_eq!(
         status_of(
-            ureq::get(&format!("{base}/"))
-                .set("If-None-Match", &etag)
+            agent()
+                .get(&format!("{base}/"))
+                .header("If-None-Match", &etag)
                 .call(),
             &base
         ),
@@ -257,11 +279,12 @@ fn never_serves_user_data_and_refuses_privileged_routes_without_the_token() {
     }
     // A plain GET isn't a WebSocket upgrade (400); with the upgrade headers
     // but no token it is refused before the handshake.
-    let ws = ureq::get(&format!("{base}/ws"))
-        .set("Connection", "Upgrade")
-        .set("Upgrade", "websocket")
-        .set("Sec-WebSocket-Version", "13")
-        .set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+    let ws = agent()
+        .get(&format!("{base}/ws"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
         .call();
     assert_eq!(status_of(ws, "/ws"), 403);
     assert_eq!(
@@ -388,9 +411,9 @@ fn publish_replaces_content_and_keeps_secrets() {
     let base = spawn(&path, PublicOpts::default());
     let url = format!("{base}/site.uapp");
     let r = ureq::get(&url).call().unwrap();
-    let etag = r.header("etag").unwrap().to_string();
+    let etag = header(&r, "etag").unwrap();
     let mut original = Vec::new();
-    std::io::Read::read_to_end(&mut r.into_reader(), &mut original).unwrap();
+    std::io::Read::read_to_end(&mut r.into_body().into_reader(), &mut original).unwrap();
 
     // Edit the copy: change a page, add one, drop one, change the site's own
     // table, and (as a hostile copy might) plant a config key and a data file.
@@ -439,9 +462,9 @@ fn publish_replaces_content_and_keeps_secrets() {
     assert_eq!(status(&format!("{base}/about/")), 404);
     // The archive moved with it (new ETag) and carries the new rows.
     let r2 = ureq::get(&url).call().unwrap();
-    assert_ne!(r2.header("etag").unwrap(), etag);
+    assert_ne!(header(&r2, "etag").unwrap(), etag);
     let mut fresh = Vec::new();
-    std::io::Read::read_to_end(&mut r2.into_reader(), &mut fresh).unwrap();
+    std::io::Read::read_to_end(&mut r2.into_body().into_reader(), &mut fresh).unwrap();
     let out = tmp("fresh.uapp");
     std::fs::write(&out, &fresh).unwrap();
     let c = rusqlite::Connection::open(&out).unwrap();
@@ -517,9 +540,9 @@ fn publish_refuses_a_stale_copy_and_junk() {
     );
     let url = format!("{base}/site.uapp");
     let r = ureq::get(&url).call().unwrap();
-    let etag = r.header("etag").unwrap().to_string();
+    let etag = header(&r, "etag").unwrap();
     let mut original = Vec::new();
-    std::io::Read::read_to_end(&mut r.into_reader(), &mut original).unwrap();
+    std::io::Read::read_to_end(&mut r.into_body().into_reader(), &mut original).unwrap();
     let now = (store::now_ms() / 1000) as i64;
 
     // First publisher wins...
