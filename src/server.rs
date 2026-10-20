@@ -209,7 +209,6 @@ pub enum Visitor {
     Reader,
 }
 
-#[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<App>> for Owner {
     type Rejection = Response;
     async fn from_request_parts(
@@ -226,7 +225,6 @@ impl axum::extract::FromRequestParts<Arc<App>> for Owner {
     }
 }
 
-#[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
     type Rejection = Response;
     async fn from_request_parts(
@@ -849,16 +847,16 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
         loop {
             tokio::select! {
                 ev = events.recv() => match ev {
-                    Ok(v) => { if tx.send(Message::Text(v.to_string())).await.is_err() { break; } }
+                    Ok(v) => { if tx.send(Message::Text(v.to_string().into())).await.is_err() { break; } }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => break,
                 },
                 resp = out_rx.recv() => match resp {
-                    Some(s) => { if tx.send(Message::Text(s)).await.is_err() { break; } }
+                    Some(s) => { if tx.send(Message::Text(s.into())).await.is_err() { break; } }
                     None => break,
                 },
                 _ = ping.tick() => {
-                    if tx.send(Message::Ping(vec![])).await.is_err() { break; }
+                    if tx.send(Message::Ping(Default::default())).await.is_err() { break; }
                 }
             }
         }
@@ -1314,7 +1312,7 @@ pub fn router(app: Arc<App>) -> Router {
             }),
         )
         .route(
-            "/shell/*file",
+            "/shell/{*file}",
             get(
                 |axum::extract::Path(file): axum::extract::Path<String>| async move {
                     match SHELL_MODULES.iter().find(|(name, _)| *name == file) {
@@ -1345,7 +1343,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/template.uapp", get(template_download))
         .route("/download.uapp", get(app_download))
         .route("/app/", get(app_root))
-        .route("/app/*path", get(app_file))
+        .route("/app/{*path}", get(app_file))
         .route("/ws", get(ws_route))
         .route(
             "/site.uapp",
