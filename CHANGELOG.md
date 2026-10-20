@@ -39,7 +39,12 @@ Notable changes to uApp. The format is based on [Keep a Changelog](https://keepa
 - Browser build: saves happen at most 5 seconds after a change and when the tab is hidden, the page asks before you leave with unsaved changes, and a second tab waits for the first to save before it takes over a document.
 - Browser build: a page left open across a deploy says "uApp was updated" and offers to reload.
 - Building needs Rust 1.88 or newer.
-- AI chat: see below.
+- The AI chat defaults to Claude Opus 5.5 and shows a summary of its thinking. There's a provider for any OpenAI-compatible server, with a context size setting.
+- Manual mode asks before the assistant searches the web or fetches a URL, and each chat keeps its own mode.
+- Long chats keep working. Older tool output is trimmed, the chat is summarized again whenever it outgrows its budget, and only images from the last few messages are sent again. Images over 3.75 MB or 8000 px are refused when you attach them.
+- Stop interrupts a reply in progress, and the assistant says so when it stops after 40 steps.
+- Provider errors worth retrying (an overloaded server, a reply cut off mid-stream) are retried with backoff.
+- MCP tool lists are cached for a few minutes, so a server that's down no longer holds up every message.
 
 ### Fixed
 
