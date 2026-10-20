@@ -328,6 +328,7 @@ mod native_serve {
                 }
             }
 
+            let stop = crate::shutdown_signal();
             if let Some(or) = on_ready {
                 or(&url, port, false);
             }
@@ -343,9 +344,10 @@ mod native_serve {
             let shutdown_app = app.clone();
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
-                    let _ = tokio::signal::ctrl_c().await;
+                    stop.await;
                     shutdown_app.graceful_cleanup();
                     eprintln!("uapp: shutting down");
+                    crate::exit_soon();
                 })
                 .await?;
             Ok::<(), anyhow::Error>(())
@@ -433,6 +435,7 @@ mod native_serve {
 
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(async move {
+        let stop = crate::shutdown_signal();
         let listener = tokio::net::TcpListener::bind((bind, port)).await?;
         let addr = listener.local_addr()?;
         app.port.store(addr.port(), std::sync::atomic::Ordering::Relaxed);
@@ -468,8 +471,10 @@ mod native_serve {
         let shutdown_app = app.clone();
         axum::serve(listener, server::router(app))
             .with_graceful_shutdown(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                stop.await;
                 shutdown_app.graceful_cleanup();
+                eprintln!("uapp: shutting down");
+                crate::exit_soon();
             })
             .await?;
         Ok::<_, anyhow::Error>(())
@@ -499,6 +504,7 @@ mod native_serve {
         });
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(async move {
+        let stop = crate::shutdown_signal();
         let listener = tokio::net::TcpListener::bind((bind, port)).await?;
         let addr = listener.local_addr()?;
         eprintln!("uapp: serving the browser build ({}) at http://{}/", chrome_dir.display(), addr);
@@ -507,7 +513,10 @@ mod native_serve {
             None => eprintln!("uapp: a bare visit opens the launcher; ?open=<url> opens an archive from a URL"),
         }
         axum::serve(listener, webhost::router(host))
-            .with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; })
+            .with_graceful_shutdown(async {
+                stop.await;
+                eprintln!("uapp: shutting down");
+            })
             .await?;
         Ok::<_, anyhow::Error>(())
     })
@@ -515,3 +524,52 @@ mod native_serve {
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_serve::*;
+
+/// Resolves when the process is asked to stop: Ctrl-C, or SIGTERM (what
+/// `docker stop`, systemd and most supervisors send). Without a SIGTERM
+/// handler `serve` died without its cleanup, and as a container's PID 1 it
+/// ignored the signal until the SIGKILL ten seconds later.
+///
+/// The handlers are installed when this is CALLED (inside the runtime), not
+/// when the future is first polled, so call it before announcing the server:
+/// a signal that arrives in between is then still a clean stop.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn shutdown_signal() -> impl std::future::Future<Output = ()> + Send {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let int = signal(SignalKind::interrupt()).ok();
+        let term = signal(SignalKind::terminate()).ok();
+        async move {
+            let wait = |s: Option<tokio::signal::unix::Signal>| async move {
+                match s {
+                    Some(mut s) => {
+                        s.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                _ = wait(int) => {}
+                _ = wait(term) => {}
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// After a stop signal the server waits for open connections to finish, and a
+/// WebSocket never does on its own. Everything durable is already committed
+/// (and the cleanup has run), so give in-flight requests a moment and go.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn exit_soon() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::process::exit(0);
+    });
+}

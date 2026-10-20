@@ -122,5 +122,25 @@ console.log("\n[4] rename + close from the shell");
   again.proc.kill("SIGKILL");
 }
 
+console.log("\n[5] SIGTERM runs the same cleanup as Ctrl-C, even with a client connected");
+{
+  const { readdirSync, existsSync } = await import("node:fs");
+  const servers = `${process.env.HOME}/.local/share/uapp/servers`;
+  const addrs = () => (existsSync(servers) ? readdirSync(servers).filter((n) => n.endsWith(".addr")) : []);
+  const before = addrs().length;
+  const { proc, info } = await start("devsd5", `${DIR}/term.uapp`, "never");
+  const ws = new WebSocket(`ws://127.0.0.1:${info.port}/ws?t=${new URL(info.url).searchParams.get("t")}`);
+  await new Promise((r) => (ws.onopen = r));
+  ok(addrs().length === before + 1, "the running server is advertised");
+  let err = ""; proc.stderr.on("data", (d) => (err += d));
+  const t0 = Date.now();
+  proc.kill("SIGTERM");
+  const code = await new Promise((res) => { const t = setTimeout(() => res("timeout"), 10000); proc.on("exit", (c) => { clearTimeout(t); res(c); }); });
+  ok(code === 0, `exits cleanly on SIGTERM (code ${code}, ${Date.now() - t0} ms)`);
+  ok(err.includes("shutting down"), "the shutdown path ran");
+  ok(addrs().length === before, "its registry entry was removed");
+  try { ws.close(); } catch {}
+}
+
 console.log(`\n==== ${passed} passed, ${failed} failed ====`);
 process.exit(failed ? 1 : 0);

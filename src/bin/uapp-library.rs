@@ -80,6 +80,7 @@ fn run() -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
+        let stop = uapp::shutdown_signal();
         let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
         let addr = listener.local_addr()?;
         eprintln!(
@@ -101,7 +102,8 @@ fn run() -> Result<()> {
         }
         axum::serve(listener, uapp::library::router(lib))
             .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
+                stop.await;
+                eprintln!("uapp-library: shutting down");
             })
             .await?;
         Ok::<_, anyhow::Error>(())
