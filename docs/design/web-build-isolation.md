@@ -8,7 +8,7 @@ The browser build (web/boot.js and friends) runs every app on the origin that se
 - **`host.*` is for the launcher only.** Listing, opening, exporting and deleting the other apps stored in this browser works for the document the operator put on the page: the bundled launcher on a bare visit, the server's `--open` default, or a hosted site's own `/site.uapp`. A document named by a link (`?open=`, `?app=`) gets an error. The archive can't claim the role for itself.
 - **Apps from other sites ask first.** A `?open=` link to an archive on another origin shows "Open an app from <host>?" before anything is downloaded. The answer is remembered for that archive URL.
 - **The publish token stays in memory.** It's asked for once per page and kept inside sync-pill.js, not in sessionStorage.
-- **Downloads leave device secrets behind.** The API key, MCP headers and tool approvals are in the database in the browser (on native they never are). The copy saved in this browser keeps them; Download a copy, `/download.uapp` and publishing get a copy without them.
+- **Downloads leave device secrets behind.** The API key, MCP headers and tool approvals are in the database in the browser (on native they never are). The copy saved in this browser keeps them; Download a copy, `/download.uapp` and publishing get a copy without them. Any app opened in the same browser can still read them (from SQL or straight from storage, since it runs on the shell's origin), and `config.get` hiding the key doesn't change that.
 
 ## What it can't enforce
 

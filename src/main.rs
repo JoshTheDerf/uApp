@@ -151,8 +151,8 @@ enum Cmd {
     #[command(long_about = "Serve a folder of .uapp files over HTTP.\n\n\
                       GET / lists them as JSON and GET /<name>.uapp fetches one (ETag, \
                       If-None-Match). PUT /<name>.uapp publishes one (needs the token; \
-                      If-Match gives 409 on a conflict) and is stored without chat, history \
-                      or config. DELETE /<name>.uapp removes one (needs the token).")]
+                      If-Match gives 409 on a conflict) and is stored without chat, history, \
+                      API keys, MCP credentials or approvals. DELETE /<name>.uapp removes one (needs the token).")]
     Library(LibraryArgs),
     /// Register .uapp files with your desktop and file manager (Linux)
     Install,

@@ -34,8 +34,6 @@
  *
 
  * Writes commit straight into the .uapp file, one transaction each.
- * Never use datetime('now')/random() in exec/batch SQL — compute values in JS
- * and pass them as params.
  */
 (() => {
   // The server auto-injects <script src="/uapp.js"> into app pages that don't

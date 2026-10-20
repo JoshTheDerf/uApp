@@ -14,10 +14,11 @@
 //!   DELETE /<name>.uapp remove it (token)
 //!
 //! Every stored archive goes through [`store::export_public`] first: app
-//! files, user tables WITH rows, `data/` — but no chat, no history and no
-//! `uapp_config`, which is where API keys live. So an uploaded archive can
-//! never leak a key to the next visitor who opens it, whatever the uploader
-//! sent. Writes are temp-file-plus-rename; a reader never sees a half file.
+//! files, user tables WITH rows, `data/` and settings, but no chat, no
+//! history, and no API key, MCP credentials or approvals (current builds keep
+//! those out of the file; older files may still carry them, and the export
+//! strips them). So an uploaded archive can never leak a key to the next
+//! visitor who opens it, whatever the uploader sent. Writes are temp-file-plus-rename; a reader never sees a half file.
 //!
 //! The token (`--token` / `UAPP_TOKEN`) arrives as `Authorization: Bearer` or
 //! `?t=`. Reads are anonymous: a library is a public shelf.

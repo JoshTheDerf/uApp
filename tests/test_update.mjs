@@ -81,6 +81,9 @@ const before = await rpc("app.info");
   await rt("sql.batch", { sql: "CREATE TABLE invoices(id INTEGER PRIMARY KEY, customer INTEGER, cents INTEGER)" });
   await rt("sql.batch", { sql: "CREATE VIEW v_top AS SELECT name FROM customers ORDER BY name" });
   await rt("config.set", { key: "template_only", value: { hello: true } });
+  // MCP servers never travel with a template (they'd point this app's
+  // assistant at servers of the template's choosing).
+  await rt("config.set", { key: "mcp", value: [{ name: "tplsrv", url: "https://mcp.example/" }] });
   await download(T.info, "/template.uapp", `${DIR}/tpl-v2.uapp`);
   T.proc.kill("SIGKILL");
 }
@@ -108,6 +111,7 @@ let token;
   ok(p.schema.keptTables.includes("my_notes"), "a table only this app has is listed as kept");
   ok(p.config.added.includes("template_only") && !p.config.added.includes("ai"),
     "config: only keys this app lacks", JSON.stringify(p.config));
+  ok(!p.config.added.includes("mcp"), "config: a template brings no MCP servers", JSON.stringify(p.config));
   // Still a dry run.
   const idx = await rpc("files.read", { name: "index.html" });
   ok(idx.text.includes("v1"), "inspect changed nothing on its own");

@@ -469,8 +469,8 @@ Serve a folder of .uapp files over HTTP.
 
 GET / lists them as JSON and GET /<name>.uapp fetches one (ETag, If-None-Match).
 PUT /<name>.uapp publishes one (needs the token; If-Match gives 409 on a
-conflict) and is stored without chat, history or config. DELETE /<name>.uapp
-removes one (needs the token).
+conflict) and is stored without chat, history, API keys, MCP credentials or
+approvals. DELETE /<name>.uapp removes one (needs the token).
 
 Usage: uapp library [OPTIONS] <DIR>
 

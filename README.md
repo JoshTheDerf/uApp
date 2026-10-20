@@ -128,7 +128,7 @@ Apps can drive the toolbar and its panels themselves (`uapp.toolbar.hide()`, `ua
 
 ### API keys and approvals stay on your device
 
-Your AI API key, MCP server credentials and "always allow" answers are kept on your machine (`~/.config/uapp/secrets/` on Linux), never in the `.uapp`. So a copy you send someone doesn't carry your key, and a file you receive can't arrive with tools already approved. (The browser build keeps them in its own copy of the file and leaves them out of anything you download or publish.)
+Your AI API key, MCP server credentials and "always allow" answers are kept on your machine (`~/.config/uapp/secrets/` on Linux), never in the `.uapp`. So a copy you send someone doesn't carry your key, and a file you receive can't arrive with tools already approved. (The browser build keeps them in its own copy of the file and leaves them out of anything you download or publish. Any app you open in that browser can read them there, so only use a key in the web demo that you're fine sharing with the apps you open.)
 
 ### "Installation" of uApps.
 

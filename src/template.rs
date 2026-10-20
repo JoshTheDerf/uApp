@@ -343,12 +343,18 @@ pub fn plan(target: &Connection, src: &Connection) -> Result<Value> {
 
     // Config: fill in what this app doesn't have yet, never overwrite the
     // user's own settings (their provider, key, MCP servers, approvals).
+    // MCP servers and approvals never come from a template at all: a crafted
+    // one could otherwise point the assistant at servers of its choosing, or
+    // arrive with its tools pre-approved.
     let mut config_add: Vec<String> = Vec::new();
     {
         let mut stmt = src.prepare("SELECT key FROM uapp_config ORDER BY key")?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
             let key: String = r.get(0)?;
+            if !template_config_key(&key) {
+                continue;
+            }
             let taken: i64 = target.query_row(
                 "SELECT count(*) FROM uapp_config WHERE key=?1",
                 rusqlite::params![key],
@@ -412,6 +418,12 @@ pub fn plan(target: &Connection, src: &Connection) -> Result<Value> {
 /// `remove_stale` deletes app files the template no longer carries. It's the
 /// truthful default for "update the app", but it's the one destructive part of
 /// this, so the caller decides and the user is shown the list first.
+/// May a template add this config key to an app? (See the config step in
+/// `plan`.)
+fn template_config_key(key: &str) -> bool {
+    key != "mcp" && !key.starts_with("approvals.")
+}
+
 pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool) -> Result<Value> {
     let mut plan = plan(target, src)?;
     let mut warnings: Vec<String> = plan["warnings"]
@@ -546,6 +558,10 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
         .unwrap_or_default()
     {
         let Some(key) = key.as_str() else { continue };
+        // The plan already left these out; a hand-made op must not add them.
+        if !template_config_key(key) {
+            continue;
+        }
         let raw: String = match src.query_row(
             "SELECT value FROM uapp_config WHERE key=?1",
             rusqlite::params![key],

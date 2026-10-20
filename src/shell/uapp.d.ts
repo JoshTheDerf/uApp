@@ -111,6 +111,8 @@ declare namespace Uapp {
     delimiter?: string;
     /** Whether the first line holds column names (default true). */
     header?: boolean;
+    /** Empty an existing table before importing into it (default false). */
+    replace?: boolean;
   }
 
   type PanelName = "chat" | "files" | "database" | "settings" | "tools";
@@ -141,7 +143,8 @@ declare namespace Uapp {
    * The error every failed call rejects with. `method` names the call;
    * `code` says why when known: "timeout" (no reply in time), "disconnected"
    * (the connection dropped mid-call), "no_host" (the page isn't running
-   * inside the uapp shell), "unknown_action", or a code from the server.
+   * inside the uapp shell) or "unknown_action". Errors the server reports
+   * (a refused SQL statement, a missing file) have no code; read `message`.
    */
   class UappError extends Error {
     name: "UappError" | "UappTimeout" | "UappNoHost";
@@ -158,10 +161,7 @@ declare namespace Uapp {
     query<R extends Row = Row>(sql: string, params?: SqlValue[]): Promise<QueryResult<R>>;
     /** The first row of a query, or null when there is none. */
     get<R extends Row = Row>(sql: string, params?: SqlValue[]): Promise<R | null>;
-    /**
-     * Run one write statement in its own transaction. Compute values in JS
-     * and pass them as params (never `datetime('now')` or `random()` in the SQL).
-     */
+    /** Run one write statement in its own transaction. Pass values as params. */
     exec(sql: string, params?: SqlValue[]): Promise<ExecResult>;
     /** Run several statements (separated by `;`) in one transaction. */
     batch(sql: string): Promise<{ ok: true }>;
@@ -171,7 +171,10 @@ declare namespace Uapp {
     listFiles(): Promise<FileList>;
     /** Import a CSV already in the archive into a table. */
     importCsv(opts: ImportCsvOptions): Promise<{ table: string; rows: number; columns: string[] }>;
-    /** Download a URL into the archive (asks the user first). */
+    /**
+     * Download a public http(s) URL into the archive. Addresses on this
+     * machine or the local network are refused.
+     */
     fetchUrl(url: string, name?: string): Promise<unknown>;
 
     /**
@@ -186,7 +189,7 @@ declare namespace Uapp {
     tool(name: string, input?: object): Promise<unknown>;
     tools(): Promise<ToolInfo[]>;
 
-    /** Run `cb` when this app's table data changes (here or on another device). */
+    /** Run `cb` when this app's table data changes (from this page, another window or the assistant). */
     onChange(cb: (e: ChangeEvent) => void): Unsubscribe;
     /** Run `cb` when this app's files change. */
     onFilesChange(cb: (e: ChangeEvent) => void): Unsubscribe;
