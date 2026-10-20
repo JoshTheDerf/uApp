@@ -6,6 +6,7 @@ Notable changes to uApp. The format is based on [Keep a Changelog](https://keepa
 
 ### Added
 
+- On Android, sharing a .uapp to uApp opens it, like "open with" does.
 - `uapp export`, `uapp info`, `uapp uninstall` and `uapp completions` commands. See [docs/CLI.md](docs/CLI.md).
 - Master passwords can come from `--password-stdin`, `--password-file` or `UAPP_PASSWORD`, and `uapp passwd` takes the new one from `UAPP_NEW_PASSWORD`.
 - `-v`, `-q` and `UAPP_LOG` control logging, and the window build also writes a log file (with any crash) to the per-user data folder.
@@ -48,6 +49,7 @@ Notable changes to uApp. The format is based on [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- On older Android versions (seen on Android 12), release builds showed a "cleartext not permitted" error instead of the app.
 - On macOS, double-clicking a .uapp in Finder (or Open With) opens that file. It used to open the scratch app.
 - .uapp files could end up as zero bytes on Android after "open with". A zero-byte file uApp has opened before is now restored from its newest snapshot.
 - A failed Save As or encryption change could leave the app on an empty database.
