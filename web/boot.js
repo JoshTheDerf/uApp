@@ -1025,10 +1025,19 @@ window.__uappSiteReset = async () => {
 // server.rs). `token` is the site's publish secret. The download's ETag goes
 // along as If-Match, so a site that moved on since (another publish, a
 // deploy) answers 409 instead of being overwritten; `force` drops that check.
-// On success the server equals this copy, which therefore becomes the new
-// ETag baseline for the sync pill. Resolves to the server's reply.
+// A copy with no ETag (the server sent none, or it predates keeping one) has
+// nothing to check against, so it is refused unless forced: a bare PUT would
+// silently replace whatever the server holds now. On success the server
+// equals this copy, which therefore becomes the new ETag baseline for the
+// sync pill. Resolves to the server's reply.
 window.__uappSitePublish = async (token, { force = false } = {}) => {
   if (!siteState || !window.__uappSiteArchive) throw new Error("not a hosted site");
+  if (!force && !siteState.etag) {
+    const e = new Error("this copy has no record of which server version it came from");
+    e.status = 428; // Precondition Required, as a server would say it
+    e.noBaseline = true;
+    throw e;
+  }
   await window.__uappFlushSave();
   const body = await exportBytes();
   const headers = { authorization: "Bearer " + token, "content-type": "application/octet-stream" };
@@ -1632,12 +1641,15 @@ if (tabChannel) {
         currentAppId = OPEN.id;
         if (!bytes) scheduleSave(); // persist the fresh app right away
       } catch (e) {
-        alert("Could not open the app: " + (e.message || e));
+        // Not the launcher in its place: on this URL it would have no host.*
+        // (see IS_LAUNCHER). The error card offers the way back.
+        throw new Error("Could not open the app: " + errText(e));
       }
     }
     if (!info) {
-      // currentAppId stays null: nothing is persisted, so a reload starts over
-      // from whatever the source below serves.
+      // The launcher leaves currentAppId null and is never saved, so a reload
+      // starts over from what the server serves. A site archive is saved
+      // under its own id (siteState) from the first change on.
       currentAppId = null;
       const site = window.__uappSiteArchive;
       if (site) {

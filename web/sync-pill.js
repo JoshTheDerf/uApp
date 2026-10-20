@@ -54,6 +54,10 @@ async function publish() {
         const go = window.confirm("The site on the server changed after your copy was downloaded. Publish anyway and replace it with your copy?");
         if (!go) throw new Error("Not published — the server copy is newer.");
         r = await window.__uappSitePublish(token, { force: true });
+      } else if (e.noBaseline) {
+        const go = window.confirm("This copy has no record of which version of the site it was downloaded from, so the server's copy may have changed since. Publish anyway and replace it with your copy?");
+        if (!go) throw new Error("Not published.");
+        r = await window.__uappSitePublish(token, { force: true });
       } else {
         if (e.status === 403) publishToken(true);
         throw e;
@@ -91,10 +95,11 @@ function ago(ms) {
   const h = Math.round(m / 60); if (h < 48) return h + " h ago";
   return Math.round(h / 24) + " days ago";
 }
-// Two looks: a quiet grey "Local edits · N ago · Reset" whenever this tab
-// has changed its copy (the server is not newer — just a reminder that
-// what you see is yours, and that a reload throws it away), and an amber
-// "Server copy is newer" when the server has moved on since the download.
+// Two looks: a quiet grey "Local edits · N ago · Reset" whenever this copy
+// has edits (the server is not newer, just a reminder that what you see is
+// yours and is kept in this browser until you Reset or Publish), and an
+// amber "Server copy is newer" when the server has moved on since the
+// download.
 function renderPill() {
   const bar = document.getElementById("topbar");
   if (!bar) return;
@@ -155,10 +160,13 @@ function publishButton(stale) {
     : "font:inherit;font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.25);background:#3f6de6;color:#fff;font-weight:600;cursor:pointer";
   return b;
 }
+// Never adopts the server's current ETag as the baseline: the copy came
+// from whatever the download was, and taking today's stamp instead would
+// hide exactly the change this pill is for (and let a publish skip the
+// If-Match check). No baseline just means no "newer" warning.
 async function checkServer() {
   const st = await serverStamp();
   if (!st) return;
-  if (!serverBaseline) serverBaseline = st;
   serverNow = st;
   renderPill();
 }
