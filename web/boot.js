@@ -153,7 +153,7 @@ let worker = null;
 let sab = null;    // bridge control + reply (see uapp_glue.js for the layout)
 let inbox = null;  // page → worker RPCs while the worker is blocked in an AI run
 let net = null;    // provider HTTP records, main-thread fetch → worker
-const WAKE = 3, BLOCKED = 4, HDR = 32; // same layout as uapp_glue.js
+const WAKE = 3, BLOCKED = 4, BRIDGE_CALL = 5, HDR = 32; // same layout as uapp_glue.js
 const RUNTIME_TIMEOUT_MS = 90000;
 function wake() {
   const c = new Int32Array(sab);
@@ -365,7 +365,9 @@ function netHandle(m) {
 
 // ---- console buffer (main-thread copy of App's ring buffer) ------------------
 
-function bridgeReply(obj) {
+// `call` is the id the worker gave the request; it only reads a reply that
+// carries it (see js_bridge_call in uapp_glue.js).
+function bridgeReply(obj, call) {
   if (!sab) return;
   const i32 = new Int32Array(sab);
   let bytes = enc.encode(JSON.stringify(obj));
@@ -375,6 +377,7 @@ function bridgeReply(obj) {
   }
   new Uint8Array(sab, HDR, bytes.length).set(bytes);
   Atomics.store(i32, 1, bytes.length);
+  Atomics.store(i32, BRIDGE_CALL, call | 0);
   Atomics.store(i32, 0, 1);
   wake(); // the worker waits on the shared WAKE cell (see blockUntil)
 }
@@ -387,7 +390,7 @@ function bridgeReply(obj) {
 // The one in-flight bridge prompt (the worker is blocked, so there is never
 // more than one). The shell answers it with its normal ai.approve/ai.answer
 // RPCs, which the transport intercepts below.
-let bridgePrompt = null; // {kind: "approval"|"question", id}
+let bridgePrompt = null; // {kind: "approval"|"question", id, call}
 
 function emitShellEvent(type, extra) {
   const envelope = { method: "event", params: { type, ...extra } };
@@ -398,20 +401,29 @@ function emitShellEvent(type, extra) {
 // Answer the pending bridge prompt (from an intercepted RPC or a stop).
 function resolveBridgePrompt(reply) {
   if (!bridgePrompt) return false;
-  const kind = bridgePrompt.kind;
+  const { kind, call } = bridgePrompt;
   bridgePrompt = null;
   emitShellEvent(kind === "approval" ? "approval" : "question", { pending: [] });
-  bridgeReply(reply);
+  bridgeReply(reply, call);
   return true;
 }
 
-async function handleBridge(kind, payloadJson) {
+// The worker gave up waiting (js_bridge_call timed out): take the card down
+// so nobody answers a question that is no longer being asked.
+function cancelBridgePrompt(call) {
+  if (!bridgePrompt || bridgePrompt.call !== call) return;
+  const kind = bridgePrompt.kind;
+  bridgePrompt = null;
+  emitShellEvent(kind === "approval" ? "approval" : "question", { pending: [] });
+}
+
+async function handleBridge(kind, payloadJson, call) {
   let p = {};
   try { p = JSON.parse(payloadJson); } catch {}
   if (kind === "approval") {
     // Show the shell's normal approval card; its ai.approve RPC is
     // intercepted by the transport and answered into the SAB.
-    bridgePrompt = { kind: "approval", id: p.id };
+    bridgePrompt = { kind: "approval", id: p.id, call };
     emitShellEvent("approval", { pending: [{
       id: p.id, name: p.name, input: p.input, note: p.note || null,
       session: p.session, created: Date.now(),
@@ -420,13 +432,13 @@ async function handleBridge(kind, payloadJson) {
   }
   if (kind === "ask_user") {
     // Same pattern for ask_user question cards (answered via ai.answer).
-    bridgePrompt = { kind: "question", id: p.id };
+    bridgePrompt = { kind: "question", id: p.id, call };
     emitShellEvent("question", { pending: [{
       id: p.id, questions: p.questions, session: p.session, created: Date.now(),
     }] });
     return;
   }
-  bridgeReply({ error: "unknown bridge request: " + kind });
+  bridgeReply({ error: "unknown bridge request: " + kind }, call);
 }
 
 // ---- service-worker archive requests -----------------------------------------
@@ -1573,7 +1585,8 @@ if (tabChannel) {
         try { onWorkerEvent(JSON.parse(m.json)); } catch {}
         return;
       }
-      if (m.type === "bridge") { handleBridge(m.kind, m.payload); return; }
+      if (m.type === "bridge") { handleBridge(m.kind, m.payload, m.call); return; }
+      if (m.type === "bridge.cancel") { cancelBridgePrompt(m.call); return; }
       if (m.type === "conn.send") {
         const win = winOfConn.get(m.conn);
         if (win && stillOurs(win)) { try { postToFrame(win, JSON.parse(m.msg)); } catch {} }

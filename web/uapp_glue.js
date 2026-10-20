@@ -15,6 +15,7 @@
  *   sab   [0] bridge reply state (1 = ready)  [1] reply length
  *         [2] stop flag (shell's Stop button) [3] WAKE counter (any producer)
  *         [4] BLOCKED (1 while this worker is inside blockUntil)
+ *         [5] id of the bridge call the reply answers
  *   inbox [0] state (1 = an RPC is waiting)   [1] length   — page → worker
  *   net   [0] state (1 = a record is ready)   [1] length   [2] flags (1 eof, 2 error)
  */
@@ -31,7 +32,7 @@ export function js_panic(msg) {
 }
 export function gluePanicked() { return panicked; }
 
-const WAKE = 3, BLOCKED = 4;
+const WAKE = 3, BLOCKED = 4, CALL = 5;
 const HDR = 32; // control ints live in the first 32 bytes; payloads follow
 
 export function js_now_ms() { return Date.now(); }
@@ -88,6 +89,7 @@ function blockUntil(pred, timeoutMs) {
 // ---- bridge: ask the main thread (run_js, actions, prompts, console) --------
 
 let bridgeBusy = false;
+let bridgeSeq = 0;
 export function js_bridge_call(kind, payloadJson) {
   if (!cfg.sab) {
     return JSON.stringify({ error: "bridge unavailable (page is not cross-origin isolated — run_js/app actions need COOP/COEP headers)" });
@@ -96,9 +98,20 @@ export function js_bridge_call(kind, payloadJson) {
   bridgeBusy = true;
   try {
     const i32 = new Int32Array(cfg.sab);
+    // Each call carries an id and only a reply tagged with it counts: an
+    // answer to a call that already timed out (the visitor clicking Allow
+    // on a card we gave up on) must not be read as the next call's answer.
+    const call = bridgeSeq = (bridgeSeq % 0x7fffffff) + 1;
     Atomics.store(i32, 0, 0);
-    postMessage({ type: "bridge", kind, payload: payloadJson });
-    if (!blockUntil(() => Atomics.load(i32, 0) === 1, 300000)) {
+    postMessage({ type: "bridge", kind, payload: payloadJson, call });
+    const answered = () => {
+      if (Atomics.load(i32, 0) !== 1) return false;
+      if (Atomics.load(i32, CALL) === call) return true;
+      Atomics.store(i32, 0, 0); // a late reply to an earlier call: drop it
+      return false;
+    };
+    if (!blockUntil(answered, 300000)) {
+      postMessage({ type: "bridge.cancel", call }); // take the card down
       return JSON.stringify({ error: "bridge timeout (no reply from the page within 5 minutes)" });
     }
     const len = Atomics.load(i32, 1);
