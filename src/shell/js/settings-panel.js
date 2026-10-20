@@ -461,7 +461,7 @@ async function loadSettings() {
   // The key never comes back from the core (it is kept on this machine, out
   // of the .uapp file), only whether one is saved. Blank on save keeps it.
   $("cfg-key").value = "";
-  $("cfg-key").placeholder = ai.has_api_key ? (S.settings.apiKeySaved || "saved (blank = keep it)") : "";
+  $("cfg-key").placeholder = ai.has_api_key ? S.settings.apiKeySaved : "";
   $("cfg-model").value = ai.model || "";
   $("cfg-baseurl").value = ai.base_url || "";
   $("cfg-maxtokens").value = ai.max_tokens || "";

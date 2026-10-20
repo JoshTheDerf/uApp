@@ -76,16 +76,6 @@ export function downloadUrl(href) {
     fetchToDownloads(href);
     return;
   }
-  if (window.UAppAndroid) {
-    // Older APK without saveBlob: the DownloadManager path needs the auth
-    // token on the URL (it fetches outside the WebView's cookie jar).
-    const tok = new URLSearchParams(location.search).get("t") ||
-      document.cookie.split(";").map((s) => s.trim())
-        .find((s) => s.startsWith(`uapp_t_${location.port}=`))?.slice(`uapp_t_${location.port}=`.length);
-    if (tok && !/[?&]t=/.test(href)) {
-      href += (href.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(tok);
-    }
-  }
   const a = document.createElement("a");
   a.href = href;
   a.download = "";
