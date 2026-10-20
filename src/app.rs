@@ -98,6 +98,16 @@ pub const RELOAD_WAIT_MS: u64 = 10_000;
 /// (right after reload_app) to register the action before giving up.
 pub const ACTION_REGISTER_WAIT_MS: u64 = 8_000;
 
+/// Who is on the other end of a connection, decided by the token that opened
+/// it. The shell holds the owner token; the app frame, on its own origin,
+/// holds the app token and gets [`crate::rpc::app_may_call`]'s methods and
+/// [`App::app_may_see`]'s events, nothing more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Owner,
+    App,
+}
+
 /// Pushes one JSON text message to a connected page; `false` once it is gone.
 pub type ConnSender = std::sync::Arc<dyn Fn(String) -> bool + Send + Sync>;
 
@@ -209,6 +219,14 @@ pub struct App {
     pub engine: Mutex<Engine>,
     pub events: broadcast::Sender<Value>,
     pub token: String,
+    /// The app frame's token, minted per session next to `token`. It opens
+    /// app-role connections on the app origin and nothing else (see
+    /// docs/design/app-isolation.md).
+    pub app_token: String,
+    /// Serve the app frame from its own origin (`http://localhost:<port>`).
+    /// On by default for the private server; `uapp serve` sites and a server
+    /// that can't use `localhost` (see lib.rs) keep the single origin.
+    pub isolate: AtomicBool,
     pub name: String,
     /// Live AI runs, keyed by chat session id: one run per session, runs on
     /// different sessions go in parallel. A run's stop flag is shared with any
@@ -300,6 +318,8 @@ impl App {
             engine: Mutex::new(engine),
             events,
             token,
+            app_token: crate::secrets::new_token(),
+            isolate: AtomicBool::new(true),
             name,
             ai_runs: Mutex::new(HashMap::new()),
             unsaved: AtomicBool::new(unsaved),
@@ -346,6 +366,29 @@ impl App {
             eng.snapshot_if_dirty();
             crate::registry::remove_addr(&eng.path);
         }
+    }
+
+    /// The app frame's origin, when it has one of its own: private server,
+    /// isolation on, port known. `None` means the app shares the shell's
+    /// origin (a public site, the browser build, or the fallback).
+    pub fn app_origin(&self) -> Option<String> {
+        let port = self.port.load(Ordering::Relaxed);
+        (self.public.is_none() && self.isolate.load(Ordering::Relaxed) && port != 0)
+            .then(|| format!("http://localhost:{port}"))
+    }
+
+    /// The shell's origin, the one place app-origin pages may be framed from.
+    pub fn shell_origin(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port.load(Ordering::Relaxed))
+    }
+
+    /// Events an app connection receives. The rest (approval prompts,
+    /// questions, chat, drops, shutdown) are the shell's business.
+    pub fn app_may_see(event: &Value) -> bool {
+        matches!(
+            event["params"]["type"].as_str(),
+            Some("changes" | "present" | "toolbar" | "panel" | "reload")
+        )
     }
 
     /// Is any session's assistant run live? (`app.info.aiBusy`, kept global for

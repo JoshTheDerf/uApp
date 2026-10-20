@@ -22,13 +22,14 @@
 <shell-topbar id="topbar"{{TOPBAR_CLASS}}></shell-topbar>
 
 <main id="main">
-  <!-- allow= is the Permissions-Policy delegation, not a grant: it only lets
-       the app's navigator.* call reach the webview, which then goes through the
-       native Allow/Deny prompt (see permissions.rs). Same-origin frames inherit
-       these by default; naming them keeps that true if /app/ ever moves to its
-       own origin. Notifications have no Permissions-Policy token, so they are
-       gated solely by the native prompt. -->
-  <iframe id="appframe" src="/app/"
+  <!-- The frame loads from the app's own origin, http://localhost:<port>/app/
+       with its token (see docs/design/app-isolation.md), or /app/ when the app
+       shares this origin. allow= is the Permissions-Policy delegation, not a
+       grant: it only lets the app's navigator.* call reach the webview, which
+       then goes through the native Allow/Deny prompt (see permissions.rs).
+       Notifications have no Permissions-Policy token, so they are gated
+       solely by the native prompt. -->
+  <iframe id="appframe" src="{{APP_SRC}}"
           allow="camera; microphone; display-capture; geolocation; clipboard-read; storage-access"></iframe>
   <!-- Hidden eval context for the AI's run_js tool: uapp.js only, no app code.
        Starts EMPTY and is loaded on first use (the server asks for it when a

@@ -70,6 +70,7 @@ import "./tools-panel.js";
 import "./mirror.js";
 import "./toolbar-visibility.js";
 import "./keepalive.js";
+import { appPageUrl, isolated, onFrame, setFrameConfig } from "./frame.js";
 import { addRefs } from "./chat-panel.js";
 import { fbCwd, loadFiles, pickDest } from "./files-panel.js";
 import { isUappFile, updateFromDrop, updateFromFile } from "./template-update.js";
@@ -81,22 +82,30 @@ import { isUappFile, updateFromDrop, updateFromFile } from "./template-update.js
 // embeds an iframe of its own: each entry pins a whole extra frame tree). Since
 // everything under /app/ is served no-store, the url can stay stable and the
 // reload can replace the current entry instead of stacking one on top of it.
+const APP_ROUTE = (window.__uappBase || "/") + "app/";
+// The page the frame is on, as it last told us (__uappNav): path, query and
+// hash on the app's origin. A multi-page site stays on /admin across reloads.
+let framePage = null;
 let reloadTimer = null;
 function reloadAppFrame() {
   const f = $("appframe");
   if (!f) return;
-  const url = (window.__uappBase || "/") + "app/";
-  // Same-origin, so we can drive the frame's own location; src= is the fallback
-  // for the window not being reachable yet (frame still empty on first boot).
-  // Reload the page the frame is ON (a multi-page site stays on /admin), not
-  // the app root.
+  if (isolated()) {
+    // Cross-origin: we can't read the frame's location, but replace() is
+    // allowed, and it carries the token this (cross-site) load needs.
+    const url = appPageUrl(framePage || "/app/");
+    try { f.contentWindow.location.replace(url); } catch { f.src = url; }
+    return;
+  }
+  // Same origin (browser build, public site): drive the frame's own
+  // location; src= is the fallback for a frame that is still empty.
   try {
     const cur = f.contentWindow.location;
     if (cur.href && cur.href !== "about:blank") { cur.reload(); return; }
-    cur.replace(url);
+    cur.replace(APP_ROUTE);
     return;
   } catch {}
-  f.src = url;
+  f.src = APP_ROUTE;
 }
 function scheduleReload() {
   clearTimeout(reloadTimer);
@@ -113,10 +122,9 @@ on("reload", scheduleReload);
 // ---------- url mirroring ----------
 // The frame is the real page; the address bar should say so. Every navigation
 // inside it (link click, the reload above, a scripted location change) is
-// mirrored to the top-level URL with the history API, so /admin reached from
-// / is /admin in the bar, deep-linkable and shareable. The browser back/forward
-// buttons then drive the frame the same way.
-const APP_ROUTE = (window.__uappBase || "/") + "app/";
+// reported by its uapp.js and mirrored to the top-level URL with the history
+// API, so /admin reached from / is /admin in the bar, deep-linkable and
+// shareable. The browser back/forward buttons then drive the frame the same way.
 // The frame's path, as the page's own path: "/app/admin" and "/admin" (a
 // root-absolute link followed inside the frame — the service worker serves it
 // from the archive either way) are both "/admin".
@@ -125,63 +133,91 @@ function frameToTopPath(u) {
   if (path.startsWith("/shell/") || path === "/scratch/") return null;
   return path + u.search + u.hash;
 }
-function mirrorFrameUrl() {
-  const f = $("appframe");
-  let u;
-  try { u = new URL(f.contentWindow.location.href); } catch { return; }
-  if (u.origin !== location.origin) return;
-  const top = frameToTopPath(u);
-  if (top === null || top === location.pathname + location.search + location.hash) return;
-  try { history.pushState({ uappFrame: top }, "", top); } catch {}
-}
 // Hosted-site chrome only: there the top URL IS a page of the site and reload
 // serves it from the server. In the native window, the browser demo and an
 // archive opened with ?open= the top URL is the shell's, and rewriting it
 // would break reload.
 const MIRROR_URL = !!window.__uappChrome;
+function frameMoved(u) {
+  framePage = u.pathname + u.search + u.hash;
+  if (!MIRROR_URL || u.origin !== location.origin) return;
+  const top = frameToTopPath(u);
+  if (top === null || top === location.pathname + location.search + location.hash) return;
+  try { history.pushState({ uappFrame: top }, "", top); } catch {}
+}
+onFrame("__uappNav", (href, e) => {
+  if (e.source !== $("appframe")?.contentWindow || typeof href !== "string") return;
+  let u;
+  try { u = new URL(href); } catch { return; }
+  frameMoved(u);
+});
+// A hosted site's frame can also land on one of the server's own pages (a
+// root-absolute link outside the archive's pages), which has no uapp.js to
+// report in. That frame shares our origin, so look at it directly.
 $("appframe")?.addEventListener("load", () => {
-  if (!MIRROR_URL) return;
-  mirrorFrameUrl();
-  // In-page hash routing inside the app.
-  try { $("appframe").contentWindow.addEventListener("hashchange", mirrorFrameUrl); } catch {}
-  // Links to other origins leave the editor: the frame is this site's
-  // in-browser copy, so another site has no business loading inside it (and
-  // the service worker never sees a cross-origin frame navigation, so this is
-  // the only place to catch it). Same-origin links stay in the frame; those
-  // that aren't pages of the archive break out via sw.js instead.
+  const w = $("appframe").contentWindow;
   try {
-    $("appframe").contentWindow.document.addEventListener("click", (e) => {
+    if (!MIRROR_URL || w.uapp) return; // uapp.js reports for itself
+    const sync = () => frameMoved(new URL(w.location.href));
+    sync();
+    w.addEventListener("hashchange", sync);
+    w.document.addEventListener("click", (e) => {
       const a = e.target && e.target.closest && e.target.closest("a[href]");
       if (!a || a.target || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       let u;
       try { u = new URL(a.href, a.baseURI); } catch { return; }
       if (u.origin === location.origin || !/^https?:$/.test(u.protocol)) return;
       e.preventDefault();
-      // Let a pending local-copy save land first (browser build).
-      Promise.resolve(window.__uappFlushSave && window.__uappFlushSave()).then(() => { window.top.location.href = u.href; });
+      leaveFor(u.href);
     }, true);
-  } catch {}
+  } catch {} // another origin: nothing to read, and nothing of ours
 });
 window.addEventListener("popstate", () => {
   if (!MIRROR_URL) return;
   const f = $("appframe");
-  const wantTop = location.pathname + location.search + location.hash;
-  try {
-    const cur = new URL(f.contentWindow.location.href);
-    if (frameToTopPath(cur) === wantTop) return;
-    f.contentWindow.location.replace(APP_ROUTE + location.pathname.replace(/^\/+/, "") + location.search + location.hash);
-  } catch { f.src = APP_ROUTE + location.pathname.replace(/^\/+/, "") + location.search + location.hash; }
+  const want = location.pathname + location.search + location.hash;
+  if (framePage && frameToTopPath(new URL(framePage, location.href)) === want) return;
+  const url = APP_ROUTE + location.pathname.replace(/^\/+/, "") + location.search + location.hash;
+  try { f.contentWindow.location.replace(url); } catch { f.src = url; }
 });
+
+// ---------- links to other sites ----------
+// uapp.js in the frame catches clicks on links to other origins when we ask
+// it to, and hands them here. In the native window they open in the system
+// browser. On a hosted site they leave the editor: the frame is this site's
+// in-browser copy, so another site has no business loading inside it (and
+// the service worker never sees a cross-origin frame navigation). Same-origin
+// links stay in the frame; those that aren't pages of the archive break out
+// via sw.js instead.
+function linkPolicy() {
+  if (MIRROR_URL) return "top";
+  return document.body.classList.contains("native") ? "system" : null;
+}
+on("info", () => setFrameConfig({ links: linkPolicy() }));
+setFrameConfig({ links: linkPolicy() });
+onFrame("__uappOpen", (href) => {
+  let u;
+  try { u = new URL(String(href)); } catch { return; }
+  if (!/^(https?|mailto):$/.test(u.protocol)) return;
+  if (MIRROR_URL) leaveFor(u.href);
+  else if (linkPolicy() === "system") openExternalUrl(u.href);
+});
+function leaveFor(href) {
+  // Let a pending local-copy save land first (browser build).
+  Promise.resolve(window.__uappFlushSave && window.__uappFlushSave()).then(() => { window.top.location.href = href; });
+}
 
 // ---------- scratch iframe ----------
 // The AI's run_js scratchpad context. Loaded on demand rather than with the
 // shell: it is a whole extra document, and on a phone webview that is budget
 // the app itself needs. The server broadcasts "scratch-load" when a scratchpad
-// call arrives with no frame connected, then waits for it to register.
+// call arrives with no frame connected, then waits for it to register. It runs
+// code the assistant wrote, so it lives on the app's origin, with the app's
+// role.
 function loadScratchFrame() {
   const f = $("scratchframe");
   if (!f || f.getAttribute("src")) return; // already loading or loaded
-  f.src = (window.__uappBase || "/") + "scratch/";
+  f.src = appPageUrl("/scratch/");
 }
 on("scratch-load", loadScratchFrame);
 

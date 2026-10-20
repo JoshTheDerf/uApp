@@ -160,6 +160,9 @@ mod native_serve {
         // no re-binding or polling needed.
         let listener = rt.block_on(tokio::net::TcpListener::bind(("127.0.0.1", fixed_port)))?;
         let port = listener.local_addr()?.port();
+        // The app frame's origin is http://localhost:<port> (see server.rs), and
+        // localhost may well resolve to ::1.
+        let (listener_v6, isolate) = rt.block_on(server::bind_app_v6(port));
         let app_url = format!("http://127.0.0.1:{port}/?t={token}");
 
         // Encrypted file without a usable password? Show a small web unlock page —
@@ -231,6 +234,8 @@ mod native_serve {
             }
         };
         let app = Arc::new(app::App::new(eng, token.clone(), unsaved));
+        app.isolate
+            .store(isolate, std::sync::atomic::Ordering::Relaxed);
         // Keys and credentials an older build kept in the file move to this
         // machine (see secrets.rs) before anything can read them.
         if let Err(e) = secrets::migrate(&app) {
@@ -341,6 +346,9 @@ mod native_serve {
             }));
 
             let router = server::router(app.clone());
+            if let Some(v6) = listener_v6 {
+                tokio::spawn(axum::serve(v6, router.clone()).into_future());
+            }
             let shutdown_app = app.clone();
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
