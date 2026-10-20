@@ -462,6 +462,248 @@ fn migrate_paths(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ---- copying an app's own schema and rows -------------------------------------
+
+/// One schema object belonging to the app itself: never uApp's tables, never
+/// SQLite internals, never the shadow tables a virtual table keeps its data in
+/// (those come back on their own when the virtual table is created).
+pub(crate) struct SchemaObject {
+    pub typ: String,
+    pub name: String,
+    pub sql: String,
+}
+
+/// The app's own tables, views, indexes and triggers, in creation order.
+pub(crate) fn user_objects(conn: &Connection) -> Result<Vec<SchemaObject>> {
+    let shadows = shadow_tables(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master
+         WHERE sql IS NOT NULL
+           AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
+           AND (tbl_name IS NULL OR (tbl_name NOT LIKE 'uapp_%' AND tbl_name != 'sqlar'))
+         ORDER BY rowid",
+    )?;
+    let mut out = Vec::new();
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let name: String = r.get(1)?;
+        let tbl: Option<String> = r.get(2)?;
+        if shadows.contains(&name) || tbl.is_some_and(|t| shadows.contains(&t)) {
+            continue;
+        }
+        out.push(SchemaObject {
+            typ: r.get(0)?,
+            name,
+            sql: r.get(3)?,
+        });
+    }
+    Ok(out)
+}
+
+/// The shadow tables of this database's virtual tables (FTS3/4/5, R*Tree).
+/// SQLite reports them when it has the module; the module's naming scheme
+/// covers the rest.
+fn shadow_tables(conn: &Connection) -> Result<std::collections::BTreeSet<String>> {
+    let mut out = std::collections::BTreeSet::new();
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT name FROM pragma_table_list WHERE schema='main' AND type='shadow'")
+    {
+        let names = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for n in names {
+            out.insert(n?);
+        }
+    }
+    let mut stmt = conn.prepare(
+        "SELECT name, lower(sql) FROM sqlite_master
+         WHERE type='table' AND lower(sql) LIKE 'create virtual table%'",
+    )?;
+    let vtabs = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    for v in vtabs {
+        let (name, sql) = v?;
+        let module = sql
+            .split_once(" using ")
+            .map(|(_, m)| m.trim_start())
+            .unwrap_or("");
+        let suffixes: &[&str] = if module.starts_with("fts5") {
+            &["_data", "_idx", "_content", "_docsize", "_config"]
+        } else if module.starts_with("fts3") || module.starts_with("fts4") {
+            &["_content", "_segments", "_segdir", "_docsize", "_stat"]
+        } else if module.starts_with("rtree") || module.starts_with("geopoly") {
+            &["_node", "_rowid", "_parent"]
+        } else {
+            &[]
+        };
+        for s in suffixes {
+            out.insert(format!("{name}{s}"));
+        }
+    }
+    Ok(out)
+}
+
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Run one object's CREATE statement (or a template's ALTER TABLE ... ADD
+/// COLUMN, `typ` "alter") on `conn`. The text comes from another file's
+/// sqlite_master, which anyone can edit, so it must be exactly one statement
+/// of the expected kind, and it runs under the same sandbox as app SQL (no
+/// ATTACH, no transaction control, nothing that touches uApp's tables).
+pub(crate) fn exec_schema_sql(conn: &Connection, typ: &str, name: &str, sql: &str) -> Result<()> {
+    let kw = leading_keywords(sql, 2);
+    let kw: Vec<&str> = kw.iter().map(String::as_str).collect();
+    let expected = matches!(
+        (typ, kw.as_slice()),
+        ("table", ["create", "table" | "virtual"])
+            | ("index", ["create", "index" | "unique"])
+            | ("view", ["create", "view"])
+            | ("trigger", ["create", "trigger"])
+            | ("alter", ["alter", "table"])
+    );
+    if !expected {
+        bail!(
+            "the schema SQL for {typ} {name} isn't the CREATE statement it should be, so the \
+             file may have been tampered with: {}",
+            sql.chars().take(80).collect::<String>()
+        );
+    }
+    let guard = Guard::new(conn, Access::Write)?;
+    guard
+        .run(|| {
+            // Whatever follows the first statement is refused unread: even
+            // preparing it could act (SQLCipher runs its key PRAGMAs then).
+            let len = first_statement_len(conn, sql)?;
+            if !only_trivia(&sql[len..]) {
+                bail!(
+                    "the schema SQL for {typ} {name} has more statements after the CREATE, so \
+                     the file may have been tampered with"
+                );
+            }
+            conn.prepare(&sql[..len])?.raw_execute()?;
+            Ok(())
+        })
+        .with_context(|| format!("creating {typ} {name}"))
+}
+
+/// Byte length of the first statement in `sql`, found by SQLite's own parser
+/// (prepared and thrown away, so the authorizer of the caller's guard sees
+/// it). The rest of the text is never looked at by SQLite.
+fn first_statement_len(conn: &Connection, sql: &str) -> Result<usize> {
+    use rusqlite::ffi;
+    let c = std::ffi::CString::new(sql).map_err(|_| anyhow!("schema SQL contains a NUL byte"))?;
+    let mut stmt = std::ptr::null_mut();
+    let mut tail = std::ptr::null();
+    // SAFETY: `c` outlives the call, `tail` points into it (or is null), and
+    // the statement is finalized before the handle is used again.
+    let (rc, len) = unsafe {
+        let rc = ffi::sqlite3_prepare_v2(conn.handle(), c.as_ptr(), -1, &mut stmt, &mut tail);
+        ffi::sqlite3_finalize(stmt);
+        let len = if tail.is_null() {
+            sql.len()
+        } else {
+            tail.offset_from(c.as_ptr()) as usize
+        };
+        (rc, len)
+    };
+    if rc != ffi::SQLITE_OK {
+        // Prepare the same text through rusqlite for a proper error.
+        conn.prepare(&sql[..len.min(sql.len())])?;
+        bail!("could not read the schema SQL (sqlite error {rc})");
+    }
+    Ok(len.min(sql.len()))
+}
+
+/// Nothing but whitespace, semicolons and comments.
+fn only_trivia(mut rest: &str) -> bool {
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ';');
+        if let Some(r) = rest.strip_prefix("--") {
+            rest = r.find('\n').map(|i| &r[i + 1..]).unwrap_or("");
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            match r.find("*/") {
+                Some(i) => rest = &r[i + 2..],
+                None => return false,
+            }
+        } else {
+            return rest.is_empty();
+        }
+    }
+}
+
+/// Copy every row of one of the app's tables from `src` into the same table
+/// in `dst`. Columns are named from `table_xinfo`, skipping generated
+/// columns (SQLite computes them) and a virtual table's hidden ones. A rowid
+/// that is the row's only identity (no INTEGER PRIMARY KEY, or an FTS
+/// table's docid) is carried over too, so references to it stay valid.
+pub(crate) fn copy_rows(src: &Connection, dst: &Connection, table: &str) -> Result<usize> {
+    let mut cols: Vec<(String, String, i64)> = Vec::new();
+    {
+        let mut stmt = src
+            .prepare("SELECT name, upper(type), pk FROM pragma_table_xinfo(?1) WHERE hidden = 0")?;
+        let rows = stmt.query_map([table], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        for c in rows {
+            cols.push(c?);
+        }
+    }
+    if cols.is_empty() {
+        return Ok(0);
+    }
+    let (kind, without_rowid, sql): (String, bool, String) = src.query_row(
+        "SELECT l.type, l.wr, lower(m.sql) FROM pragma_table_list AS l
+         JOIN sqlite_master AS m ON m.name = l.name
+         WHERE l.schema = 'main' AND l.name = ?1",
+        [table],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let pk_cols: Vec<&(String, String, i64)> = cols.iter().filter(|c| c.2 > 0).collect();
+    let rowid_alias = pk_cols.len() == 1 && pk_cols[0].1 == "INTEGER";
+    let name_taken = cols.iter().any(|c| {
+        matches!(
+            c.0.to_ascii_lowercase().as_str(),
+            "rowid" | "_rowid_" | "oid"
+        )
+    });
+    let keep_rowid = !name_taken
+        && match kind.as_str() {
+            "table" => !without_rowid && !rowid_alias,
+            "virtual" => sql.contains(" using fts"),
+            _ => false,
+        };
+    let mut list: Vec<String> = cols.iter().map(|c| quote_ident(&c.0)).collect();
+    if keep_rowid {
+        list.insert(0, "rowid".into());
+    }
+    let list = list.join(", ");
+    let holders = vec!["?"; cols.len() + keep_rowid as usize].join(", ");
+    let quoted = quote_ident(table);
+    let mut sel = src.prepare(&format!("SELECT {list} FROM {quoted}"))?;
+    let ncols = sel.column_count();
+    let mut ins = dst.prepare(&format!("INSERT INTO {quoted} ({list}) VALUES ({holders})"))?;
+    let mut rows = sel.query([])?;
+    let mut n = 0;
+    while let Some(row) = rows.next()? {
+        let vals: Vec<SqlValue> = (0..ncols)
+            .map(|i| row.get::<_, SqlValue>(i))
+            .collect::<rusqlite::Result<_>>()?;
+        ins.execute(rusqlite::params_from_iter(vals.iter()))?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Lock down a connection on a .uapp that came from somewhere else (a dropped
+/// template, a publish, a library upload): everything `harden` does, plus
+/// `trusted_schema=OFF`, so the file's views and triggers can't call SQL
+/// functions with side effects.
+pub fn harden_foreign(conn: &Connection) -> Result<()> {
+    harden(conn)?;
+    conn.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA,
+        false,
+    )?;
+    Ok(())
+}
+
 /// Fill a fresh destination connection with an export of `mem`: a new app_id +
 /// meta, the sqlar files for the wanted roles, the user schema (with rows only
 /// when `include_rows`), and config minus secrets. The one body behind
@@ -504,68 +746,18 @@ fn populate_export(
             ])?;
         }
     }
-    if include_rows {
-        // Create the tables, fill them, and only THEN add indexes and triggers
-        // — a trigger created first would fire on the copied rows.
-        let mut tables: Vec<String> = Vec::new();
-        {
-            let mut sel = mem.prepare(
-                "SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL AND type = 'table'
-                 AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
-                 ORDER BY rowid",
-            )?;
-            let mut rows = sel.query([])?;
-            while let Some(row) = rows.next()? {
-                let name: String = row.get(0)?;
-                let sql: String = row.get(1)?;
-                out.execute_batch(&sql)?;
-                tables.push(name);
-            }
+    // Tables first, then (when wanted) their rows, and only THEN indexes,
+    // views and triggers: a trigger created first would fire on the copied
+    // rows.
+    let objects = user_objects(mem)?;
+    for o in objects.iter().filter(|o| o.typ == "table") {
+        exec_schema_sql(out, &o.typ, &o.name, &o.sql)?;
+        if include_rows {
+            copy_rows(mem, out, &o.name)?;
         }
-        for t in &tables {
-            let quoted = format!("\"{}\"", t.replace('"', "\"\""));
-            let mut sel = mem.prepare(&format!("SELECT * FROM {quoted}"))?;
-            let ncols = sel.column_count();
-            if ncols == 0 {
-                continue;
-            }
-            let holders = (1..=ncols)
-                .map(|i| format!("?{i}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut ins = out.prepare(&format!("INSERT INTO {quoted} VALUES({holders})"))?;
-            let mut rows = sel.query([])?;
-            while let Some(row) = rows.next()? {
-                let vals: Vec<SqlValue> = (0..ncols)
-                    .map(|i| row.get::<_, SqlValue>(i))
-                    .collect::<rusqlite::Result<_>>()?;
-                ins.execute(rusqlite::params_from_iter(vals.iter()))?;
-            }
-        }
-        let mut sel = mem.prepare(
-            "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type != 'table'
-             AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
-             ORDER BY rowid",
-        )?;
-        let mut rows = sel.query([])?;
-        while let Some(row) = rows.next()? {
-            let sql: String = row.get(0)?;
-            out.execute_batch(&sql)?;
-        }
-    } else {
-        // Schema only, no rows (tables first, then indexes/triggers).
-        for phase in ["type = 'table'", "type != 'table'"] {
-            let mut sel = mem.prepare(&format!(
-                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND {phase}
-                 AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
-                 ORDER BY rowid"
-            ))?;
-            let mut rows = sel.query([])?;
-            while let Some(row) = rows.next()? {
-                let sql: String = row.get(0)?;
-                out.execute_batch(&sql)?;
-            }
-        }
+    }
+    for o in objects.iter().filter(|o| o.typ != "table") {
+        exec_schema_sql(out, &o.typ, &o.name, &o.sql)?;
     }
     // Config: everything except secrets — the `ai` entry keeps the
     // provider/model choice, minus api_key.
@@ -839,30 +1031,38 @@ fn bind_params(stmt: &mut rusqlite::Statement, params: &[Value]) -> Result<()> {
     Ok(())
 }
 
-/// First SQL keyword, skipping whitespace and -- / /* */ comments.
-fn first_keyword(sql: &str) -> String {
-    let b = sql.as_bytes();
-    let mut i = 0;
-    loop {
-        while i < b.len() && b[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if sql[i..].starts_with("--") {
-            i += sql[i..].find('\n').map(|n| n + 1).unwrap_or(sql.len() - i);
-        } else if sql[i..].starts_with("/*") {
-            match sql[i..].find("*/") {
-                Some(n) => i += n + 2,
-                None => return String::new(),
+/// The first `n` SQL keywords, lowercased, skipping whitespace and -- / /* */
+/// comments. Stops early at anything that isn't a plain word.
+fn leading_keywords(sql: &str, n: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = sql;
+    while out.len() < n {
+        loop {
+            rest = rest.trim_start();
+            if rest.starts_with("--") {
+                rest = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or("");
+            } else if rest.starts_with("/*") {
+                rest = rest.find("*/").map(|i| &rest[i + 2..]).unwrap_or("");
+            } else {
+                break;
             }
-        } else {
+        }
+        let word: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
+        if word.is_empty() {
             break;
         }
+        rest = &rest[word.len()..];
+        out.push(word.to_ascii_lowercase());
     }
-    sql[i..]
-        .chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect::<String>()
-        .to_ascii_lowercase()
+    out
+}
+
+/// First SQL keyword, skipping whitespace and comments.
+fn first_keyword(sql: &str) -> String {
+    leading_keywords(sql, 1).pop().unwrap_or_default()
 }
 
 /// Word-boundary scan of a whole (possibly multi-statement) SQL text for
@@ -1653,6 +1853,10 @@ pub fn sqlar_read(conn: &Connection, name: &str) -> Result<Option<Vec<u8>>> {
     Ok(None)
 }
 
+/// The most one archived file may unpack to. `sz` is stored in the file, so
+/// it is no limit on its own: a crafted entry could claim gigabytes.
+pub const MAX_FILE_BYTES: u64 = 512 << 20;
+
 /// sqlar_uncompress(X, SZ) semantics for any (sz, data) pair: sz NULL/<=0 or
 /// sz == length(data) means the blob is the content as-is; smaller data is
 /// zlib-inflated to exactly sz bytes.
@@ -1660,6 +1864,12 @@ pub fn sqlar_inflate(sz: Option<i64>, data: Vec<u8>, what: &str) -> Result<Vec<u
     let Some(sz) = sz else { return Ok(data) };
     if sz <= 0 || sz == data.len() as i64 {
         return Ok(data);
+    }
+    if sz as u64 > MAX_FILE_BYTES {
+        bail!(
+            "{what} would unpack to {sz} bytes, more than the {} MiB uApp allows for one file",
+            MAX_FILE_BYTES >> 20
+        );
     }
     use std::io::Read as _;
     // sz is attacker-controlled (it's a column in the opened file): cap the
@@ -2124,6 +2334,47 @@ mod tests {
             .unwrap();
         assert_eq!(tables, 0, "the half-done upgrade was rolled back");
         assert_eq!(header_of(&c), (0, 0));
+    }
+
+    #[test]
+    fn inflation_is_capped() {
+        let small = sqlar_deflate(&[0u8; 4096]).unwrap();
+        let e = err_of(sqlar_inflate(Some(1 << 40), small.clone(), "app/bomb.bin"));
+        assert!(e.contains("app/bomb.bin") && e.contains("512 MiB"), "{e}");
+        assert_eq!(
+            sqlar_inflate(Some(4096), small, "ok").unwrap(),
+            vec![0u8; 4096]
+        );
+    }
+
+    #[test]
+    fn schema_sql_must_be_one_create() {
+        let c = app();
+        assert_eq!(
+            leading_keywords("  -- x\n/* y */ CREATE  virtual TABLE", 2),
+            ["create", "virtual"]
+        );
+        assert!(only_trivia("  ; -- done\n /* end */ ;"));
+        assert!(!only_trivia("; ATTACH 'x' AS y"));
+        for (typ, sql) in [
+            ("table", "ATTACH 'x' AS y"),
+            ("table", "CREATE VIEW v AS SELECT 1"),
+            ("view", "CREATE TEMP VIEW v AS SELECT 1"),
+            ("index", "DROP TABLE sqlar"),
+            ("table", "CREATE TABLE t(x); PRAGMA rekey='x'"),
+        ] {
+            let e = err_of(exec_schema_sql(&c, typ, "obj", sql));
+            assert!(e.contains("tampered"), "{sql}: {e}");
+        }
+        let e = err_of(exec_schema_sql(
+            &c,
+            "table",
+            "obj",
+            "CREATE TABLE uapp_config2(x)",
+        ));
+        assert!(e.contains("uApp's own tables"), "{e}");
+        exec_schema_sql(&c, "table", "t", "CREATE TABLE t(x) ; -- fine").unwrap();
+        exec_schema_sql(&c, "index", "i", "CREATE UNIQUE INDEX i ON t(x)").unwrap();
     }
 
     #[test]

@@ -271,6 +271,7 @@ fn sanitize_and_store(lib: &Library, name: &str, body: &[u8]) -> anyhow::Result<
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .context("opening the upload as SQLite")?;
+        crate::store::harden_foreign(&conn)?;
         let has_sqlar: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sqlar'",

@@ -26,7 +26,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::store::{self, Op};
+use crate::store::{self, Op, SchemaObject};
 
 /// Quote an identifier for use in DDL.
 fn q(name: &str) -> String {
@@ -82,21 +82,34 @@ impl Source {
                 .collect::<String>()
         ));
         let opened = (|| -> Result<Connection> {
-            std::fs::write(&tmp, bytes)?;
+            let plain = &bytes[..15] == b"SQLite format 3";
+            if plain && bytes.len() > 19 && bytes[18] == 2 {
+                // A WAL-mode file on its own (no -wal beside it): mark it as
+                // a rollback-journal file so it opens read-only without
+                // SQLite wanting to create a -shm next to the copy.
+                let mut b = bytes.to_vec();
+                b[18] = 1;
+                b[19] = 1;
+                std::fs::write(&tmp, b)?;
+            } else {
+                std::fs::write(&tmp, bytes)?;
+            }
             // Templates are always plaintext (export_template writes an
             // unencrypted file); a FULL copy of an encrypted app is not, and
             // then we need its master password to read the app code at all.
-            let conn = if &bytes[..15] == b"SQLite format 3" {
-                Connection::open(&tmp)?
+            // Read-only either way: nothing here writes to the source.
+            let conn = if plain {
+                Connection::open_with_flags(&tmp, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
             } else {
                 match password {
-                    Some(pw) => crate::cipher::open_file(&tmp, pw)?,
+                    Some(pw) => crate::cipher::open_file_readonly(&tmp, pw)?,
                     None => bail!(
                         "that file isn't a plain SQLite database — if it's an ENCRYPTED \
                          .uapp, decrypt it (or supply its master password) and try again"
                     ),
                 }
             };
+            store::harden_foreign(&conn)?;
             validate(&conn)?;
             Ok(conn)
         })();
@@ -115,6 +128,7 @@ impl Source {
     #[cfg(target_arch = "wasm32")]
     pub fn from_bytes(bytes: &[u8], _password: Option<&str>) -> Result<Source> {
         let conn = store::deserialize_bytes(bytes)?;
+        store::harden_foreign(&conn)?;
         validate(&conn)?;
         Ok(Source { conn })
     }
@@ -162,31 +176,6 @@ fn validate(conn: &Connection) -> Result<()> {
 /// by different builds still compare equal.
 fn app_files(conn: &Connection) -> Result<BTreeMap<String, Vec<u8>>> {
     files_by_role(conn, &["app"])
-}
-
-/// One schema object belonging to the app (never uapp_* / sqlar internals).
-struct Obj {
-    typ: String,
-    name: String,
-    sql: String,
-}
-
-fn user_objects(conn: &Connection) -> Result<Vec<Obj>> {
-    let mut stmt = conn.prepare(
-        "SELECT type, name, sql FROM sqlite_master
-         WHERE sql IS NOT NULL
-           AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'
-           AND (tbl_name IS NULL OR (tbl_name NOT LIKE 'uapp_%' AND tbl_name != 'sqlar'))
-         ORDER BY rowid",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok(Obj {
-            typ: r.get(0)?,
-            name: r.get(1)?,
-            sql: r.get(2)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 struct Col {
@@ -280,9 +269,10 @@ pub fn plan(target: &Connection, src: &Connection) -> Result<Value> {
         .collect();
 
     let mut warnings: Vec<String> = Vec::new();
-    let src_objs = user_objects(src)?;
-    let cur_objs = user_objects(target)?;
-    let cur_by_name: BTreeMap<&str, &Obj> = cur_objs.iter().map(|o| (o.name.as_str(), o)).collect();
+    let src_objs = store::user_objects(src)?;
+    let cur_objs = store::user_objects(target)?;
+    let cur_by_name: BTreeMap<&str, &SchemaObject> =
+        cur_objs.iter().map(|o| (o.name.as_str(), o)).collect();
 
     let mut create_tables: Vec<Value> = Vec::new();
     let mut alters: Vec<Value> = Vec::new();
@@ -465,12 +455,15 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
     }
 
     // --- schema (additive; a statement we can't run becomes a warning) ---
-    let exec = |sql: &str, what: &str, warnings: &mut Vec<String>| {
-        if let Err(e) = target.execute_batch(sql) {
-            warnings.push(format!("{what}: {e}"));
-            false
-        } else {
-            true
+    // Everything that came from the template is checked and sandboxed by
+    // `store::exec_schema_sql`; only the DROPs are written here.
+    let create = |typ: &str, name: &str, sql: &str, warnings: &mut Vec<String>| {
+        match store::exec_schema_sql(target, typ, name, sql) {
+            Ok(()) => true,
+            Err(e) => {
+                warnings.push(format!("{e:#}"));
+                false
+            }
         }
     };
     let mut tables_created = 0usize;
@@ -483,7 +476,7 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
             t["table"].as_str().unwrap_or(""),
             t["sql"].as_str().unwrap_or(""),
         );
-        if exec(sql, &format!("creating table {name}"), &mut warnings) {
+        if create("table", name, sql, &mut warnings) {
             tables_created += 1;
         }
     }
@@ -494,11 +487,16 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
         .unwrap_or_default()
     {
         let what = format!(
-            "adding {}.{}",
+            "{}.{}",
             a["table"].as_str().unwrap_or(""),
             a["column"].as_str().unwrap_or("")
         );
-        if exec(a["sql"].as_str().unwrap_or(""), &what, &mut warnings) {
+        if create(
+            "alter",
+            &what,
+            a["sql"].as_str().unwrap_or(""),
+            &mut warnings,
+        ) {
             columns_added += 1;
         }
     }
@@ -518,13 +516,11 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
             "trigger" => format!("DROP TRIGGER IF EXISTS {}", q(name)),
             _ => continue,
         };
-        if exec(&drop, &format!("replacing {typ} {name}"), &mut warnings)
-            && exec(
-                o["sql"].as_str().unwrap_or(""),
-                &format!("recreating {typ} {name}"),
-                &mut warnings,
-            )
-        {
+        if let Err(e) = target.execute_batch(&drop) {
+            warnings.push(format!("replacing {typ} {name}: {e}"));
+            continue;
+        }
+        if create(typ, name, o["sql"].as_str().unwrap_or(""), &mut warnings) {
             objects += 1;
         }
     }
@@ -537,11 +533,7 @@ pub fn apply(target: &Connection, src: &Connection, op: &Op, remove_stale: bool)
             o["type"].as_str().unwrap_or(""),
             o["name"].as_str().unwrap_or(""),
         );
-        if exec(
-            o["sql"].as_str().unwrap_or(""),
-            &format!("creating {typ} {name}"),
-            &mut warnings,
-        ) {
+        if create(typ, name, o["sql"].as_str().unwrap_or(""), &mut warnings) {
             objects += 1;
         }
     }
@@ -661,7 +653,7 @@ pub fn publish(
     // Schema: everything the site owns goes, then comes back as the copy has
     // it. Tables first and rows before indexes/triggers — a trigger created
     // early would fire on the copied rows (same order as `export_public`).
-    for o in user_objects(target)?.iter().rev() {
+    for o in store::user_objects(target)?.iter().rev() {
         let kind = match o.typ.as_str() {
             "table" => "TABLE",
             "view" => "VIEW",
@@ -671,35 +663,17 @@ pub fn publish(
         };
         target.execute_batch(&format!("DROP {kind} IF EXISTS {}", q(&o.name)))?;
     }
-    let objs = user_objects(src)?;
+    let objs = store::user_objects(src)?;
     let mut tables = 0usize;
     let mut rows = 0usize;
     for o in objs.iter().filter(|o| o.typ == "table") {
-        target.execute_batch(&o.sql)?;
+        store::exec_schema_sql(target, &o.typ, &o.name, &o.sql)?;
         tables += 1;
-        let quoted = q(&o.name);
-        let mut sel = src.prepare(&format!("SELECT * FROM {quoted}"))?;
-        let ncols = sel.column_count();
-        if ncols == 0 {
-            continue;
-        }
-        let holders = (1..=ncols)
-            .map(|i| format!("?{i}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut ins = target.prepare(&format!("INSERT INTO {quoted} VALUES({holders})"))?;
-        let mut it = sel.query([])?;
-        while let Some(r) = it.next()? {
-            let vals: Vec<rusqlite::types::Value> = (0..ncols)
-                .map(|i| r.get::<_, rusqlite::types::Value>(i))
-                .collect::<rusqlite::Result<_>>()?;
-            ins.execute(rusqlite::params_from_iter(vals.iter()))?;
-            rows += 1;
-        }
+        rows += store::copy_rows(src, target, &o.name)?;
     }
     let mut objects = 0usize;
     for o in objs.iter().filter(|o| o.typ != "table") {
-        target.execute_batch(&o.sql)?;
+        store::exec_schema_sql(target, &o.typ, &o.name, &o.sql)?;
         objects += 1;
     }
 
