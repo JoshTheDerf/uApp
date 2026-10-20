@@ -52,7 +52,7 @@ impl ChangeSet {
             "chat" | "chat_clear" | "chat_compact" | "session_meta" | "session_del" => {
                 self.chat = true
             }
-            "config_set" => self.config = true,
+            "config_set" | "app_rename" => self.config = true,
             // A template update rewrites app files, reconciles the schema and
             // can fill in config keys — everything but the chat.
             "template_update" => {
@@ -234,6 +234,7 @@ impl Engine {
                 path.display()
             ));
         }
+        store::harden(&conn)?;
         Ok(conn)
     }
 
@@ -479,6 +480,26 @@ impl Engine {
 
 // Shared by native and wasm builds.
 impl Engine {
+    /// Reclaim the space deleted rows and files left behind (Settings →
+    /// Maintenance), then refresh the rescue snapshot.
+    pub fn compact(&mut self) -> Result<()> {
+        use rusqlite::limits::Limit;
+        // VACUUM rebuilds the file through a temporary attached database, so
+        // the live connection's no-ATTACH limit is lifted just for it.
+        let prev = self.db.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 1)?;
+        let done = self.db.execute_batch("VACUUM");
+        self.db.set_limit(Limit::SQLITE_LIMIT_ATTACHED, prev)?;
+        done?;
+        // Same content, new bytes: anything cached from the file (the public
+        // /site.uapp) has to be rebuilt.
+        self.dirty = true;
+        self.writes += 1;
+        if let Err(e) = self.snapshot() {
+            eprintln!("uapp: snapshot after compacting failed: {e:#}");
+        }
+        Ok(())
+    }
+
     /// Execute one local operation as one committed transaction against the
     /// file. On any failure the database is left untouched.
     pub fn local_op(&mut self, kind: &str, payload: Value) -> Result<(Value, Op)> {
@@ -526,6 +547,7 @@ impl Engine {
             None => Connection::open_in_memory()?,
         };
         store::bootstrap_conn(&db, name)?; // idempotent: fills in missing schema
+        store::harden(&db)?;
         let app_id = store::meta_get(&db, "app_id")?.unwrap_or_else(|| "unknown".into());
         Ok(Engine {
             path: PathBuf::from(format!("{name}.uapp")),

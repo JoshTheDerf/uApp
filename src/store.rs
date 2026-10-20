@@ -711,16 +711,10 @@ fn first_keyword(sql: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Is this statement an ATTACH or DETACH? SQLite reports both as "read-only",
-/// but they open arbitrary local database files.
-pub fn is_attach_stmt(sql: &str) -> bool {
-    let kw = first_keyword(sql);
-    kw == "attach" || kw == "detach"
-}
-
 /// Word-boundary scan of a whole (possibly multi-statement) SQL text for
-/// ATTACH/DETACH — coarse (a string literal can false-positive), but a false
-/// positive is a clear error rather than a data leak.
+/// ATTACH/DETACH: coarse (a string literal can false-positive), but a false
+/// positive only means the assistant asks for permission it didn't need. The
+/// authorizer below is what actually enforces the rule.
 pub fn mentions_attach(sql: &str) -> bool {
     let lower = sql.to_ascii_lowercase();
     let b = lower.as_bytes();
@@ -739,39 +733,367 @@ pub fn mentions_attach(sql: &str) -> bool {
     false
 }
 
-/// Run a read-only query against the materialized db. ATTACH/DETACH are
+// ---- the SQL sandbox ----------------------------------------------------------
+//
+// SQL text from outside uApp (app pages through uapp.js, the shell's SQL
+// panel, the assistant's sql tools) arrives through `query` and the "sql",
+// "batch" and "import" ops. SQLite's own read-only flag isn't enough for it:
+// most PRAGMAs count as read-only (`PRAGMA rekey` would lock the user out of
+// an encrypted file), and a batch could COMMIT the engine's transaction and
+// then run anything (`VACUUM INTO '/any/path'`). So while that SQL is
+// prepared and run, an authorizer checks every action SQLite is about to
+// take, and refuses:
+//
+//   * transaction control (each exec/batch already is one transaction);
+//   * ATTACH/DETACH, unless the user approved it in the assistant's prompt;
+//   * PRAGMAs outside a short read-only list;
+//   * writes to uApp's own tables (`uapp_*`, `sqlar`) and to SQLite's
+//     internals, and writes to any attached database.
+//
+// Internal code (file writes, chat, settings, migrations) talks to SQLite
+// directly and is never checked: the authorizer is only installed for the
+// length of one guarded call. `harden` adds the always-on part for the live
+// connection and for files opened from elsewhere.
+
+/// PRAGMAs that only report on the schema; any argument is fine.
+const PRAGMA_INSPECT: &[&str] = &[
+    "table_info",
+    "table_xinfo",
+    "table_list",
+    "index_list",
+    "index_info",
+    "index_xinfo",
+    "foreign_key_list",
+    "foreign_key_check",
+    "integrity_check",
+    "quick_check",
+    "database_list",
+    "collation_list",
+    "function_list",
+    "module_list",
+    "pragma_list",
+    "compile_options",
+];
+
+/// PRAGMAs that may be read but not set.
+const PRAGMA_READ_ONLY: &[&str] = &[
+    "user_version",
+    "application_id",
+    "schema_version",
+    "data_version",
+    "page_count",
+    "page_size",
+    "freelist_count",
+    "encoding",
+    "foreign_keys",
+    "journal_mode",
+    "synchronous",
+    "auto_vacuum",
+];
+
+/// SQLite's own tables that ordinary DDL updates (CREATE/DROP/ALTER write the
+/// schema table, AUTOINCREMENT keeps sqlite_sequence, ANALYZE the stat
+/// tables). Direct writes to the schema table are refused by SQLite itself.
+const SQLITE_BOOKKEEPING: &[&str] = &[
+    "sqlite_master",
+    "sqlite_schema",
+    "sqlite_temp_master",
+    "sqlite_temp_schema",
+    "sqlite_sequence",
+    "sqlite_stat1",
+    "sqlite_stat2",
+    "sqlite_stat3",
+    "sqlite_stat4",
+];
+
+/// What a guarded call may do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Access {
+    /// `sql.query`: read anything, change nothing.
+    Read,
+    /// `sql.query` after the user approved ATTACH/DETACH in the assistant's
+    /// permission prompt.
+    ReadAttach,
+    /// `sql.exec`, `sql.batch`, CSV import, and schema copied in from another
+    /// file (a template, a publish, a library upload).
+    Write,
+}
+
+enum Verdict {
+    Allow,
+    /// Skip the action without an error (only used for `PRAGMA foreign_keys
+    /// = ...`, which was always a silent no-op inside a write transaction).
+    Ignore,
+    Deny(String),
+}
+
+/// A uApp table or a SQLite internal that app SQL may read but never change.
+fn reserved_name(name: &str) -> Option<String> {
+    let n = name.to_ascii_lowercase();
+    if n == "sqlar" {
+        Some(
+            "sqlar holds the app's files and can't be changed with SQL (use files.write \
+             and files.delete)"
+                .into(),
+        )
+    } else if n.starts_with("uapp_") {
+        Some(format!(
+            "{name} is one of uApp's own tables (chat, file history, settings) and can't be \
+             changed with SQL"
+        ))
+    } else if n.starts_with("sqlite_")
+        && !SQLITE_BOOKKEEPING.contains(&n.as_str())
+        // The indexes SQLite makes for PRIMARY KEY / UNIQUE constraints.
+        && !n.starts_with("sqlite_autoindex_")
+    {
+        Some(format!("{name} is internal to SQLite and can't be changed"))
+    } else {
+        None
+    }
+}
+
+fn judge(access: Access, ctx: &rusqlite::hooks::AuthContext<'_>) -> Verdict {
+    use rusqlite::hooks::AuthAction as A;
+    let deny = |why: String| Verdict::Deny(why);
+    // The tables (and other objects) a write action touches.
+    let targets: &[&str] =
+        match &ctx.action {
+            A::Transaction { .. } | A::Savepoint { .. } => return deny(
+                "BEGIN, COMMIT, ROLLBACK and SAVEPOINT can't be used here: every exec or batch \
+                 already runs as one transaction, committed when it succeeds and rolled back \
+                 when any statement fails"
+                    .into(),
+            ),
+            A::Attach { .. } | A::Detach { .. } => {
+                return match access {
+                    Access::ReadAttach => Verdict::Allow,
+                    Access::Read => deny(
+                        "ATTACH/DETACH opens another database file on this machine and needs \
+                     explicit user approval; ask via the assistant, which prompts for permission"
+                            .into(),
+                    ),
+                    Access::Write => deny(
+                        "ATTACH/DETACH can't run in app writes; read the other database with an \
+                     approved read-only query and inline the values instead"
+                            .into(),
+                    ),
+                };
+            }
+            A::Pragma {
+                pragma_name,
+                pragma_value,
+            } => {
+                let name = pragma_name.to_ascii_lowercase();
+                return if PRAGMA_INSPECT.contains(&name.as_str()) {
+                    Verdict::Allow
+                } else if PRAGMA_READ_ONLY.contains(&name.as_str()) {
+                    match pragma_value {
+                        None => Verdict::Allow,
+                        Some(_) if name == "foreign_keys" => Verdict::Ignore,
+                        Some(_) => deny(format!(
+                            "PRAGMA {name} can be read here but not set (uApp manages it)"
+                        )),
+                    }
+                } else {
+                    deny(format!(
+                        "PRAGMA {name} isn't allowed from app or assistant SQL; only read-only \
+                     PRAGMAs such as table_info, index_list and foreign_key_list are"
+                    ))
+                };
+            }
+            A::Function { function_name } => {
+                let f = function_name.to_ascii_lowercase();
+                return if f.starts_with("sqlcipher") || f == "load_extension" {
+                    deny(format!(
+                        "the SQL function {function_name}() isn't allowed here"
+                    ))
+                } else {
+                    Verdict::Allow
+                };
+            }
+            A::Insert { table_name }
+            | A::Delete { table_name }
+            | A::Update { table_name, .. }
+            | A::CreateTable { table_name }
+            | A::CreateTempTable { table_name }
+            | A::DropTable { table_name }
+            | A::DropTempTable { table_name }
+            | A::AlterTable { table_name, .. } => &[table_name],
+            A::CreateIndex {
+                index_name,
+                table_name,
+            }
+            | A::CreateTempIndex {
+                index_name,
+                table_name,
+            }
+            | A::DropIndex {
+                index_name,
+                table_name,
+            }
+            | A::DropTempIndex {
+                index_name,
+                table_name,
+            } => &[index_name, table_name],
+            A::CreateTrigger {
+                trigger_name,
+                table_name,
+            }
+            | A::CreateTempTrigger {
+                trigger_name,
+                table_name,
+            }
+            | A::DropTrigger {
+                trigger_name,
+                table_name,
+            }
+            | A::DropTempTrigger {
+                trigger_name,
+                table_name,
+            } => &[trigger_name, table_name],
+            A::CreateView { view_name }
+            | A::CreateTempView { view_name }
+            | A::DropView { view_name }
+            | A::DropTempView { view_name } => &[view_name],
+            A::CreateVtable { table_name, .. } | A::DropVtable { table_name, .. } => &[table_name],
+            // Reads, SELECT, recursive CTEs, ANALYZE, REINDEX.
+            _ => return Verdict::Allow,
+        };
+    if access != Access::Write {
+        return deny("query() only accepts read-only SQL; use exec for writes".into());
+    }
+    // ALTER TABLE reports the database as its first argument instead.
+    let db = match &ctx.action {
+        A::AlterTable { database_name, .. } => Some(*database_name),
+        _ => ctx.database_name,
+    };
+    if let Some(db) = db.filter(|d| *d != "main" && *d != "temp") {
+        return deny(format!(
+            "writing to the attached database {db} isn't allowed; only this app's own tables \
+             can be changed"
+        ));
+    }
+    match targets.iter().find_map(|t| reserved_name(t)) {
+        Some(why) => deny(why),
+        None => Verdict::Allow,
+    }
+}
+
+/// The always-on part of the sandbox, for the live connection and for any
+/// .uapp opened from somewhere else: no ATTACH (a guarded call that the user
+/// approved lifts this for its own length), and SQLite's DEFENSIVE mode, which
+/// turns off the features that let plain SQL corrupt the file
+/// (`writable_schema`, writes to `sqlite_dbpage` and FTS shadow tables, ...).
+pub fn harden(conn: &Connection) -> Result<()> {
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+    Ok(())
+}
+
+/// The authorizer installed for one guarded call. Dropping it uninstalls the
+/// authorizer and puts the attach limit back.
+struct Guard<'c> {
+    conn: &'c Connection,
+    refused: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    attach_limit: Option<i32>,
+}
+
+impl<'c> Guard<'c> {
+    fn new(conn: &'c Connection, access: Access) -> Result<Guard<'c>> {
+        use rusqlite::hooks::Authorization;
+        let refused = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let why = refused.clone();
+        conn.authorizer(Some(move |ctx: rusqlite::hooks::AuthContext<'_>| {
+            match judge(access, &ctx) {
+                Verdict::Allow => Authorization::Allow,
+                Verdict::Ignore => Authorization::Ignore,
+                Verdict::Deny(reason) => {
+                    // Keep the first reason: it names what the statement
+                    // itself tried, before anything it would have led to.
+                    if let Ok(mut slot) = why.lock() {
+                        slot.get_or_insert(reason);
+                    }
+                    Authorization::Deny
+                }
+            }
+        }))?;
+        let mut guard = Guard {
+            conn,
+            refused,
+            attach_limit: None,
+        };
+        if access == Access::ReadAttach {
+            guard.attach_limit =
+                Some(conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 10)?);
+        }
+        Ok(guard)
+    }
+
+    /// A failure inside the guarded call, reworded to say what was refused and
+    /// why when the authorizer is the reason ("not authorized" says neither).
+    fn explain(&self, e: impl Into<anyhow::Error>) -> anyhow::Error {
+        match self.refused.lock().ok().and_then(|mut r| r.take()) {
+            Some(why) => anyhow!(why),
+            None => e.into(),
+        }
+    }
+
+    /// Run `f` under the guard, rewording any refusal.
+    fn run<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        f().map_err(|e| self.explain(e))
+    }
+}
+
+impl Drop for Guard<'_> {
+    fn drop(&mut self) {
+        let _ = self.conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        );
+        if let Some(prev) = self.attach_limit {
+            let _ = self
+                .conn
+                .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, prev);
+        }
+    }
+}
+
+/// Run a read-only query from app or assistant SQL. ATTACH/DETACH are
 /// refused here; callers that obtained explicit user approval use
 /// query_allow_attach instead.
 pub fn query(conn: &Connection, sql: &str, params: &[Value]) -> Result<Value> {
-    if is_attach_stmt(sql) {
-        bail!("ATTACH/DETACH opens another database file on this machine and needs explicit user approval — ask via the assistant, which prompts for permission");
-    }
-    query_allow_attach(conn, sql, params)
+    run_query(conn, sql, params, Access::Read)
 }
 
-/// query() without the ATTACH refusal — only for calls the user explicitly
+/// query() that may also ATTACH/DETACH: only for calls the user explicitly
 /// approved (the assistant's permission prompt).
 pub fn query_allow_attach(conn: &Connection, sql: &str, params: &[Value]) -> Result<Value> {
-    let mut stmt = conn.prepare(sql)?;
-    if !stmt.readonly() {
-        bail!("query() only accepts read-only SQL; use exec for writes");
-    }
-    bind_params(&mut stmt, params)?;
-    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-    let ncols = cols.len();
-    let mut rows_out = Vec::new();
-    let mut rows = stmt.raw_query();
-    while let Some(row) = rows.next()? {
-        let mut arr = Vec::with_capacity(ncols);
-        for i in 0..ncols {
-            arr.push(sql_to_json(row.get_ref(i)?));
+    run_query(conn, sql, params, Access::ReadAttach)
+}
+
+fn run_query(conn: &Connection, sql: &str, params: &[Value], access: Access) -> Result<Value> {
+    let guard = Guard::new(conn, access)?;
+    guard.run(|| {
+        let mut stmt = conn.prepare(sql)?;
+        if !stmt.readonly() {
+            bail!("query() only accepts read-only SQL; use exec for writes");
         }
-        rows_out.push(Value::Array(arr));
-        if rows_out.len() >= 50_000 {
-            bail!("query returned more than 50000 rows; add a LIMIT");
+        bind_params(&mut stmt, params)?;
+        let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let ncols = cols.len();
+        let mut rows_out = Vec::new();
+        let mut rows = stmt.raw_query();
+        while let Some(row) = rows.next()? {
+            let mut arr = Vec::with_capacity(ncols);
+            for i in 0..ncols {
+                arr.push(sql_to_json(row.get_ref(i)?));
+            }
+            rows_out.push(Value::Array(arr));
+            if rows_out.len() >= 50_000 {
+                bail!("query returned more than 50000 rows; add a LIMIT");
+            }
         }
-    }
-    Ok(json!({"columns": cols, "rows": rows_out}))
+        Ok(json!({"columns": cols, "rows": rows_out}))
+    })
 }
 
 /// Snapshot a file's outgoing content into the history table before a write or
@@ -805,52 +1127,53 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             let sql = p["sql"]
                 .as_str()
                 .ok_or_else(|| anyhow!("sql op missing sql"))?;
-            // ATTACH would open (or create) an arbitrary local file with the
-            // app's privileges — never allowed from app-originated writes.
-            if is_attach_stmt(sql) {
-                bail!("ATTACH/DETACH can't run in app writes — read the other database with an approved read-only query and inline the values instead");
-            }
             let params: Vec<Value> = p["params"].as_array().cloned().unwrap_or_default();
-            let mut stmt = conn.prepare(sql)?;
-            bind_params(&mut stmt, &params)?;
-            // Statements that produce columns (INSERT/UPDATE/DELETE ...
-            // RETURNING, or a stray SELECT) return their rows, so callers can
-            // read back e.g. the new id in the SAME statement — no
-            // insert-then-SELECT-MAX(id) race.
-            if stmt.column_count() > 0 {
-                let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-                let ncols = cols.len();
-                let mut rows_out = Vec::new();
-                let mut rows = stmt.raw_query();
-                while let Some(row) = rows.next()? {
-                    let mut arr = Vec::with_capacity(ncols);
-                    for i in 0..ncols {
-                        arr.push(sql_to_json(row.get_ref(i)?));
+            let guard = Guard::new(conn, Access::Write)?;
+            guard.run(|| {
+                let mut stmt = conn.prepare(sql)?;
+                bind_params(&mut stmt, &params)?;
+                // Statements that produce columns (INSERT/UPDATE/DELETE ...
+                // RETURNING, or a stray SELECT) return their rows, so callers
+                // can read back e.g. the new id in the SAME statement — no
+                // insert-then-SELECT-MAX(id) race.
+                if stmt.column_count() > 0 {
+                    let cols: Vec<String> =
+                        stmt.column_names().iter().map(|s| s.to_string()).collect();
+                    let ncols = cols.len();
+                    let mut rows_out = Vec::new();
+                    let mut rows = stmt.raw_query();
+                    while let Some(row) = rows.next()? {
+                        let mut arr = Vec::with_capacity(ncols);
+                        for i in 0..ncols {
+                            arr.push(sql_to_json(row.get_ref(i)?));
+                        }
+                        rows_out.push(Value::Array(arr));
                     }
-                    rows_out.push(Value::Array(arr));
+                    return Ok(
+                        json!({"changes": rows_out.len(), "columns": cols, "rows": rows_out}),
+                    );
                 }
-                return Ok(json!({"changes": rows_out.len(), "columns": cols, "rows": rows_out}));
-            }
-            let n = stmt.raw_execute()?;
-            drop(stmt);
-            // Rowid of the row this write created (0 = none: UPDATE/DELETE/DDL
-            // or a table without a rowid alias). Lets actions do
-            // `const {insert_id} = await uapp.exec("INSERT ...")`.
-            let iid = if matches!(first_keyword(sql).as_str(), "insert" | "replace") {
-                conn.last_insert_rowid()
-            } else {
-                0
-            };
-            Ok(json!({"changes": n, "insert_id": if iid > 0 { json!(iid) } else { Value::Null } }))
+                let n = stmt.raw_execute()?;
+                drop(stmt);
+                // Rowid of the row this write created (0 = none: UPDATE/DELETE/
+                // DDL or a table without a rowid alias). Lets actions do
+                // `const {insert_id} = await uapp.exec("INSERT ...")`.
+                let iid = if matches!(first_keyword(sql).as_str(), "insert" | "replace") {
+                    conn.last_insert_rowid()
+                } else {
+                    0
+                };
+                Ok(
+                    json!({"changes": n, "insert_id": if iid > 0 { json!(iid) } else { Value::Null } }),
+                )
+            })
         }
         "batch" => {
             let sql = p["sql"]
                 .as_str()
                 .ok_or_else(|| anyhow!("batch op missing sql"))?;
-            if mentions_attach(sql) {
-                bail!("ATTACH/DETACH can't run in app writes — read the other database with an approved read-only query and inline the values instead");
-            }
-            conn.execute_batch(sql)?;
+            let guard = Guard::new(conn, Access::Write)?;
+            guard.run(|| Ok(conn.execute_batch(sql)?))?;
             Ok(json!({"ok": true}))
         }
         "import" => {
@@ -861,44 +1184,8 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             if !table.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 bail!("import table name must be alphanumeric/underscore");
             }
-            if let Some(create) = p["create"].as_str() {
-                conn.execute_batch(create)?;
-            }
-            if p["truncate"].as_bool().unwrap_or(false) {
-                conn.execute(&format!("DELETE FROM \"{}\"", table), [])?;
-            }
-            let cols: Vec<String> = p["columns"]
-                .as_array()
-                .ok_or_else(|| anyhow!("import missing columns"))?
-                .iter()
-                .map(|c| c.as_str().unwrap_or_default().to_string())
-                .collect();
-            if cols
-                .iter()
-                .any(|c| !c.chars().all(|ch| ch.is_alphanumeric() || ch == '_'))
-            {
-                bail!("import column names must be alphanumeric/underscore");
-            }
-            let placeholders = vec!["?"; cols.len()].join(",");
-            let quoted: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c)).collect();
-            let sql = format!(
-                "INSERT INTO \"{}\" ({}) VALUES ({})",
-                table,
-                quoted.join(","),
-                placeholders
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = p["rows"]
-                .as_array()
-                .ok_or_else(|| anyhow!("import missing rows"))?;
-            for row in rows {
-                let vals = row
-                    .as_array()
-                    .ok_or_else(|| anyhow!("import row not array"))?;
-                bind_params(&mut stmt, vals)?;
-                stmt.raw_execute()?;
-            }
-            Ok(json!({"inserted": rows.len()}))
+            let guard = Guard::new(conn, Access::Write)?;
+            guard.run(|| import_rows(conn, table, p))
         }
         // Names are normalized here, not at the caller: ops written before the
         // app/data split (or by an app using root-absolute paths) must replay
@@ -945,6 +1232,18 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
                 .decode(p["b64"].as_str().unwrap_or_default())?;
             let src = crate::template::Source::from_bytes(&bytes, None)?;
             crate::template::publish(conn, src.conn(), op, p["data"].as_bool().unwrap_or(false))
+        }
+        // The app's display name. Its own op (rather than SQL on uapp_meta) so
+        // the generic SQL paths never need write access to uApp's tables.
+        "app_rename" => {
+            let name = p["name"]
+                .as_str()
+                .ok_or_else(|| anyhow!("app_rename missing name"))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO uapp_meta(key,value) VALUES('name',?1)",
+                rusqlite::params![name],
+            )?;
+            Ok(json!({"ok": true}))
         }
         "config_set" => {
             let key = p["key"]
@@ -1080,6 +1379,49 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
         }
         other => bail!("unknown op kind {other}"),
     }
+}
+
+/// The "import" op's body: one whole dataset `{table, columns, rows, create?,
+/// truncate?}` into an app table. Runs under the sandbox (see `apply_op`).
+fn import_rows(conn: &Connection, table: &str, p: &Value) -> Result<Value> {
+    if let Some(create) = p["create"].as_str() {
+        conn.execute_batch(create)?;
+    }
+    if p["truncate"].as_bool().unwrap_or(false) {
+        conn.execute(&format!("DELETE FROM \"{}\"", table), [])?;
+    }
+    let cols: Vec<String> = p["columns"]
+        .as_array()
+        .ok_or_else(|| anyhow!("import missing columns"))?
+        .iter()
+        .map(|c| c.as_str().unwrap_or_default().to_string())
+        .collect();
+    if cols
+        .iter()
+        .any(|c| !c.chars().all(|ch| ch.is_alphanumeric() || ch == '_'))
+    {
+        bail!("import column names must be alphanumeric/underscore");
+    }
+    let placeholders = vec!["?"; cols.len()].join(",");
+    let quoted: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c)).collect();
+    let sql = format!(
+        "INSERT INTO \"{}\" ({}) VALUES ({})",
+        table,
+        quoted.join(","),
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = p["rows"]
+        .as_array()
+        .ok_or_else(|| anyhow!("import missing rows"))?;
+    for row in rows {
+        let vals = row
+            .as_array()
+            .ok_or_else(|| anyhow!("import row not array"))?;
+        bind_params(&mut stmt, vals)?;
+        stmt.raw_execute()?;
+    }
+    Ok(json!({"inserted": rows.len()}))
 }
 
 pub fn config_get(conn: &Connection, key: &str) -> Result<Option<Value>> {
@@ -1309,6 +1651,201 @@ mod tests {
         h[28..32].copy_from_slice(&pages.to_be_bytes());
         h[92..96].copy_from_slice(&7u32.to_be_bytes()); // version-valid-for
         h
+    }
+
+    /// A bootstrapped in-memory app with the live connection's hardening.
+    fn app() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        bootstrap_conn(&c, "t").unwrap();
+        harden(&c).unwrap();
+        c
+    }
+
+    fn op(kind: &str, payload: Value) -> Op {
+        Op {
+            dev: "d".into(),
+            ts: 1,
+            user: "u".into(),
+            kind: kind.into(),
+            payload,
+        }
+    }
+
+    /// One exec/batch the way the engine runs it: inside BEGIN IMMEDIATE,
+    /// committed on success and rolled back on failure.
+    fn write(c: &Connection, kind: &str, sql: &str) -> Result<Value> {
+        c.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let r = apply_op(c, &op(kind, json!({"sql": sql, "params": []})));
+        match &r {
+            Ok(_) => c.execute_batch("COMMIT").unwrap(),
+            Err(_) => c.execute_batch("ROLLBACK").unwrap(),
+        }
+        r
+    }
+
+    fn err_of<T: std::fmt::Debug>(r: Result<T>) -> String {
+        format!("{:#}", r.expect_err("should be refused"))
+    }
+
+    #[test]
+    fn sandbox_refuses_dangerous_pragmas_in_queries() {
+        let c = app();
+        for sql in [
+            "PRAGMA rekey='x'",
+            "PRAGMA key='x'",
+            "PRAGMA synchronous=OFF",
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA writable_schema=ON",
+            "PRAGMA user_version=5",
+        ] {
+            let e = err_of(query(&c, sql, &[]));
+            assert!(e.contains("PRAGMA"), "{sql}: {e}");
+            assert!(!e.contains("not authorized"), "{sql}: says why ({e})");
+        }
+        let jm: String = c
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(jm, "memory", "journal mode untouched");
+        // The schema-inspection PRAGMAs the SQL panel and the assistant use.
+        for sql in [
+            "PRAGMA table_info(uapp_meta)",
+            "PRAGMA table_xinfo('sqlar')",
+            "PRAGMA index_list(sqlar)",
+            "PRAGMA foreign_key_list(uapp_chat)",
+            "PRAGMA integrity_check",
+            "PRAGMA user_version",
+            "SELECT count(*) FROM pragma_table_info('uapp_chat')",
+            "SELECT value FROM uapp_meta WHERE key='app_id'",
+        ] {
+            query(&c, sql, &[]).unwrap_or_else(|e| panic!("{sql}: {e:#}"));
+        }
+    }
+
+    #[test]
+    fn sandbox_refuses_attach_and_vacuum_into() {
+        let c = app();
+        let dir = std::env::temp_dir().join(format!("uapp-sbx-{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("other.db");
+        let out = dir.join("copy.db");
+        let attach = format!("ATTACH '{}' AS o", other.display());
+        assert!(err_of(query(&c, &attach, &[])).contains("approval"));
+        assert!(err_of(write(&c, "sql", &attach)).contains("ATTACH"));
+        let vac = format!("VACUUM INTO '{}'", out.display());
+        assert!(query(&c, &vac, &[]).is_err());
+        assert!(write(&c, "batch", &format!("COMMIT; {vac}; BEGIN;")).is_err());
+        assert!(!out.exists(), "nothing written outside the app");
+
+        // The approved path: ATTACH works, reads of it work, writes don't,
+        // and the next unapproved ATTACH is refused again.
+        {
+            let o = Connection::open(&other).unwrap();
+            o.execute_batch("CREATE TABLE ext(v); INSERT INTO ext VALUES (7);")
+                .unwrap();
+        }
+        query_allow_attach(&c, &attach, &[]).unwrap();
+        let r = query(&c, "SELECT v FROM o.ext", &[]).unwrap();
+        assert_eq!(r["rows"][0][0], json!(7));
+        assert!(err_of(write(&c, "sql", "INSERT INTO o.ext VALUES (8)")).contains("attached"));
+        let again = format!("ATTACH '{}' AS p", other.display());
+        assert!(query(&c, &again, &[]).is_err());
+        query_allow_attach(&c, "DETACH o", &[]).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sandbox_keeps_batches_atomic() {
+        let c = app();
+        write(&c, "batch", "CREATE TABLE t(x)").unwrap();
+        let e = err_of(write(
+            &c,
+            "batch",
+            "INSERT INTO t VALUES (1); COMMIT; INSERT INTO t VALUES (2);",
+        ));
+        assert!(e.contains("COMMIT"), "{e}");
+        let n: i64 = c
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "the whole batch rolled back");
+        for sql in ["BEGIN", "ROLLBACK", "SAVEPOINT s", "END"] {
+            assert!(write(&c, "batch", sql).is_err(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn sandbox_protects_uapp_tables() {
+        let c = app();
+        for sql in [
+            "INSERT INTO uapp_config(key,value) VALUES('ai','{}')",
+            "UPDATE uapp_meta SET value='x' WHERE key='app_id'",
+            "DELETE FROM uapp_chat",
+            "UPDATE sqlar SET data=NULL",
+            "DELETE FROM SQLAR",
+            "DROP TABLE uapp_file_history",
+            "ALTER TABLE uapp_chat ADD COLUMN z",
+            "CREATE TABLE uapp_extra(x)",
+            "CREATE TEMP TABLE uapp_meta(key, value)",
+            "CREATE INDEX i ON uapp_chat(ts)",
+            "CREATE TRIGGER tr AFTER INSERT ON sqlar BEGIN SELECT 1; END",
+            "CREATE VIEW uapp_v AS SELECT 1",
+        ] {
+            let e = err_of(write(&c, "batch", sql));
+            assert!(
+                e.contains("uApp's own tables") || e.contains("sqlar holds"),
+                "{sql}: {e}"
+            );
+        }
+        // A trigger on an app table can't reach them either.
+        write(
+            &c,
+            "batch",
+            "CREATE TABLE notes(t);
+             CREATE TRIGGER sneak AFTER INSERT ON notes BEGIN
+               INSERT OR REPLACE INTO uapp_config(key,value) VALUES('ai','{}');
+             END;",
+        )
+        .unwrap();
+        assert!(write(&c, "sql", "INSERT INTO notes VALUES ('hi')").is_err());
+        assert_eq!(config_get(&c, "ai").unwrap(), None);
+        // Reads stay allowed, and ordinary app SQL is unaffected.
+        query(&c, "SELECT * FROM uapp_config", &[]).unwrap();
+        write(
+            &c,
+            "batch",
+            "DROP TRIGGER sneak; INSERT INTO notes VALUES ('ok'); \
+             CREATE TABLE seq(id INTEGER PRIMARY KEY AUTOINCREMENT, v); \
+             INSERT INTO seq(v) VALUES (1); ALTER TABLE notes RENAME TO notes2; \
+             CREATE INDEX n2 ON notes2(t); ANALYZE; DROP TABLE seq;",
+        )
+        .unwrap();
+        // foreign_keys used to be a silent no-op inside the write transaction;
+        // it still is (rather than an error that breaks an app's startup).
+        write(&c, "sql", "PRAGMA foreign_keys = ON").unwrap();
+        // Internal code still writes uApp's tables directly.
+        c.execute_batch("BEGIN").unwrap();
+        apply_op(&c, &op("app_rename", json!({"name": "Renamed"}))).unwrap();
+        c.execute_batch("COMMIT").unwrap();
+        assert_eq!(meta_get(&c, "name").unwrap().as_deref(), Some("Renamed"));
+    }
+
+    #[test]
+    fn sandbox_allows_fts5_and_generated_columns() {
+        let c = app();
+        write(
+            &c,
+            "batch",
+            "CREATE VIRTUAL TABLE docs USING fts5(body);
+             INSERT INTO docs(body) VALUES ('hello world'), ('other');
+             CREATE TABLE g(a INTEGER, b INTEGER GENERATED ALWAYS AS (a * 2));
+             INSERT INTO g(a) VALUES (21);",
+        )
+        .unwrap();
+        let r = query(&c, "SELECT body FROM docs WHERE docs MATCH 'hello'", &[]).unwrap();
+        assert_eq!(r["rows"][0][0], json!("hello world"));
+        let r = query(&c, "SELECT b FROM g", &[]).unwrap();
+        assert_eq!(r["rows"][0][0], json!(42));
+        // FTS5's own tables are off limits to plain SQL (DEFENSIVE).
+        assert!(write(&c, "sql", "DELETE FROM docs_data").is_err());
     }
 
     #[test]
