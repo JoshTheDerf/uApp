@@ -122,7 +122,7 @@ fn normalize_combo(combo: &str) -> Result<String> {
     } else {
         bail!("\"{key}\" is not a key we can match (try a letter, a digit or F1-F12)");
     };
-    if !(m || c || a || sh || me) && !standalone(&key.to_ascii_lowercase()) {
+    if !(m || c || a || sh || me || standalone(&key.to_ascii_lowercase())) {
         bail!("\"{key}\" on its own would fire while typing in the app — add Ctrl, Alt or Shift, or use an F-key");
     }
     // Fixed order, so the same shortcut always reads and compares the same way.

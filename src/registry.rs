@@ -78,8 +78,10 @@ fn entry(path: &Path, ext: &str) -> PathBuf {
 /// returned handle to release). Fails when another process serves this file.
 pub fn lock_exclusive(path: &Path) -> Result<File> {
     std::fs::create_dir_all(dir())?;
+    // Empty and never written; only the lock on it matters.
     let f = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(entry(path, "lock"))?;
     f.try_lock_exclusive()

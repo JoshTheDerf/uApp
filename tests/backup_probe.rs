@@ -9,7 +9,7 @@ fn open_keyed(path: &str, pw: &str) -> Connection {
 }
 
 /// Run a backup to completion; the Backup (and its borrow) is dropped on return.
-fn do_backup<'a>(src: &Connection, dst: &'a mut Connection) -> Result<(), String> {
+fn do_backup(src: &Connection, dst: &mut Connection) -> Result<(), String> {
     let bk = rusqlite::backup::Backup::new(src, dst).map_err(|e| e.to_string())?;
     bk.run_to_completion(512, Duration::from_millis(0), None)
         .map_err(|e| e.to_string())?;
