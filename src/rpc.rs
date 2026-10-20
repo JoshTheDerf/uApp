@@ -616,7 +616,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         "web.fetch" => web_fetch(p),
         // Open a URL in the system browser (from apps or AI tools).
         "browser.open" => {
-            let url = need_str(&p, "url")?;
+            let url = openable_url(need_str(&p, "url")?)?;
             #[cfg(not(target_arch = "wasm32"))]
             open::that(url).map_err(|e| anyhow!("failed to open URL: {e}"))?;
             // wasm: the shell opens it (window.open) on this notification.
@@ -760,6 +760,25 @@ fn file_size(eng: &crate::engine::Engine) -> u64 {
 #[cfg(target_arch = "wasm32")]
 fn file_size(eng: &crate::engine::Engine) -> u64 {
     eng.serialize_bytes().map(|b| b.len() as u64).unwrap_or(0)
+}
+
+/// What `browser.open` may hand to the OS: a web page or a mail link. The
+/// OS opener (ShellExecute, xdg-open, `open`) runs whatever it is given, so a
+/// path, `file:`, `smb:` or some app's own URL scheme would launch programs
+/// or files; and in the browser build a `javascript:` URL would run in the
+/// shell's origin.
+fn openable_url(url: &str) -> Result<&str> {
+    let url = url.trim();
+    let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
+    let ok = match scheme.as_deref() {
+        Some("http" | "https") => url[url.find(':').unwrap_or(0)..].starts_with("://"),
+        Some("mailto") => true,
+        _ => false,
+    };
+    if !ok || url.chars().any(|c| c.is_control() || c == ' ') {
+        bail!("only http(s) and mailto: links can be opened");
+    }
+    Ok(url)
 }
 
 fn need_str<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
@@ -2141,4 +2160,35 @@ pub fn import_csv(app: &Arc<App>, p: Value) -> Result<Value> {
         }),
     )?;
     Ok(json!({"table": table, "rows": n, "columns": columns}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::openable_url;
+
+    #[test]
+    fn only_web_and_mail_links_open() {
+        for ok in [
+            "https://example.com/a?b",
+            "HTTP://x.y",
+            "mailto:a@b.c",
+            " https://x.y ",
+        ] {
+            assert!(openable_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "file:///etc/passwd",
+            "/usr/bin/xterm",
+            "C:\\Windows\\System32\\calc.exe",
+            "\\\\evil\\share\\x.exe",
+            "smb://evil/x",
+            "javascript:alert(1)",
+            "http:evil",
+            "https://x.y/\nfoo",
+            "ms-settings:",
+            "",
+        ] {
+            assert!(openable_url(bad).is_err(), "{bad:?}");
+        }
+    }
 }
