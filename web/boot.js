@@ -474,9 +474,8 @@ async function handleSwRequest(m) {
     const p = url.pathname;
     if (p === "/download.uapp") {
       const r = await sendRpc("app.export");
-      const name = (appName() || "app").replace(/[^\w \-.]/g, "_");
       reply({ bodyB64: r.b64, contentType: "application/octet-stream",
-              disposition: `attachment; filename="${name}.uapp"` });
+              disposition: `attachment; filename="${downloadName()}"` });
       return;
     }
     if (p === "/template.uapp") {
@@ -728,51 +727,197 @@ async function handleHostRpc(m) {
 let lastInfoName = "";
 function appName() { return lastInfoName; }
 
-let saveTimer = null, saving = false, saveDirty = false;
-async function appSave() {
-  if (!currentAppId || zombie) return; // launcher is ephemeral; dormant tabs must not write
-  if (saving) { saveDirty = true; return; }
-  saving = true;
+// ---- auto-save ----------------------------------------------------------------
+// A change schedules a save 1.5 s later, and further changes push it back,
+// but never past 5 s after the first unsaved one: an AI run writes for
+// minutes on end and would otherwise never be saved at all. One save runs at
+// a time (savingPromise); closing, resetting and handing the document to
+// another tab all wait for it rather than racing it.
+const SAVE_DELAY = 1500, SAVE_MAX_WAIT = 5000;
+let saveTimer = null;
+let dirtySince = 0;       // ms of the first change no save has captured yet; 0 = clean
+let savingPromise = null; // the save in flight, resolves to true when it landed
+let saveAgain = false;    // a save was asked for while one was running
+let lastSavedAt = 0;
+let saveState = "saved";  // saved | dirty | saving | failed
+let saveError = "";
+let leaving = false;      // our own navigation, after everything was saved
+
+function canSave() { return !!currentAppId && !zombie; } // launcher is ephemeral; dormant tabs must not write
+
+function setSaveState(state, err) {
+  saveState = state;
+  saveError = err ? errText(err) : "";
+  if (state === "failed") saveFailureBanner();
+  else if (state === "saved") hideBanner("uapp-save-failed");
+  try { window.dispatchEvent(new CustomEvent("uapp-save-state", { detail: window.__uappSaveState() })); } catch {}
+}
+window.__uappSaveState = () => ({ state: saveState, error: saveError, lastSavedAt, dirty: !!dirtySince });
+
+function scheduleSave() {
+  if (!canSave()) return;
+  const now = Date.now();
+  if (!dirtySince) dirtySince = now;
+  if (saveState !== "failed" && !savingPromise) setSaveState("dirty");
+  clearTimeout(saveTimer);
+  const wait = Math.max(0, Math.min(SAVE_DELAY, dirtySince + SAVE_MAX_WAIT - now));
+  saveTimer = setTimeout(() => { saveTimer = null; appSave(); }, wait);
+}
+
+function appSave() {
+  if (!canSave()) return Promise.resolve(false);
+  if (savingPromise) { saveAgain = true; return savingPromise; }
+  savingPromise = (async () => {
+    let ok;
+    do { saveAgain = false; ok = await saveOnce(); } while (ok && saveAgain && canSave());
+    return ok;
+  })().finally(() => { savingPromise = null; });
+  return savingPromise;
+}
+
+async function saveOnce() {
+  clearTimeout(saveTimer); saveTimer = null; // this save covers every change so far
+  const since = dirtySince;
+  dirtySince = 0;
+  setSaveState("saving");
   try {
-    const r = await sendRpc("app.export");
-    await appWrite(currentAppId, bytesFromB64(r.b64));
+    const bytes = await exportBytes();
+    // Went dormant, reset or stood down while exporting: write nothing.
+    if (!canSave()) return false;
+    await appWrite(currentAppId, bytes);
+    lastSavedAt = Date.now();
     if (siteState) {
       siteState.hasLocal = true;
-      siteState.localSavedAt = Date.now();
+      siteState.localSavedAt = lastSavedAt;
       kvSet(siteKey("saved"), String(siteState.localSavedAt));
     } else {
       indexTouch(currentAppId, lastInfoName);
     }
+    setSaveState(dirtySince ? "dirty" : "saved");
+    afterSave();
+    return true;
   } catch (e) {
     console.warn("uapp: auto-save failed:", e);
-  } finally {
-    saving = false;
-    if (saveDirty) { saveDirty = false; scheduleSave(); }
+    if (!dirtySince) dirtySince = since || Date.now();
+    setSaveState("failed", e);
+    return false;
   }
 }
-function scheduleSave() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { saveTimer = null; appSave(); }, 1500);
+
+// Write anything pending now and wait for it. True when nothing is left
+// unsaved. The shell awaits this before a navigation that leaves the page
+// (a link out of the editor); it also runs when the tab is hidden.
+async function flushSave() {
+  if (!canSave()) return true;
+  if (saveTimer || (dirtySince && !savingPromise)) await appSave();
+  while (savingPromise) await savingPromise.catch(() => {});
+  return !dirtySince && saveState !== "failed";
 }
-// Write a pending (debounced) save now. The shell awaits this before a
-// navigation that leaves the page (a link out of the editor), and it runs
-// best-effort on pagehide, so an edit made moments before is not lost.
-window.__uappFlushSave = async () => {
-  if (!saveTimer) return;
-  clearTimeout(saveTimer); saveTimer = null;
-  try { await appSave(); } catch {}
-};
-window.addEventListener("pagehide", () => { window.__uappFlushSave(); });
+window.__uappFlushSave = flushSave;
+
+// pagehide cannot wait for a save, so the real work is done earlier: when the
+// tab is hidden (the last moment a mobile browser reliably gives us), and by
+// the prompt below while anything is unsaved.
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushSave(); });
+window.addEventListener("pagehide", () => { flushSave(); });
+window.addEventListener("beforeunload", (e) => {
+  if (leaving || !canSave()) return;
+  if (dirtySince || savingPromise || saveState === "failed") { e.preventDefault(); e.returnValue = ""; }
+});
+
+async function exportBytes() {
+  const r = await sendRpc("app.export");
+  return bytesFromB64(r.b64);
+}
+
+function downloadName() { return (appName() || "app").replace(/[^\w \-.]/g, "_") + ".uapp"; }
+async function downloadCopy() {
+  const bytes = await exportBytes();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+  a.download = downloadName();
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 30000);
+}
+
+// Once the visitor has real work here, ask the browser not to evict it under
+// storage pressure (a silent clear-out is how an unpersisted origin loses
+// everything), and say so when the origin is nearly out of room: the next
+// failure would be a quota error.
+let persistAsked = false, lastEstimate = 0, fullWarned = false;
+async function afterSave() {
+  const st = navigator.storage;
+  if (!st) return;
+  if (!persistAsked && st.persist) {
+    persistAsked = true;
+    try { if (!(st.persisted && await st.persisted())) await st.persist(); } catch {}
+  }
+  if (fullWarned || !st.estimate || Date.now() - lastEstimate < 60000) return;
+  lastEstimate = Date.now();
+  try {
+    const { usage, quota } = await st.estimate();
+    if (quota && usage / quota > 0.9) {
+      fullWarned = true;
+      showBanner("uapp-storage-full", "Storage for this site is nearly full",
+        `${mb(usage)} of ${mb(quota)} used. Download a copy of this app so a failed save can't cost you work, and delete apps you no longer need.`,
+        [["Download a copy", () => downloadCopy().catch((e) => alert("Could not download a copy: " + errText(e)))],
+         ["Got it", (el) => el.remove()]]);
+    }
+  } catch {}
+}
+
+function saveFailureBanner(closing) {
+  const buttons = [
+    ["Download a copy", () => downloadCopy().catch((e) => alert("Could not download a copy: " + errText(e)))],
+    ["Try again", () => appSave()],
+  ];
+  if (closing) buttons.push(["Close anyway", () => { leaving = true; switchTo(null); }]);
+  showBanner("uapp-save-failed", "Your changes could not be saved in this browser",
+    (saveError || "The save failed.") + (lastSavedAt ? ` Last saved at ${new Date(lastSavedAt).toLocaleTimeString()}.` : ""),
+    buttons);
+}
+
+// A notice at the bottom of the page (one per id; showing it again replaces
+// the old one). Built from text nodes: messages carry error text.
+function showBanner(id, title, text, buttons) {
+  hideBanner(id);
+  const el = document.createElement("div");
+  el.id = id;
+  el.setAttribute("role", "alert");
+  el.style.cssText = "position:fixed;left:12px;right:12px;bottom:12px;margin:0 auto;max-width:520px;z-index:999998;background:#2b3145;border:1px solid #3a4260;border-radius:12px;padding:14px 16px;color:#f2f4f8;font:13px/1.55 system-ui,sans-serif;box-shadow:0 10px 30px #0007";
+  const b = document.createElement("b");
+  b.textContent = title;
+  const p = document.createElement("div");
+  p.textContent = text;
+  p.style.cssText = "color:#c9cfdc;overflow-wrap:anywhere";
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;margin-top:10px";
+  buttons.forEach(([label, fn], i) => {
+    const btn = document.createElement("button");
+    btn.textContent = label;
+    btn.style.cssText = "padding:7px 14px;border-radius:8px;font:inherit;font-weight:600;cursor:pointer;" +
+      (i === 0 ? "border:none;background:#3f6de6;color:#fff" : "border:1px solid #4a5374;background:transparent;color:#f2f4f8");
+    btn.onclick = () => fn(el);
+    row.appendChild(btn);
+  });
+  el.append(b, p, row);
+  document.body.appendChild(el);
+  return el;
+}
+function hideBanner(id) { const el = document.getElementById(id); if (el) el.remove(); }
 
 function onWorkerEvent(envelope) {
   const params = envelope.params || {};
   // Closing the document (the shell's ✕ / app.quit) goes back to the landing
   // chooser: save one last time, then reload with the chooser forced on.
+  // A failed final save keeps the document open, with the failure notice
+  // offering a download (or closing anyway): navigating away would throw the
+  // unsaved work out with the engine.
   if (params.type === "sync" && params.state === "closed") {
     (async () => {
-      clearTimeout(saveTimer);
-      try { await appSave(); } catch {}
-      switchTo(null); // back to the launcher
+      if (await flushSave()) switchTo(null); // back to the launcher
+      else saveFailureBanner(true);
     })();
     return; // don't let the shell paint its "closed" overlay first
   }
@@ -825,9 +970,14 @@ function archiveStem(archive) {
 }
 function kvDel(key) { try { localStorage.removeItem(key); } catch {} memKV.delete(key); }
 window.__uappSiteReset = async () => {
+  leaving = true;
   if (!siteState) { location.reload(); return; }
-  clearTimeout(saveTimer);
-  zombie = true; // no save may land after this
+  zombie = true; // no new save may start...
+  clearTimeout(saveTimer); saveTimer = null;
+  dirtySince = 0;
+  // ...and one already writing must land BEFORE the copy is removed, or it
+  // would put the copy straight back.
+  while (savingPromise) await savingPromise.catch(() => {});
   try { await (await blobStore()).remove(siteState.id); } catch {}
   kvDel(siteKey("saved"));
   kvDel(siteKey("etag"));
@@ -1009,18 +1159,11 @@ let noticeShown = false;
 function storageNotice() {
   if (noticeShown) return;
   noticeShown = true;
-  const el = document.createElement("div");
-  el.style.cssText = "position:fixed;left:12px;right:12px;bottom:12px;margin:0 auto;max-width:520px;z-index:999998;background:#2b3145;border:1px solid #3a4260;border-radius:12px;padding:14px 16px;color:#f2f4f8;font:13px/1.55 system-ui,sans-serif;box-shadow:0 10px 30px #0007";
-  el.innerHTML = `<b>This browser is blocking storage for the site</b><br>
-    Usually a private window, or cookies and site data blocked for it. The demo
-    keeps a document per app in your browser's own storage, so opening one
-    can't work here — allow site data for this site, or try a normal window.`;
-  const btn = document.createElement("button");
-  btn.textContent = "Got it";
-  btn.style.cssText = "margin-top:10px;padding:7px 14px;border:none;border-radius:8px;background:#3f6de6;color:#fff;font:inherit;font-weight:600;cursor:pointer";
-  btn.onclick = () => el.remove();
-  el.appendChild(btn);
-  document.body.appendChild(el);
+  showBanner("uapp-storage-blocked", "This browser is blocking storage for the site",
+    "Usually a private window, or cookies and site data blocked for it. The demo " +
+    "keeps a document per app in your browser's own storage, so opening one " +
+    "can't work here. Allow site data for this site, or try a normal window.",
+    [["Got it", (el) => el.remove()]]);
 }
 
 // null = no stored app with that id. Any OTHER failure (a locked store, a
@@ -1066,6 +1209,7 @@ async function migrateLegacy() {
 // sees the window change, not its own page. `replace`, so the switch is not a
 // history entry (a reload never was one either).
 function switchTo(id) {
+  leaving = true;
   const u = new URL(location.href);
   u.searchParams.delete("app");
   u.searchParams.delete("open");
