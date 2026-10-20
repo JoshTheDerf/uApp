@@ -158,7 +158,7 @@ let zombie = false;
 let workerSeq = 1;
 const workerPending = new Map(); // rpc id -> {resolve, reject}
 let shellOnMessage = null;       // core.js's handler
-const clientWindows = new Set(); // iframe windows that spoke to us
+const clientWindows = new Set(); // our frames' windows that spoke to us
 // Page connections, as the core sees them (see App::conn_open in app.rs): one
 // id per DOCUMENT. A WindowProxy survives its frame's navigation, so a reload
 // closes the old id and mints a new one — that is how the core notices a
@@ -378,9 +378,7 @@ let bridgePrompt = null; // {kind: "approval"|"question", id}
 function emitShellEvent(type, extra) {
   const envelope = { method: "event", params: { type, ...extra } };
   if (shellOnMessage) shellOnMessage(envelope);
-  for (const win of clientWindows) {
-    try { win.postMessage({ __uappMsg: true, m: envelope }, "*"); } catch {}
-  }
+  broadcastToFrames(envelope);
 }
 
 // Answer the pending bridge prompt (from an intercepted RPC or a stop).
@@ -545,13 +543,53 @@ function connMessage(win, m, replyTo) {
   else p.catch(() => {});
 }
 
+// Who may talk to the engine: a page in one of THIS shell's frames, at any
+// depth (the app frame, the scratch frame, the file viewer, and whatever
+// those embed from the archive), and on our own origin. Not the page that
+// frames the shell (a desktop, or any same-site page that loads us in an
+// iframe), not a sibling or a popup, and not a third-party iframe nested in
+// an app (an ad, an embed): those can all reach this window with
+// postMessage, and the RPC set behind it includes app.export, sql.* and
+// chat.send.
+function isOwnFrame(win) {
+  if (!win || win === window) return false;
+  try {
+    let w = win;
+    for (let i = 0; i < 64; i++) {
+      const p = w.parent;
+      if (p === window) return true;
+      if (!p || p === w) return false; // reached the top without passing us
+      w = p;
+    }
+  } catch {}
+  return false;
+}
+// A WindowProxy outlives its document: the frame may have closed, or moved
+// on to a page that is not ours (another origin, or a frame we no longer
+// contain). Those stop getting events.
+function stillOurs(win) {
+  try { return !win.closed && win.location.origin === location.origin && isOwnFrame(win); }
+  catch { return false; } // cross-origin now
+}
+function postToFrame(win, obj) {
+  try { win.postMessage({ __uappMsg: true, m: obj }, location.origin); } catch {}
+}
+function broadcastToFrames(envelope) {
+  for (const win of clientWindows) {
+    if (!stillOurs(win)) { clientWindows.delete(win); continue; }
+    postToFrame(win, envelope);
+  }
+}
+
 window.addEventListener("message", (ev) => {
   const d = ev.data;
   if (!d || !d.__uappRPC || !d.m) return;
+  if (ev.origin !== location.origin || !isOwnFrame(ev.source)) return;
   const m = d.m;
+  if (!m || typeof m.method !== "string") return;
   const win = ev.source;
   clientWindows.add(win);
-  const replyTo = (obj) => { try { win.postMessage({ __uappMsg: true, m: obj }, "*"); } catch {} };
+  const replyTo = (obj) => postToFrame(win, obj);
   if (m.method === "ctx.register") {
     // A new document in this frame: the previous one (same WindowProxy) is
     // gone, and with it its actions and contexts.
@@ -737,9 +775,7 @@ function onWorkerEvent(envelope) {
     try { window.open(params.url, "_blank", "noopener"); } catch {}
   }
   if (shellOnMessage) shellOnMessage(envelope);
-  for (const win of clientWindows) {
-    try { win.postMessage({ __uappMsg: true, m: envelope }, "*"); } catch {}
-  }
+  broadcastToFrames(envelope);
 }
 
 // ---- app library (many .uapp files) -----------------------------------------
@@ -1198,7 +1234,7 @@ if (tabChannel) {
       if (m.type === "bridge") { handleBridge(m.kind, m.payload); return; }
       if (m.type === "conn.send") {
         const win = winOfConn.get(m.conn);
-        if (win) { try { win.postMessage({ __uappMsg: true, m: JSON.parse(m.msg) }, "*"); } catch {} }
+        if (win && stillOurs(win)) { try { postToFrame(win, JSON.parse(m.msg)); } catch {} }
         return;
       }
       if (m.type === "fatal") fatal(m.error);
