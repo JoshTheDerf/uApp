@@ -61,8 +61,7 @@ fn host_is_local(headers: &HeaderMap) -> bool {
     let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) else {
         return true; // HTTP/1.0 / some native webviews omit Host
     };
-    let hostname = hostname_of(host);
-    matches!(hostname, "localhost" | "127.0.0.1" | "::1") || hostname.starts_with("127.")
+    is_loopback(hostname_of(host))
 }
 
 /// `host[:port]` -> `host`, with `[::1]:port` handled.
@@ -106,6 +105,83 @@ fn authed(app: &App, headers: &HeaderMap, query: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// Did this request come from one of our own pages, or from no browser at all?
+///
+/// The token cookie can't tell: cookies aren't scoped to a port, so a page on
+/// any other loopback port is "same-site" and the browser sends our
+/// SameSite=Strict cookie along with its requests (a cross-port
+/// `POST /upload` as text/plain needs no preflight and used to land). So on
+/// top of the token, a browser request must say it is same-origin:
+///   * `Sec-Fetch-Site`, when present, is `same-origin` or `none` (typed in,
+///     a bookmark, the native window's first load);
+///   * `Origin`, when present, is exactly our own scheme://host:port. Browsers
+///     send it on every WebSocket handshake and every non-GET request, so its
+///     absence there means a non-browser client (the CLI, curl, the tests),
+///     which has to present the token itself.
+fn from_own_origin(app: &App, headers: &HeaderMap) -> bool {
+    if let Some(site) = headers.get("sec-fetch-site") {
+        if !matches!(site.to_str(), Ok("same-origin" | "none")) {
+            return false;
+        }
+    }
+    match headers.get(header::ORIGIN) {
+        Some(o) => o.to_str().is_ok_and(|o| origin_is_self(app, headers, o)),
+        None => true,
+    }
+}
+
+/// `origin` (scheme://host[:port]) names the host and port this request was
+/// sent to. The Host header says what that was; in private mode it must also
+/// be our loopback port (DNS rebinding is refused earlier, by Host).
+fn origin_is_self(app: &App, headers: &HeaderMap, origin: &str) -> bool {
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false; // "null" (sandboxed frames, file://) and junk
+    };
+    let default = match scheme {
+        "http" => 80,
+        "https" => 443,
+        _ => return false,
+    };
+    let Some((host, port)) = host_and_port(authority, default) else {
+        return false;
+    };
+    let ours = app.port.load(std::sync::atomic::Ordering::Relaxed);
+    if app.public.is_none() && (port != ours || !is_loopback(&host)) {
+        return false;
+    }
+    match headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
+        Some(h) => host_and_port(h, default) == Some((host, port)),
+        None => app.public.is_none(),
+    }
+}
+
+/// `host[:port]` (as in a Host header or an origin) -> lowercased host and the
+/// port, `default` when none is given. `[::1]:8080` style included.
+fn host_and_port(authority: &str, default: u16) -> Option<(String, u16)> {
+    if authority.is_empty() || authority.contains(['/', '@', ' ']) {
+        return None;
+    }
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(v6) => {
+            let (h, rest) = v6.split_once(']')?;
+            (h, rest.strip_prefix(':'))
+        }
+        None => match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        },
+    };
+    let port = match port {
+        Some(p) => p.parse().ok()?,
+        None => default,
+    };
+    Some((host.to_ascii_lowercase(), port))
+}
+
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
+}
+
 /// Who is asking — decided ONCE per request, by these two extractors, so no
 /// handler carries its own token check or its own "but in public mode…".
 ///
@@ -130,10 +206,12 @@ impl axum::extract::FromRequestParts<Arc<App>> for Owner {
         parts: &mut axum::http::request::Parts,
         app: &Arc<App>,
     ) -> Result<Self, Response> {
-        if authed(app, &parts.headers, parts.uri.query()) {
-            Ok(Owner)
-        } else {
+        if !authed(app, &parts.headers, parts.uri.query()) {
             Err(deny())
+        } else if !from_own_origin(app, &parts.headers) {
+            Err(cross_origin())
+        } else {
+            Ok(Owner)
         }
     }
 }
@@ -145,7 +223,9 @@ impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
         parts: &mut axum::http::request::Parts,
         app: &Arc<App>,
     ) -> Result<Self, Response> {
-        if authed(app, &parts.headers, parts.uri.query()) {
+        // A token-holder's request from another origin is no owner's: on a
+        // public site it still gets what any reader gets.
+        if authed(app, &parts.headers, parts.uri.query()) && from_own_origin(app, &parts.headers) {
             Ok(Visitor::Owner)
         } else if app.public.is_some() {
             Ok(Visitor::Reader)
@@ -157,6 +237,14 @@ impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
 
 fn deny() -> Response {
     (StatusCode::FORBIDDEN, "uapp: missing or bad token").into_response()
+}
+
+fn cross_origin() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        "uapp: refused a request from another origin",
+    )
+        .into_response()
 }
 
 pub(crate) fn html_escape(s: &str) -> String {
@@ -223,7 +311,39 @@ async fn shell(State(app): State<Arc<App>>, who: Visitor, headers: HeaderMap) ->
     // stale-cached shells would keep showing the old UI.
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    if let Ok(csp) = header::HeaderValue::from_str(&shell_csp(&headers)) {
+        resp.headers_mut()
+            .insert(header::CONTENT_SECURITY_POLICY, csp);
+    }
     resp
+}
+
+/// The shell document's CSP. The shell's own code is all served files (no
+/// inline script, no eval), so script-src 'self' holds, and anything injected
+/// into it (a hostile app name, chat markdown) can't run. Styles stay inline
+/// because the Web Components carry theirs in their templates. frame-src is
+/// broad on purpose: it governs where the APP frame may navigate, and an app
+/// may take its own frame anywhere. The socket is named explicitly since older
+/// WebKit doesn't count ws: as 'self'. Only the shell gets this; app pages run
+/// whatever their authors wrote and get just frame-ancestors (see
+/// `security_headers`).
+fn shell_csp(headers: &HeaderMap) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|h| {
+            h.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+        });
+    let sockets = host
+        .map(|h| format!(" ws://{h} wss://{h}"))
+        .unwrap_or_default();
+    format!(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; \
+         connect-src 'self'{sockets}; frame-src 'self' blob: http: https:; worker-src 'self'; \
+         object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"
+    )
 }
 
 fn static_asset(body: &'static str, ctype: &'static str) -> Response {
@@ -666,45 +786,15 @@ async fn scratch_page(_who: Owner) -> Response {
     resp
 }
 
-async fn ws_route(
-    State(app): State<Arc<App>>,
-    _who: Owner,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Response {
+async fn ws_route(State(app): State<Arc<App>>, _who: Owner, ws: WebSocketUpgrade) -> Response {
     // File uploads travel as base64 inside an RPC frame, so the socket has to
     // carry MAX_UPLOAD_BYTES * 4/3 plus JSON overhead (the defaults are 64/16
     // MiB, and an over-size frame kills the whole connection).
     let ws = ws
         .max_message_size(crate::rpc::MAX_UPLOAD_B64 + 4 * 1024 * 1024)
         .max_frame_size(crate::rpc::MAX_UPLOAD_B64 + 4 * 1024 * 1024);
-    // Cross-origin WebSocket connects aren't blocked by the same-origin policy,
-    // so reject any Origin that isn't our own loopback (defense in depth on top
-    // of the token). A missing Origin is a non-browser client (native webview,
-    // tests) and is allowed.
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
-        let ok = origin
-            .split("//")
-            .nth(1)
-            .map(|hostport| {
-                let host = hostname_of(hostport);
-                if app.public.is_some() {
-                    // A public site is its own origin: the page that opened
-                    // the socket must have come from the Host we were asked for.
-                    headers
-                        .get(header::HOST)
-                        .and_then(|h| h.to_str().ok())
-                        .map(|h| hostname_of(h) == host)
-                        .unwrap_or(false)
-                } else {
-                    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
-                }
-            })
-            .unwrap_or(false);
-        if !ok {
-            return deny();
-        }
-    }
+    // Cross-origin WebSocket connects aren't blocked by the same-origin
+    // policy; the Owner extractor has already required our own Origin.
     ws.on_upgrade(move |socket| ws_conn(app, socket))
 }
 
@@ -1126,9 +1216,10 @@ pub fn router(app: Arc<App>) -> Router {
         .with_state(app)
 }
 
-/// Baseline security headers on every response. Deliberately no CSP: app pages
-/// run their own JS/styles by design, so a restrictive policy would break them
-/// — origin isolation of untrusted apps is a separate, larger change.
+/// Baseline security headers on every response. App pages get no script
+/// policy: they run their own JS/styles by design, so a restrictive one would
+/// break them (origin isolation of untrusted apps is a separate, larger
+/// change; see docs/design/app-isolation.md). They do get frame-ancestors.
 ///
 /// A public site that opted in (`--coi`) gets COOP/COEP on its documents so
 /// the editing chrome is cross-origin isolated from birth (SharedArrayBuffer
@@ -1146,6 +1237,14 @@ async fn security_headers(State(app): State<Arc<App>>, mut resp: Response) -> Re
         header::X_CONTENT_TYPE_OPTIONS,
         header::HeaderValue::from_static("nosniff"),
     );
+    // Nothing here may be framed by another origin: the shell (clickjacking
+    // its Allow buttons) least of all. The shell sets a full policy of its own.
+    if !h.contains_key(header::CONTENT_SECURITY_POLICY) {
+        h.insert(
+            header::CONTENT_SECURITY_POLICY,
+            header::HeaderValue::from_static("frame-ancestors 'self'"),
+        );
+    }
     match app.public {
         None => {
             h.insert(
