@@ -25,7 +25,7 @@ const TPL = /* html */ `
     <div id="mcp-list"><p class="hint">${S.common.checking}</p></div>
     <div id="mcp-add">
       <input id="mcp-name" placeholder="${S.tools.mcpNamePlaceholder}" aria-label="${S.tools.mcpNamePlaceholder}" autocomplete="off">
-      <input id="mcp-url" placeholder="${S.tools.mcpUrlPlaceholder}" aria-label="URL" autocomplete="off">
+      <input id="mcp-url" placeholder="${S.tools.mcpUrlPlaceholder}" aria-label="${S.tools.urlLabel}" autocomplete="off">
       <input id="mcp-token" type="password" placeholder="${S.tools.mcpTokenPlaceholder}" aria-label="${S.tools.mcpTokenPlaceholder}" autocomplete="off">
       <button id="btn-mcp-add" class="btn primary sm">${S.tools.connect}</button>
     </div>
@@ -151,10 +151,10 @@ async function renderMcp() {
       renderMcp();
     }, s.name));
     const info = div("mcp-info");
-    const status = !s.enabled ? `<span class="chip off">off</span>`
+    const status = !s.enabled ? `<span class="chip off">${esc(S.tools.off)}</span>`
       : s.error ? `<span class="chip err">${esc(s.error)}</span>`
       : `<span class="chip ok">${esc(S.tools.toolCount(s.toolCount))}</span>`;
-    info.innerHTML = `<b>${esc(s.name)}</b> ${status}<div class="mcp-url">${esc(s.url || "")}${s.hasAuth ? " · auth" : ""}</div>`;
+    info.innerHTML = `<b>${esc(s.name)}</b> ${status}<div class="mcp-url">${esc(s.url || "")}${s.hasAuth ? " · " + esc(S.tools.withAuth) : ""}</div>`;
     head.appendChild(info);
     const del = document.createElement("button");
     del.className = "icon-btn mcp-del";

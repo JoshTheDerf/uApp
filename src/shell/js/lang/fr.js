@@ -112,10 +112,13 @@ export const S = {
     stepCount: (n) => `${n} étape${n === 1 ? "" : "s"}`,
     inputLabel: "Message",
     emptyTitle: "Demandez à l'assistant",
-    emptyHint: "Il peut lire et modifier les fichiers et les données de cette app, et expliquer son fonctionnement.",
-    suggestExplain: "Explique comment fonctionne cette app",
+    emptyHint: "Il peut lire et modifier les fichiers et les données de cette appli, et expliquer son fonctionnement.",
+    suggestExplain: "Explique comment fonctionne cette appli",
     suggestFeature: "Propose une nouvelle fonctionnalité utile",
-    suggestData: "Résume les données de cette app",
+    suggestData: "Résume les données de cette appli",
+    archivedLabel: (title) => `${title} (archivé)`,
+    diffMore: (n) => `…${n} de plus`,
+    aiError: (msg) => `Erreur IA : ${msg}`,
   },
 
   settings: {
@@ -215,7 +218,7 @@ export const S = {
     unsavedTitle: "Cette appli n'est pas encore enregistrée dans un fichier",
     unsavedTitleBrowser: "Cette appli n'est pas encore enregistrée dans un fichier",
     aiSection: "Assistant IA",
-    groupApp: "Cette app (enregistré dans le fichier)",
+    groupApp: "Cette appli (enregistrée dans le fichier)",
     groupDevice: "Cet appareil",
     appearance: "Apparence",
     themeSystem: "Système",
@@ -276,6 +279,9 @@ export const S = {
     restoreConfirm: (name, time) => `Restaurer ${name} à la version du ${time} ? Cela crée une nouvelle version pour tout le monde.`,
     listView: "Vue liste",
     gridView: "Vue grille",
+    actions: "Actions",
+    histDeleted: "supprimé",
+    histEdited: "modifié",
   },
 
   toolbar: {
@@ -392,6 +398,17 @@ export const S = {
     filterCombine: "Combiner avec la condition précédente",
     filterRemove: "Supprimer la condition",
     tablesLabel: "Tables",
+    opContains: "contient",
+    opStarts: "commence par",
+    opEnds: "finit par",
+    opIn: "dans la liste (a, b, c)",
+    opEmpty: "est vide",
+    opNotEmpty: "n'est pas vide",
+    exportResult: "Exporter ce résultat",
+    range: (a, b, total) => `${a}–${b} sur ${total}`,
+    keyColsMissing: "Les colonnes clés manquent dans le résultat.",
+    kindTable: "la table",
+    kindView: "la vue",
   },
 
   tools: {
@@ -413,6 +430,9 @@ export const S = {
     nameUrlRequired: "Le nom et l'URL sont obligatoires.",
     connecting: "Connexion…",
     connected: (name, n) => `${name} connecté : ${n} outil${n === 1 ? "" : "s"}.`,
+    off: "désactivé",
+    withAuth: "avec jeton",
+    urlLabel: "URL du serveur",
   },
 
   viewer: {
@@ -442,6 +462,7 @@ export const S = {
     appClosed: "Appli fermée.",
     reopenHint: "Rouvrez le fichier pour la relancer.",
     windowCloseHint: "Cette fenêtre se fermera automatiquement si le navigateur le permet.",
+    openFailed: (url, msg) => `Impossible d'ouvrir ${url} : ${msg}`,
   },
 
   // Mise à jour de cette appli depuis un modèle .uapp (glissé sur la fenêtre).
@@ -482,8 +503,10 @@ export const S = {
     downloadingName: (name) => `Téléchargement de ${name}…`,
     downloadFailed: (msg) => `Échec du téléchargement : ${msg}`,
     resizerTitle: "Glissez pour redimensionner, double-cliquez pour réinitialiser",
-    pinPanel: "Épingler à côté de l'app",
-    unpinPanel: "Détacher (flotter au-dessus de l'app)",
+    pinPanel: "Épingler à côté de l'appli",
+    unpinPanel: "Détacher (flotter au-dessus de l'appli)",
+    appFiles: "Fichiers de l'appli",
+    dataFiles: "Fichiers de données",
   },
 
   toolMeta: {

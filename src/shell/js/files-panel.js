@@ -338,9 +338,9 @@ function wireEntry(el, e) {
   };
   const more = document.createElement("button");
   more.className = "fbmore";
-  more.title = "Actions";
+  more.title = S.files.actions;
   more.innerHTML = I("ellipsis-vertical", 14);
-  more.setAttribute("aria-label", "Actions");
+  more.setAttribute("aria-label", S.files.actions);
   more.onclick = (ev) => {
     ev.stopPropagation();
     const r = more.getBoundingClientRect();
@@ -472,7 +472,7 @@ async function showHistory(name) {
     const row = div("fver");
     row.innerHTML =
       `<span class="fmeta">${fmtTime(ts)}</span>` +
-      `<span>${esc(user || "")} · ${action === "del" ? "deleted" : "edited"} · ${fmtSize(size)}</span>`;
+      `<span>${esc(user || "")} · ${action === "del" ? S.files.histDeleted : S.files.histEdited} · ${fmtSize(size)}</span>`;
     const btn = document.createElement("button");
     btn.className = "frestore";
     btn.innerHTML = I("rotate-cw", 11) + " " + S.files.restore;

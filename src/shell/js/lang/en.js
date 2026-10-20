@@ -116,6 +116,9 @@ export const S = {
     suggestExplain: "Explain how this app works",
     suggestFeature: "Suggest a useful new feature",
     suggestData: "Summarize the data in this app",
+    archivedLabel: (title) => `${title} (archived)`,
+    diffMore: (n) => `…${n} more`,
+    aiError: (msg) => `AI error: ${msg}`,
   },
 
   settings: {
@@ -276,6 +279,9 @@ export const S = {
     restoreConfirm: (name, time) => `Restore ${name} to the version from ${time}? This becomes a new version for everyone.`,
     listView: "List view",
     gridView: "Grid view",
+    actions: "Actions",
+    histDeleted: "deleted",
+    histEdited: "edited",
   },
 
   toolbar: {
@@ -392,6 +398,17 @@ export const S = {
     filterCombine: "Combine with the previous condition",
     filterRemove: "Remove condition",
     tablesLabel: "Tables",
+    opContains: "contains",
+    opStarts: "starts with",
+    opEnds: "ends with",
+    opIn: "in list (a, b, c)",
+    opEmpty: "is empty",
+    opNotEmpty: "not empty",
+    exportResult: "Export this result",
+    range: (a, b, total) => `${a}–${b} of ${total}`,
+    keyColsMissing: "The key columns are missing from the result.",
+    kindTable: "table",
+    kindView: "view",
   },
 
   tools: {
@@ -413,6 +430,9 @@ export const S = {
     nameUrlRequired: "Name and URL are required.",
     connecting: "Connecting…",
     connected: (name, n) => `Connected ${name}: ${n} tool${n === 1 ? "" : "s"}.`,
+    off: "off",
+    withAuth: "with token",
+    urlLabel: "Server URL",
   },
 
   viewer: {
@@ -442,6 +462,7 @@ export const S = {
     appClosed: "App closed.",
     reopenHint: "Reopen the file to start it again.",
     windowCloseHint: "This window will close itself if the browser allows it.",
+    openFailed: (url, msg) => `Couldn't open ${url}: ${msg}`,
   },
 
   // Updating this app from a template .uapp (drag one onto the window).
@@ -484,6 +505,8 @@ export const S = {
     resizerTitle: "Drag to resize, double-click to reset",
     pinPanel: "Pin beside the app",
     unpinPanel: "Unpin (float over the app)",
+    appFiles: "App files",
+    dataFiles: "Data files",
   },
 
   toolMeta: {

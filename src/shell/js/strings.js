@@ -1,6 +1,7 @@
-/* Locale loader. Imports every language file, picks the active one from
- * localStorage, and exports it as S. setLocale() saves the choice and
- * reloads the page so every module re-evaluates with the new strings. */
+/* Locale loader. Imports every language file, picks the active one (the
+ * choice saved in Settings, else the browser's preferred languages), and
+ * exports it as S. setLocale() saves the choice and reloads the page so
+ * every module re-evaluates with the new strings. */
 
 import { S as en } from "./lang/en.js";
 import { S as fr } from "./lang/fr.js";
@@ -20,14 +21,35 @@ export const LOCALES = [
 
 const STORAGE_KEY = "uapp.lang";
 
+/// Until someone picks a language in Settings, follow the browser's list of
+/// preferred languages (the first one we have wins). Nothing is saved for
+/// that, so a later change of browser language is followed too.
+function detect() {
+  for (const tag of navigator.languages || [navigator.language || ""]) {
+    const t = String(tag).toLowerCase();
+    // Simplified Chinese only: zh-TW / zh-HK / zh-Hant readers are better
+    // served by the next language on their list.
+    if (/^zh(-hans|-cn|-sg|-my)?(-|$)/.test(t) && !/hant|-tw|-hk|-mo/.test(t)) return "zh-Hans";
+    const base = t.split("-")[0];
+    if (base !== "zh" && LANGS[base]) return base;
+  }
+  return "en";
+}
+
 export function getLocale() {
-  return localStorage.getItem(STORAGE_KEY) || "en";
+  let saved = null;
+  try { saved = localStorage.getItem(STORAGE_KEY); } catch {}
+  return saved && LANGS[saved] ? saved : detect();
 }
 
 export function setLocale(code) {
   if (!LANGS[code]) return;
-  localStorage.setItem(STORAGE_KEY, code);
+  try { localStorage.setItem(STORAGE_KEY, code); } catch {}
   location.reload();
 }
 
 export const S = LANGS[getLocale()] || en;
+
+// The page's language, for screen readers, hyphenation and fonts. Not in a
+// hosted site's page, whose own <html lang> describes the site.
+if (!window.__uappSiteArchive) document.documentElement.lang = getLocale();

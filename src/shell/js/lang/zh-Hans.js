@@ -116,6 +116,9 @@ export const S = {
     suggestExplain: "解释这个应用是如何工作的",
     suggestFeature: "建议一个有用的新功能",
     suggestData: "总结这个应用中的数据",
+    archivedLabel: (title) => `${title}（已归档）`,
+    diffMore: (n) => `…还有 ${n} 行`,
+    aiError: (msg) => `AI 错误：${msg}`,
   },
 
   settings: {
@@ -276,6 +279,9 @@ export const S = {
     restoreConfirm: (name, time) => `将 ${name} 恢复到 ${time} 的版本？这将成为所有人的新版本。`,
     listView: "列表视图",
     gridView: "网格视图",
+    actions: "操作",
+    histDeleted: "已删除",
+    histEdited: "已编辑",
   },
 
   toolbar: {
@@ -392,6 +398,17 @@ export const S = {
     filterCombine: "与前一条件组合",
     filterRemove: "移除条件",
     tablesLabel: "表",
+    opContains: "包含",
+    opStarts: "开头是",
+    opEnds: "结尾是",
+    opIn: "在列表中 (a, b, c)",
+    opEmpty: "为空",
+    opNotEmpty: "不为空",
+    exportResult: "导出此结果",
+    range: (a, b, total) => `第 ${a}–${b} 行，共 ${total} 行`,
+    keyColsMissing: "结果中缺少键列。",
+    kindTable: "表",
+    kindView: "视图",
   },
 
   tools: {
@@ -413,6 +430,9 @@ export const S = {
     nameUrlRequired: "名称和 URL 为必填项。",
     connecting: "连接中…",
     connected: (name, n) => `已连接 ${name}：${n} 个工具。`,
+    off: "关闭",
+    withAuth: "带令牌",
+    urlLabel: "服务器 URL",
   },
 
   viewer: {
@@ -442,6 +462,7 @@ export const S = {
     appClosed: "应用已关闭。",
     reopenHint: "重新打开文件以再次启动。",
     windowCloseHint: "如果浏览器允许，此窗口将自动关闭。",
+    openFailed: (url, msg) => `无法打开 ${url}：${msg}`,
   },
 
   // 用模板 .uapp 更新此应用（把文件拖到窗口上）。
@@ -484,6 +505,8 @@ export const S = {
     resizerTitle: "拖动调整大小，双击重置",
     pinPanel: "固定在应用旁边",
     unpinPanel: "取消固定（浮在应用上方）",
+    appFiles: "应用文件",
+    dataFiles: "数据文件",
   },
 
   toolMeta: {

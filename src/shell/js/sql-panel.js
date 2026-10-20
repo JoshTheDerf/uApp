@@ -10,7 +10,7 @@ import {
   dlgAlert, dlgConfirm, makeDialog, footBtn, registerPanel, closePanel, isComposing, menuFrom,
 } from "./ui.js";
 import { toCsv, toTsv, toXlsx, downloadBlob } from "./export.js";
-import { S } from "./strings.js";
+import { S, getLocale } from "./strings.js";
 
 const TPL = /* html */ `
   <div class="panel-head">
@@ -331,9 +331,9 @@ async function browseTable(name) {
 // ---- filters: each row is AND/OR · column · operator · value ----
 const QB_OPS = [
   ["eq", "="], ["ne", "≠"], ["gt", ">"], ["lt", "<"], ["ge", "≥"], ["le", "≤"],
-  ["contains", "contains"], ["starts", "starts with"], ["ends", "ends with"],
-  ["like", "LIKE"], ["notlike", "NOT LIKE"], ["in", "in list (a, b, c)"],
-  ["isnull", "is empty"], ["notnull", "not empty"],
+  ["contains", S.sql.opContains], ["starts", S.sql.opStarts], ["ends", S.sql.opEnds],
+  ["like", "LIKE"], ["notlike", "NOT LIKE"], ["in", S.sql.opIn],
+  ["isnull", S.sql.opEmpty], ["notnull", S.sql.opNotEmpty],
 ];
 let filterTimer = null;
 const applyFiltersSoon = () => { clearTimeout(filterTimer); filterTimer = setTimeout(applyFilters, 350); };
@@ -461,7 +461,7 @@ function renderBrowse(data) {
   if (pages > 1) {
     const a = sq.page * sq.pageSize + 1;
     const b = Math.min(sq.total, (sq.page + 1) * sq.pageSize);
-    $("br-range").textContent = `${a}–${b} of ${sq.total}`;
+    $("br-range").textContent = S.sql.range(a, b, sq.total);
     $("br-prev").disabled = sq.page === 0;
     $("br-next").disabled = sq.page >= pages - 1;
   }
@@ -474,6 +474,7 @@ function tableMenu(name, type, x, y) {
     { icon: "square-terminal", label: S.sql.ctxCopySelect, run: () => copyText(`SELECT * FROM ${qid(name)} LIMIT 100;`) },
   ];
   if (!isInternalTable(name)) {
+    const kind = type === "view" ? S.sql.kindView : S.sql.kindTable;
     items.push({ sep: true });
     if (type === "table") {
       items.push({
@@ -487,8 +488,8 @@ function tableMenu(name, type, x, y) {
       });
     }
     items.push({
-      icon: "trash-2", label: S.sql.ctxDropTable(type), danger: true, run: async () => {
-        if (!(await dlgConfirm(S.sql.dropConfirm(type, name)))) return;
+      icon: "trash-2", label: S.sql.ctxDropTable(kind), danger: true, run: async () => {
+        if (!(await dlgConfirm(S.sql.dropConfirm(kind, name)))) return;
         try {
           await rpc("sql.exec", { sql: `DROP ${type === "view" ? "VIEW" : "TABLE"} ${qid(name)}`, params: [] });
           if (sq.table === name) resetBrowse();
@@ -580,7 +581,7 @@ async function exportBrowse(fmt) {
     let rows = r.rows;
     if (rows.length > EXPORT_MAX) {
       rows = rows.slice(0, EXPORT_MAX);
-      dlgAlert(S.sql.exportTooMany(EXPORT_MAX.toLocaleString()));
+      dlgAlert(S.sql.exportTooMany(EXPORT_MAX.toLocaleString(getLocale())));
     }
     exportRows(sq.table, r.columns, rows, fmt);
   } catch (e) { dlgAlert(S.sql.exportFailed(e.message)); }
@@ -591,7 +592,7 @@ async function exportBrowse(fmt) {
 /// the fetched row). Replicated to every device like any other write.
 async function updateCell(editCtx, colIdx, rowVals, v) {
   const kIdx = editCtx.keyCols.map((k) => editCtx.cols.indexOf(k));
-  if (kIdx.some((i) => i < 0)) throw new Error("key columns missing from the result");
+  if (kIdx.some((i) => i < 0)) throw new Error(S.sql.keyColsMissing);
   const where = editCtx.keyCols.map((k) => `${qid(k)} = ?`).join(" AND ");
   await rpc("sql.exec", {
     sql: `UPDATE ${qid(editCtx.table)} SET ${qid(editCtx.cols[colIdx])} = ? WHERE ${where}`,
@@ -865,7 +866,7 @@ function renderResultBox(cols, rows, note) {
       const b = document.createElement("button");
       b.id = "sql-export";
       b.className = "chip-btn";
-      b.title = "Export this result";
+      b.title = S.sql.exportResult;
       b.innerHTML = I("download", 12) + " " + S.sql.exportLabel;
       b.onclick = () => exportMenu(b, (fmt) =>
         lastSqlResult && exportRows("query", lastSqlResult.cols, lastSqlResult.rows, fmt));

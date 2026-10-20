@@ -3,7 +3,7 @@
  * overlay-panel manager, and per-component <style> installation. */
 
 import { HL_BY_EXT } from "./markdown.js";
-import { S } from "./strings.js";
+import { S, getLocale } from "./strings.js";
 
 export const $ = (id) => document.getElementById(id);
 export const I = (name, size) => window.uappIcon(name, size);
@@ -33,7 +33,7 @@ export const pretty = (v) => {
 };
 export const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
   : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B");
-export const fmtTime = (t) => new Date(t).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+export const fmtTime = (t) => new Date(t).toLocaleString(getLocale(), { dateStyle: "medium", timeStyle: "short" });
 
 /// HTTP path for an archive file (per-segment encoding; the cookie authorizes).
 // Base prefix for archive URLs: "/" natively; the wasm demo build may be
@@ -469,12 +469,12 @@ export const dlgConfirm = async (msg) =>
 /// "data/" or null (cancelled).
 export const dlgPickRoot = (msg) =>
   shellPrompt(msg, [
-    { label: "Cancel", value: "" },
-    { label: "App files", value: "app/" },
-    { label: "Data files", value: "data/", primary: true },
+    { label: S.common.cancel, value: "" },
+    { label: S.ui.appFiles, value: "app/" },
+    { label: S.ui.dataFiles, value: "data/", primary: true },
   ], { icon: "folder-open" }).then((v) => v || null);
 /// One-line text prompt (rename, new file). Resolves null when cancelled.
-export function dlgInput(message, value = "", okLabel = "OK") {
+export function dlgInput(message, value = "", okLabel = S.common.ok) {
   return new Promise((resolve) => {
     const d = makeDialog(shellTitle(), "pencil");
     const p = document.createElement("p");

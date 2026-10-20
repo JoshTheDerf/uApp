@@ -116,6 +116,9 @@ export const S = {
     suggestExplain: "Erkläre, wie diese App funktioniert",
     suggestFeature: "Schlage eine nützliche neue Funktion vor",
     suggestData: "Fasse die Daten in dieser App zusammen",
+    archivedLabel: (title) => `${title} (archiviert)`,
+    diffMore: (n) => `…${n} weitere`,
+    aiError: (msg) => `KI-Fehler: ${msg}`,
   },
 
   settings: {
@@ -276,6 +279,9 @@ export const S = {
     restoreConfirm: (name, time) => `${name} auf die Version von ${time} zurücksetzen? Dies wird eine neue Version für alle.`,
     listView: "Listenansicht",
     gridView: "Rasteransicht",
+    actions: "Aktionen",
+    histDeleted: "gelöscht",
+    histEdited: "bearbeitet",
   },
 
   toolbar: {
@@ -392,6 +398,17 @@ export const S = {
     filterCombine: "Mit der vorherigen Bedingung kombinieren",
     filterRemove: "Bedingung entfernen",
     tablesLabel: "Tabellen",
+    opContains: "enthält",
+    opStarts: "beginnt mit",
+    opEnds: "endet mit",
+    opIn: "in Liste (a, b, c)",
+    opEmpty: "ist leer",
+    opNotEmpty: "nicht leer",
+    exportResult: "Dieses Ergebnis exportieren",
+    range: (a, b, total) => `${a}–${b} von ${total}`,
+    keyColsMissing: "Die Schlüsselspalten fehlen im Ergebnis.",
+    kindTable: "Tabelle",
+    kindView: "Ansicht",
   },
 
   tools: {
@@ -413,6 +430,9 @@ export const S = {
     nameUrlRequired: "Name und URL sind erforderlich.",
     connecting: "Verbinden…",
     connected: (name, n) => `${name} verbunden: ${n} Werkzeug${n === 1 ? "" : "e"}.`,
+    off: "aus",
+    withAuth: "mit Token",
+    urlLabel: "Server-URL",
   },
 
   viewer: {
@@ -442,6 +462,7 @@ export const S = {
     appClosed: "App geschlossen.",
     reopenHint: "Öffnen Sie die Datei erneut, um fortzufahren.",
     windowCloseHint: "Dieses Fenster schließt sich automatisch, wenn der Browser es erlaubt.",
+    openFailed: (url, msg) => `${url} konnte nicht geöffnet werden: ${msg}`,
   },
 
   // Diese App aus einer Vorlagen-.uapp aktualisieren (aufs Fenster ziehen).
@@ -484,6 +505,8 @@ export const S = {
     resizerTitle: "Ziehen zum Ändern der Größe, Doppelklick zum Zurücksetzen",
     pinPanel: "Neben der App anheften",
     unpinPanel: "Lösen (über der App schweben)",
+    appFiles: "App-Dateien",
+    dataFiles: "Datendateien",
   },
 
   toolMeta: {

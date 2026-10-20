@@ -248,7 +248,10 @@ function buildItems(rows) {
       });
     } else if (role === "system") {
       const retry = isAiError(mid) && row === last && !cs.aiBusy;
-      items.push({ key: "m:" + mid, sig: hash(contentStr) + (retry ? "|retry" : ""), make: () => systemRow(mid, content.text || "", retry) });
+      // AI failures come from the server as "AI error: <message>"; the
+      // prefix is shown in the reader's language.
+      const text = isAiError(mid) ? S.chat.aiError(String(content.text || "").replace(/^AI error:\s*/, "")) : content.text || "";
+      items.push({ key: "m:" + mid, sig: hash(contentStr) + (retry ? "|retry" : ""), make: () => systemRow(mid, text, retry) });
     } else if (role === "summary") {
       items.push({ key: "m:" + mid, sig: hash(contentStr), make: () => summaryRow(content.text || "") });
     }
@@ -587,7 +590,7 @@ function renderLineDiff(box, name, prev, next) {
   while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
   const clipLines = (lines, sign) =>
     lines.slice(0, 12).map((l) => `<div class="wd-${sign}">${sign === "del" ? "-" : "+"} ${esc(clip(l, 160))}</div>`).join("") +
-    (lines.length > 12 ? `<div class="wd-more">…${lines.length - 12} more</div>` : "");
+    (lines.length > 12 ? `<div class="wd-more">${esc(S.chat.diffMore(lines.length - 12))}</div>` : "");
   box.innerHTML =
     `<div class="wd-head">${S.chat.diffChanges(esc(name), s + 1)}</div>` +
     clipLines(a.slice(s, a.length - e), "del") + clipLines(b.slice(s, b.length - e), "add");

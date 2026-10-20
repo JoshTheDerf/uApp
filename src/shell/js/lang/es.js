@@ -116,6 +116,9 @@ export const S = {
     suggestExplain: "Explica cómo funciona esta app",
     suggestFeature: "Sugiere una función nueva útil",
     suggestData: "Resume los datos de esta app",
+    archivedLabel: (title) => `${title} (archivado)`,
+    diffMore: (n) => `…${n} más`,
+    aiError: (msg) => `Error de IA: ${msg}`,
   },
 
   settings: {
@@ -276,6 +279,9 @@ export const S = {
     restoreConfirm: (name, time) => `¿Restaurar ${name} a la versión de ${time}? Esto se convierte en una nueva versión para todos.`,
     listView: "Vista de lista",
     gridView: "Vista de cuadrícula",
+    actions: "Acciones",
+    histDeleted: "eliminado",
+    histEdited: "editado",
   },
 
   toolbar: {
@@ -392,6 +398,17 @@ export const S = {
     filterCombine: "Combinar con la condición anterior",
     filterRemove: "Eliminar condición",
     tablesLabel: "Tablas",
+    opContains: "contiene",
+    opStarts: "empieza por",
+    opEnds: "termina en",
+    opIn: "en la lista (a, b, c)",
+    opEmpty: "está vacío",
+    opNotEmpty: "no está vacío",
+    exportResult: "Exportar este resultado",
+    range: (a, b, total) => `${a}–${b} de ${total}`,
+    keyColsMissing: "Faltan las columnas clave en el resultado.",
+    kindTable: "la tabla",
+    kindView: "la vista",
   },
 
   tools: {
@@ -413,6 +430,9 @@ export const S = {
     nameUrlRequired: "Se requieren nombre y URL.",
     connecting: "Conectando…",
     connected: (name, n) => `${name} conectado: ${n} herramienta${n === 1 ? "" : "s"}.`,
+    off: "desactivado",
+    withAuth: "con token",
+    urlLabel: "URL del servidor",
   },
 
   viewer: {
@@ -442,6 +462,7 @@ export const S = {
     appClosed: "App cerrada.",
     reopenHint: "Vuelve a abrir el archivo para iniciarla de nuevo.",
     windowCloseHint: "Esta ventana se cerrará sola si el navegador lo permite.",
+    openFailed: (url, msg) => `No se pudo abrir ${url}: ${msg}`,
   },
 
   // Actualizar esta app desde una plantilla .uapp (arrástrala a la ventana).
@@ -484,6 +505,8 @@ export const S = {
     resizerTitle: "Arrastra para redimensionar, doble clic para restablecer",
     pinPanel: "Fijar junto a la app",
     unpinPanel: "Desfijar (flotar sobre la app)",
+    appFiles: "Archivos de la app",
+    dataFiles: "Archivos de datos",
   },
 
   toolMeta: {

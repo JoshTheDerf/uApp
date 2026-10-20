@@ -283,7 +283,7 @@ function chatMenu() {
   if (archived.length) {
     items.push({ sep: true });
     for (const s of archived) {
-      items.push({ icon: "archive", label: `${sessionTitle(s)} (archived)`, run: () => switchSession(s.id) });
+      items.push({ icon: "archive", label: S.chat.archivedLabel(sessionTitle(s)), run: () => switchSession(s.id) });
     }
   }
   items.push({ sep: true });
