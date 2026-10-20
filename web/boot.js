@@ -745,7 +745,26 @@ let saveState = "saved";  // saved | dirty | saving | failed
 let saveError = "";
 let leaving = false;      // our own navigation, after everything was saved
 
-function canSave() { return !!currentAppId && !zombie; } // launcher is ephemeral; dormant tabs must not write
+// The launcher is ephemeral, dormant tabs must not write, and a crashed
+// engine has nothing trustworthy left to save.
+function canSave() { return !!currentAppId && !zombie && !engineDead; }
+
+let engineDead = "";
+function onEngineDead(why) {
+  if (engineDead) return;
+  engineDead = String(why || "unknown error");
+  clearTimeout(saveTimer); saveTimer = null;
+  console.error("uapp: the engine crashed:", engineDead);
+  let text = "The app's engine hit an internal error and stopped, so nothing more can be saved from this page. ";
+  if (currentAppId) {
+    text += lastSavedAt
+      ? `Your last save was at ${new Date(lastSavedAt).toLocaleTimeString()}. Reload to carry on from there.`
+      : "Nothing was saved since this page opened. Reload to carry on from the last saved copy.";
+  } else {
+    text += "Reload to start again.";
+  }
+  errorCard("Something went wrong", text + "\n\n" + engineDead, [["Reload", () => { leaving = true; location.reload(); }]]);
+}
 
 function setSaveState(state, err) {
   saveState = state;
@@ -1557,6 +1576,10 @@ if (tabChannel) {
         return;
       }
       if (m.type === "fatal" && !appIsReady) workerFailed(new Error(m.error));
+      if (m.type === "dead") {
+        if (appIsReady) onEngineDead(m.message);
+        else workerFailed(new Error("The engine crashed while starting: " + m.message));
+      }
     });
     await Promise.race([
       new Promise((resolve, reject) => {

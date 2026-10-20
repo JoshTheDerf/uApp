@@ -61,6 +61,16 @@ extern "C" {
     pub fn js_stop_requested() -> bool;
     /// Clear the stop flag (called when a run starts).
     pub fn js_clear_stop();
+    /// A panic's message, reported before the module traps (the trap itself
+    /// only says "unreachable"). The worker treats the engine as dead from
+    /// then on: its memory is whatever the panic left behind.
+    pub fn js_panic(msg: &str);
+}
+
+/// Runs once, when the module is instantiated.
+#[wasm_bindgen(start)]
+pub fn start() {
+    std::panic::set_hook(Box::new(|info| js_panic(&info.to_string())));
 }
 
 thread_local! {

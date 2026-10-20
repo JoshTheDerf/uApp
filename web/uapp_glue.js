@@ -19,8 +19,17 @@
  *   net   [0] state (1 = a record is ready)   [1] length   [2] flags (1 eof, 2 error)
  */
 
-const cfg = { sab: null, inbox: null, net: null, notify: () => {}, aiTick: null, dispatch: null };
+const cfg = { sab: null, inbox: null, net: null, notify: () => {}, aiTick: null, dispatch: null, onPanic: () => {} };
 export function glueConfigure(c) { Object.assign(cfg, c); }
+
+// The Rust panic hook (wasm.rs `start`). Kept as well as reported: a panic
+// during instantiation comes before worker.js has configured anything.
+let panicked = "";
+export function js_panic(msg) {
+  panicked = String(msg);
+  try { cfg.onPanic(panicked); } catch {}
+}
+export function gluePanicked() { return panicked; }
 
 const WAKE = 3, BLOCKED = 4;
 const HDR = 32; // control ints live in the first 32 bytes; payloads follow
