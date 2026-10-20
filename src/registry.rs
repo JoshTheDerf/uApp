@@ -89,16 +89,11 @@ pub fn lock_exclusive(path: &Path) -> Result<File> {
 
 /// Advertise the running server for double-open reuse.
 pub fn write_addr(path: &Path, port: u16, token: &str) {
-    let _ = std::fs::create_dir_all(dir());
     let addr = entry(path, "addr");
     let body = serde_json::json!({"port": port, "token": token, "pid": std::process::id()});
-    let _ = std::fs::write(&addr, body.to_string());
-    // The .addr holds the session token — keep it owner-readable only.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&addr, std::fs::Permissions::from_mode(0o600));
-    }
+    // The .addr holds the session token, so it is created owner-only (never
+    // briefly world-readable) and replaced atomically.
+    let _ = crate::secrets::write_private(&addr, body.to_string().as_bytes());
 }
 
 /// The advertised server for this path, if any: `(port, token)`.

@@ -79,7 +79,7 @@ impl axum::extract::FromRequestParts<Arc<Library>> for Owner {
             .unwrap_or("")
             .split('&')
             .find_map(|kv| kv.strip_prefix("t="));
-        if q_token == Some(lib.token.as_str()) {
+        if q_token.is_some_and(|t| crate::secrets::token_eq(t, &lib.token)) {
             return Ok(Owner);
         }
         let bearer = parts
@@ -87,7 +87,7 @@ impl axum::extract::FromRequestParts<Arc<Library>> for Owner {
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|t| t.trim() == lib.token)
+            .map(|t| crate::secrets::token_eq(t.trim(), &lib.token))
             .unwrap_or(false);
         if bearer {
             Ok(Owner)

@@ -759,17 +759,27 @@ fn populate_export(
     for o in objects.iter().filter(|o| o.typ != "table") {
         exec_schema_sql(out, &o.typ, &o.name, &o.sql)?;
     }
-    // Config: everything except secrets — the `ai` entry keeps the
-    // provider/model choice, minus api_key.
+    // Config: everything except secrets. Current builds keep secrets out of
+    // the file, but a legacy file can still carry them: the `ai` entry keeps
+    // the provider/model choice minus api_key, MCP servers lose their
+    // headers, and "always allow" approvals never travel.
     let mut sel = mem.prepare("SELECT key, value FROM uapp_config")?;
     let mut rows = sel.query([])?;
     while let Some(row) = rows.next()? {
         let key: String = row.get(0)?;
         let raw: String = row.get(1)?;
-        let value = if key == "ai" {
+        if key.starts_with("approvals.") {
+            continue;
+        }
+        let value = if key == "ai" || key == "mcp" {
             let mut v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
             if let Some(o) = v.as_object_mut() {
                 o.remove("api_key");
+            }
+            if let Some(servers) = v.as_array_mut() {
+                for s in servers.iter_mut().filter_map(Value::as_object_mut) {
+                    s.remove("headers");
+                }
             }
             if v.is_null() {
                 continue;
@@ -2372,6 +2382,46 @@ mod tests {
         assert!(e.contains("uApp's own tables"), "{e}");
         exec_schema_sql(&c, "table", "t", "CREATE TABLE t(x) ; -- fine").unwrap();
         exec_schema_sql(&c, "index", "i", "CREATE UNIQUE INDEX i ON t(x)").unwrap();
+    }
+
+    #[test]
+    fn exports_drop_legacy_secrets() {
+        let dir = std::env::temp_dir().join(format!("uapp-export-secrets-{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("legacy.uapp");
+        bootstrap(&p, "legacy", None).unwrap();
+        let db = Connection::open(&p).unwrap();
+        // What an older build left in the file.
+        db.execute_batch(
+            r#"INSERT OR REPLACE INTO uapp_config(key,value) VALUES
+                 ('ai', '{"provider":"anthropic","api_key":"sk-secret"}'),
+                 ('mcp', '[{"name":"x","url":"https://mcp.example","headers":{"Authorization":"Bearer t"}}]'),
+                 ('approvals.app.abc', '["sql_exec"]');"#,
+        )
+        .unwrap();
+        for bytes in [
+            export_template(&db, "legacy").unwrap(),
+            export_public(&db, "legacy", false).unwrap(),
+        ] {
+            let out = dir.join("out.uapp");
+            std::fs::write(&out, bytes).unwrap();
+            let o = Connection::open(&out).unwrap();
+            let all: String = o
+                .query_row(
+                    "SELECT group_concat(key || '=' || value, ';') FROM uapp_config",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(!all.contains("sk-secret"), "api key travelled: {all}");
+            assert!(!all.contains("Bearer"), "MCP headers travelled: {all}");
+            assert!(!all.contains("approvals."), "approvals travelled: {all}");
+            assert!(
+                all.contains("anthropic") && all.contains("mcp.example"),
+                "settings kept: {all}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
