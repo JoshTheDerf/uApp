@@ -1370,7 +1370,7 @@ function splashAsk(title, text, okLabel, cancelLabel) {
 // Boot could not finish. Said on the splash, with a way to try again: a
 // production page opens its app with ?open= or the --open default, and a
 // silent failure there is an endless "Loading…".
-function fatal(msg, title = "uApp could not start") {
+function fatal(msg, title = "uApp could not start", retryLabel = "Try again") {
   msg = String(msg || "Something went wrong.");
   console.error("uapp:", msg);
   // Hosted-site chrome (site-chrome.js): the body is the reader's page, and
@@ -1379,7 +1379,7 @@ function fatal(msg, title = "uApp could not start") {
     window.dispatchEvent(new CustomEvent("uapp-boot-fatal", { detail: msg }));
     return;
   }
-  const buttons = [["Try again", () => { leaving = true; location.reload(); }]];
+  const buttons = [[retryLabel, () => { leaving = true; location.reload(); }]];
   if (!IS_LAUNCHER) buttons.push(["Back to your apps", () => switchTo(null)]);
   errorCard(title, msg, buttons);
 }
@@ -1648,7 +1648,7 @@ if (tabChannel) {
         if (win && stillOurs(win)) { try { postToFrame(win, JSON.parse(m.msg)); } catch {} }
         return;
       }
-      if (m.type === "fatal" && !appIsReady) workerFailed(new Error(m.error));
+      if (m.type === "fatal" && !appIsReady) workerFailed(m.updated ? updatedError() : new Error(m.error));
       if (m.type === "dead") {
         if (appIsReady) onEngineDead(m.message);
         else workerFailed(new Error("The engine crashed while starting: " + m.message));
@@ -1665,7 +1665,6 @@ if (tabChannel) {
             if (d.build && d.build !== BUILD && !BUILD.startsWith("__")) reject(updatedError());
             else resolve();
           }
-          if (d.type === "fatal") reject(d.updated ? updatedError() : new Error(d.error));
         };
         worker.addEventListener("message", h);
         worker.postMessage({ type: "init", sab, inbox, net });
@@ -1794,7 +1793,16 @@ if (tabChannel) {
       if (tb && tb.hidden) document.getElementById("topbar")?.classList.add("hidden");
     } catch {}
 
-    await import(new URL("shell/main.js", BASE));
+    // main.js mirrors the app frame's URL into the address bar whenever
+    // __uappSiteArchive is set. That is right for a hosted site's chrome
+    // (its top URL is a page of the site) and wrong here, where the top URL
+    // is the shell's own (?open=…): rewritten, a reload or switchTo lands
+    // on the wrong page. It reads the flag once, at import, so hide it for
+    // that moment. (Better keyed on __uappChrome in main.js itself.)
+    const archive = window.__uappSiteArchive;
+    if (archive && !window.__uappChrome) delete window.__uappSiteArchive;
+    try { await import(new URL("shell/main.js", BASE)); }
+    finally { if (archive) window.__uappSiteArchive = archive; }
     await framePainted;
     splashHide();
     // An archive that came from a URL can go back to it: the sync pill in the
@@ -1808,7 +1816,7 @@ if (tabChannel) {
     console.error(e);
     appReadyReject(e instanceof Error ? e : new Error(String(e)));
     if ((e && e.updated) || await serverMovedOn()) {
-      fatal("A new version was deployed while this page was loading. Reload to get it.", "uApp was updated");
+      fatal("A new version was deployed while this page was loading. Reload to get it.", "uApp was updated", "Reload");
     } else {
       fatal(errText(e));
     }
