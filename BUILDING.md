@@ -1,102 +1,72 @@
 # Building uApp
 
-The quick way is [`just`](https://github.com/casey/just) (`justfile` at the repo root):
+Everything builds one binary, `uapp`. With the default `gui` feature it has the native window (Tauri), and with `--no-default-features` it opens apps in your browser instead, which is the build for servers, Docker and the tests. Both have every command in [docs/CLI.md](docs/CLI.md).
+
+The quick way is [`just`](https://github.com/casey/just):
 
 ```sh
-just            # list recipes
-just build      # release build of uapp (with the native window)
-just test       # Rust tests + node end-to-end tests (no-window build)
-just web        # browser build -> dist-web/
-just lint       # cargo fmt --check + clippy for both builds
-just install    # build + install ~/.local/bin/uapp
-just serve path/to/site.uapp          # public-site mode locally, with editing chrome
+just                  # list recipes
+just build            # release build with the window (target/release/uapp)
+just build-server     # release build without the window
+just install          # just build, then install it as ~/.local/bin/uapp
+just web              # the browser build, into dist-web/
+just serve site.uapp  # serve a .uapp as a public site locally, with the editor (run `just web` first)
+just dev              # the window with live reload (cargo tauri dev)
 ```
 
-The sections below describe what those recipes run.
+Testing and linting are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Desktop app
+## Prerequisites
 
-The distributed uApp binary is a native desktop application built with Tauri.
+- Rust 1.88 or newer
+- A C compiler, Perl and make (SQLCipher and OpenSSL are compiled from source). On Windows you also need [NASM](https://www.nasm.us/) on your `PATH`.
+- For the window build on Linux: `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev` (on Debian and Ubuntu). Other platforms are covered by [Tauri's prerequisites](https://tauri.app/start/prerequisites/).
+- For bundles and mobile builds: the Tauri CLI, `cargo install tauri-cli --version '^2' --locked`
 
-### Prerequisites
-
-- Rust (stable toolchain)
-- A C compiler (gcc/clang)
-- Node.js ≥ 22 (for tests)
-- Tauri CLI: `cargo install tauri-cli --version '^2'`
-- Desktop deps: https://tauri.app/start/prerequisites/
-
-### Build
+## Desktop
 
 ```sh
-cargo tauri dev              # dev build
-cargo tauri build            # release build
+cargo build --release    # target/release/uapp
+cargo tauri build        # the same, plus installable bundles (.deb, .AppImage, .app, .dmg)
 ```
 
-Linux needs `webkit2gtk` / `libsoup`.
-
-`uapp` is one binary: the native window plus every CLI subcommand (see
-[docs/CLI.md](docs/CLI.md)). To build and install it for your user as
-`~/.local/bin/uapp` (the previous one kept as `uapp.bak`):
+To install your build as `~/.local/bin/uapp` (the previous one is kept as `uapp.bak`):
 
 ```sh
 scripts/install-local.sh            # cargo build --release, then install
-scripts/install-local.sh --no-build # install what is already built
+scripts/install-local.sh --no-build # install what's already built
 ```
 
-### Run tests
+Then `uapp install` registers `.uapp` files with your Linux desktop.
 
-```sh
-cargo test --no-default-features   # Rust unit + integration tests
-scripts/test-e2e.sh                # node suites against target/debug/uapp
-```
+## Android and iOS
 
-`scripts/test-e2e.sh` builds `uapp` without the window first (a gui
-`cargo build` writes the same `target/debug/uapp`). Set `UAPP_BIN` to test
-another binary, or name suites to run only those (`scripts/test-e2e.sh ai`).
+They use the same Tauri build.
 
-## Mobile apps
-
-iOS and Android use the same Tauri build with `--features gui` (enabled by default).
-
-### Prerequisites
-
-- iOS: macOS + Xcode
-- Android: Android Studio + SDK + NDK, JDK 17–21
-
-### Build
+- Android: Android Studio with the SDK and NDK, and JDK 17 to 21. CI uses NDK 27.1.12297006 and symlinks the NDK's `llvm-*` tools to the old binutils names that the OpenSSL build expects (see the `android` job in `.github/workflows/ci.yml`).
+- iOS: macOS and Xcode (untested).
 
 ```sh
 cargo tauri android build
 cargo tauri ios build
 ```
 
-## Browser demo (WASM)
+## Browser build (WASM)
 
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.127 --locked
-./scripts/build-web.sh
+scripts/build-web.sh
 ```
 
-You also need clang (SQLite is compiled to wasm). The script stops if the wasm-bindgen CLI doesn't match the version in Cargo.lock, and runs `wasm-opt -Oz` when binaryen is installed. The files in the bundle are listed in `web/uapp-bundle.js` (the service worker reads the same list), so a new file goes there.
+You also need clang (SQLite is compiled to wasm). The script stops if your wasm-bindgen CLI doesn't match the version in `Cargo.lock`, runs `wasm-opt -Oz` when binaryen is installed, and builds the demo launcher with the `make-demo-apps` example. The bundle's files are listed in `web/uapp-bundle.js` (the service worker reads the same list), so a new file goes there.
 
-To check the browser build end to end (headless Chromium, after `cargo build --no-default-features` and `scripts/build-web.sh`): `node scripts/e2e-webhost/run.mjs`.
+The browser build can't open encrypted files and doesn't take snapshots.
 
-Limitations: no encryption, no crash snapshots.
-
-## Server build
-
-Built with `--no-default-features`, `uapp` has no Tauri or webview
-dependencies and opens apps in the system browser. That's the build for
-servers, Docker (`Dockerfile.serve`) and the tests:
+## Server
 
 ```sh
 cargo build --release --no-default-features
 ```
 
-The demo launcher for the browser build comes from a cargo example:
-
-```sh
-cargo run --release --no-default-features --example make-demo-apps -- dist-web
-```
+This build has no Tauri or webview dependencies. `Dockerfile.serve` builds it into an image for `uapp serve` and `uapp library`, and its comments show how to run each.
