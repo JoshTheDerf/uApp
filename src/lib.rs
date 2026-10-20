@@ -166,7 +166,7 @@ mod native_serve {
         if store::is_encrypted_file(&path) {
             let have_valid = passphrase
                 .as_deref()
-                .map_or(false, |pw| crate::cipher::open_file(&path, pw).is_ok());
+                .is_some_and(|pw| crate::cipher::open_file(&path, pw).is_ok());
             if !have_valid {
                 // Already open (and unlocked) on this machine? Redirect to it
                 // instead of prompting a second time.

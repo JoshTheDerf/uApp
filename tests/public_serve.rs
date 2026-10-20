@@ -9,6 +9,7 @@
 //!     publishing) must refuse without the token — and work with it.
 //!   * `/site.uapp` must carry the site's own tables WITH rows, but no chat,
 //!     no `data/` files and no config secrets.
+//!
 //! And the write half: a `PUT /site.uapp` of an edited copy makes the served
 //! site match it without touching config, chat or history.
 
@@ -181,8 +182,28 @@ fn serves_pages_at_real_urls() {
     // A missing page gets the site's 404 document, with a 404 status...
     assert_eq!(status(&format!("{base}/nope")), 404);
     assert!(body_or_empty(&format!("{base}/nope")).contains("no such page"));
+    // ...every time (it is cached once, not per missing path).
+    assert!(body_or_empty(&format!("{base}/nope2")).contains("no such page"));
     // ...but 404.html requested directly is a normal page.
     assert_eq!(status(&format!("{base}/404.html")), 200);
+    // Byte ranges, so audio/video on a site can seek.
+    let full = bytes(&format!("{base}/posts/hello.html"));
+    let r = ureq::get(&format!("{base}/posts/hello.html"))
+        .set("Range", "bytes=2-9")
+        .call()
+        .unwrap();
+    assert_eq!(r.status(), 206);
+    assert_eq!(
+        r.header("content-range"),
+        Some(format!("bytes 2-9/{}", full.len()).as_str())
+    );
+    let mut part = Vec::new();
+    std::io::Read::read_to_end(&mut r.into_reader(), &mut part).unwrap();
+    assert_eq!(part, full[2..=9]);
+    let past = ureq::get(&format!("{base}/posts/hello.html"))
+        .set("Range", &format!("bytes={}-", full.len() + 10))
+        .call();
+    assert_eq!(status_of(past, "range past the end"), 416);
     // The viewport meta is injected; `/uapp.js` (the privileged console
     // forwarder) is NOT.
     let home = body(&format!("{base}/"));

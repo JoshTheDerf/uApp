@@ -1503,9 +1503,11 @@ pub(crate) fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Read one archive entry by its EXACT name. `store::sqlar_read` is the wrong
-/// tool for an anonymous request — see the module header.
-fn read_exact(db: &rusqlite::Connection, name: &str) -> Option<Vec<u8>> {
+/// Read one archive entry by its EXACT name, still compressed: `(sz, data)`
+/// as stored, inflated by the caller outside the engine lock.
+/// `store::sqlar_read` is the wrong tool for an anonymous request — see the
+/// module header.
+fn read_exact_raw(db: &rusqlite::Connection, name: &str) -> Option<(Option<i64>, Vec<u8>)> {
     let mut stmt = db
         .prepare("SELECT sz, data FROM sqlar WHERE name=?1")
         .ok()?;
@@ -1513,14 +1515,14 @@ fn read_exact(db: &rusqlite::Connection, name: &str) -> Option<Vec<u8>> {
     let row = rows.next().ok()??;
     let sz: Option<i64> = row.get(0).ok()?;
     let data: Option<Vec<u8>> = row.get(1).ok()?; // NULL = directory entry
-    crate::store::sqlar_inflate(sz, data?, name).ok()
+    Some((sz, data?))
 }
 
 /// Map a request path to an `app/` name the way a static host would: `/` and
 /// `/posts/` get `index.html`, and an extensionless path tries `<p>.html`
 /// then `<p>/index.html`, so posts can be linked as `/posts/hello` as well as
 /// `/posts/hello.html`.
-fn resolve_public(db: &rusqlite::Connection, path: &str) -> Option<(String, Vec<u8>)> {
+fn resolve_public(db: &rusqlite::Connection, path: &str) -> Option<(String, Option<i64>, Vec<u8>)> {
     let p = path.trim_start_matches('/');
     if p.contains("..") || p.contains('\\') {
         return None;
@@ -1537,7 +1539,7 @@ fn resolve_public(db: &rusqlite::Connection, path: &str) -> Option<(String, Vec<
     }
     tries
         .into_iter()
-        .find_map(|name| read_exact(db, &name).map(|b| (name, b)))
+        .find_map(|name| read_exact_raw(db, &name).map(|(sz, b)| (name, sz, b)))
 }
 
 /// Add `<meta name="viewport">` when the document lacks one, and — when the
@@ -1620,26 +1622,16 @@ fn strip_wasm_marker(text: &str) -> String {
 }
 
 /// An anonymous visitor's view of the site: one `app/` page (or the site's
-/// `404.html`), with cache validators so a CDN or browser can revalidate.
+/// `404.html`), with cache validators so a CDN or browser can revalidate, and
+/// byte ranges so media can seek.
 fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
     let opts = app.public.unwrap_or_default();
-    let found = {
-        let eng = app.eng();
-        resolve_public(&eng.db, path).or_else(|| {
-            read_exact(&eng.db, "app/404.html").map(|b| ("app/404.html".to_string(), b))
-        })
-    };
-    let Some((name, bytes)) = found else {
+    let Some(page) = public_lookup(app, path) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    let is_404 = name == "app/404.html" && path.trim_start_matches('/') != "404.html";
-    let ctype = content_type_for(&name);
+    let is_404 = page.name == "app/404.html" && path.trim_start_matches('/') != "404.html";
+    let ctype = content_type_for(&page.name);
     let is_html = ctype.starts_with("text/html");
-    let bytes = if is_html {
-        inject_chrome(bytes, app.chrome.as_ref().map(|c| c.version.as_str()))
-    } else {
-        bytes
-    };
     let cache = if is_html {
         // Always revalidate: a reload must get the server's authoritative copy.
         "public, max-age=0, must-revalidate".to_string()
@@ -1655,7 +1647,7 @@ fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
             format!("public, max-age={}", opts.asset_max_age)
         }
     };
-    let etag = etag_for(&bytes);
+    let etag = page.etag.clone();
     if !is_404 && if_none_match(headers, &etag) {
         return (
             StatusCode::NOT_MODIFIED,
@@ -1663,24 +1655,133 @@ fn public_page(app: &App, path: &str, headers: &HeaderMap) -> Response {
         )
             .into_response();
     }
-    (
-        if is_404 {
-            StatusCode::NOT_FOUND
-        } else {
-            StatusCode::OK
-        },
-        [
-            (header::CONTENT_TYPE, ctype.to_string()),
-            (header::ETAG, etag),
-            (header::CACHE_CONTROL, cache),
-        ],
-        bytes,
-    )
-        .into_response()
+    let total = page.body.len() as u64;
+    // The cached page itself becomes the body: no copy per request.
+    let body = axum::body::Bytes::from_owner(SharedBody(page));
+    let range = if is_404 {
+        None
+    } else {
+        parse_range(headers, total)
+    };
+    match range {
+        Some(Ok((start, end))) => (
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (header::CONTENT_TYPE, ctype.to_string()),
+                (header::ETAG, etag),
+                (header::CACHE_CONTROL, cache),
+                (header::ACCEPT_RANGES, "bytes".to_string()),
+                (
+                    header::CONTENT_RANGE,
+                    format!("bytes {start}-{end}/{total}"),
+                ),
+            ],
+            body.slice(start as usize..=end as usize),
+        )
+            .into_response(),
+        Some(Err(())) => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [(header::CONTENT_RANGE, format!("bytes */{total}"))],
+            "range not satisfiable",
+        )
+            .into_response(),
+        None => (
+            if is_404 {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            },
+            [
+                (header::CONTENT_TYPE, ctype.to_string()),
+                (header::ETAG, etag),
+                (header::CACHE_CONTROL, cache),
+                (header::ACCEPT_RANGES, "bytes".to_string()),
+            ],
+            body,
+        )
+            .into_response(),
+    }
 }
 
-/// When the site's content last changed (unix seconds); a HEAD is enough to
-/// read it. The editing chrome compares it with the copy it downloaded.
+/// A shared, immutable response body (cached page or archive) handed to the
+/// HTTP layer without copying it.
+struct SharedBody<T>(Arc<T>);
+
+impl<T: AsRef<[u8]>> AsRef<[u8]> for SharedBody<T> {
+    fn as_ref(&self) -> &[u8] {
+        (*self.0).as_ref()
+    }
+}
+
+/// Pages bigger than this are served but not kept (a video can be huge), and
+/// the whole cache is dropped when it would grow past the total.
+const PAGE_CACHE_ENTRY_MAX: usize = 8 * 1024 * 1024;
+const PAGE_CACHE_TOTAL_MAX: usize = 64 * 1024 * 1024;
+/// The site's 404 page is cached once under this key, not once per missing
+/// path (which anyone could use to fill the cache).
+const NOT_FOUND_KEY: &str = ":404"; // request paths all start with '/'
+
+/// The page for `path`, from the cache when nothing was written since it was
+/// built. On a miss the engine lock is held only to read the stored
+/// (compressed) rows; inflating and injecting happen after it is released.
+fn public_lookup(app: &App, path: &str) -> Option<Arc<crate::app::CachedPage>> {
+    let writes = app.eng().writes;
+    {
+        let c = crate::app::lock(&app.page_cache);
+        if c.writes == writes {
+            if let Some(p) = c.pages.get(path) {
+                return Some(p.clone());
+            }
+        }
+    }
+    let (found, not_found, writes) = {
+        let eng = app.eng();
+        let found = resolve_public(&eng.db, path);
+        let cached_404 = {
+            let c = crate::app::lock(&app.page_cache);
+            (c.writes == eng.writes)
+                .then(|| c.pages.get(NOT_FOUND_KEY).cloned())
+                .flatten()
+        };
+        let not_found = match (&found, cached_404) {
+            (Some(_), _) => None,
+            (None, Some(p)) => return Some(p),
+            (None, None) => read_exact_raw(&eng.db, "app/404.html"),
+        };
+        (found, not_found, eng.writes)
+    };
+    let (key, name, sz, data) = match (found, not_found) {
+        (Some((name, sz, data)), _) => (path.to_string(), name, sz, data),
+        (None, Some((sz, data))) => (NOT_FOUND_KEY.to_string(), "app/404.html".into(), sz, data),
+        (None, None) => return None,
+    };
+    let bytes = crate::store::sqlar_inflate(sz, data, &name).ok()?;
+    let body = if content_type_for(&name).starts_with("text/html") {
+        inject_chrome(bytes, app.chrome.as_ref().map(|c| c.version.as_str()))
+    } else {
+        bytes
+    };
+    let page = Arc::new(crate::app::CachedPage {
+        etag: etag_for(&body),
+        name,
+        body,
+    });
+    let len = page.body.len();
+    if len <= PAGE_CACHE_ENTRY_MAX {
+        let mut c = crate::app::lock(&app.page_cache);
+        if c.writes != writes || c.bytes + len > PAGE_CACHE_TOTAL_MAX {
+            *c = crate::app::PageCache {
+                writes,
+                ..Default::default()
+            };
+        }
+        if let Some(old) = c.pages.insert(key, page.clone()) {
+            c.bytes -= old.body.len();
+        }
+        c.bytes += len;
+    }
+    Some(page)
+}
 
 /// The current `/site.uapp`, rebuilt only when something was written since.
 fn current_archive(app: &App) -> anyhow::Result<Arc<crate::app::PublicArchive>> {
@@ -1737,7 +1838,7 @@ async fn site_archive(State(app): State<Arc<App>>, headers: HeaderMap) -> Respon
                 "public, max-age=0, must-revalidate".to_string(),
             ),
         ],
-        arc.bytes.clone(),
+        axum::body::Bytes::from_owner(SharedBody(arc)),
     )
         .into_response()
 }

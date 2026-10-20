@@ -165,6 +165,35 @@ pub struct PublicArchive {
     pub etag: String,
 }
 
+/// A public site's page as served (archive entry, bytes after injection,
+/// ETag), kept until the next write so a busy site doesn't re-read and
+/// re-inflate the same file under the engine lock on every request.
+pub struct CachedPage {
+    pub name: String,
+    pub body: Vec<u8>,
+    pub etag: String,
+}
+
+impl AsRef<[u8]> for CachedPage {
+    fn as_ref(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+impl AsRef<[u8]> for PublicArchive {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// [`CachedPage`]s by request path, valid for one value of `Engine::writes`.
+#[derive(Default)]
+pub struct PageCache {
+    pub writes: u64,
+    pub bytes: usize,
+    pub pages: HashMap<String, std::sync::Arc<CachedPage>>,
+}
+
 /// A dropped template .uapp held between "here's what this would change" and
 /// the user pressing Update.
 pub struct StagedTemplate {
@@ -251,6 +280,8 @@ pub struct App {
     /// moves (`Engine::writes`), so an unchanged site never rebuilds it and a
     /// publish is visible on the very next request.
     pub archive_cache: Mutex<Option<(u64, std::sync::Arc<PublicArchive>)>>,
+    /// Public mode: pages served to anonymous visitors (see `server::public_page`).
+    pub page_cache: Mutex<PageCache>,
 }
 
 impl App {
@@ -289,6 +320,7 @@ impl App {
             public: None,
             chrome: None,
             archive_cache: Mutex::new(None),
+            page_cache: Mutex::new(PageCache::default()),
         }
     }
 }
@@ -461,7 +493,7 @@ impl App {
         });
         let session = session.as_deref();
         for (id, h) in lock(&self.ai_runs).iter() {
-            if session.map_or(true, |s| s == id) {
+            if session.is_none_or(|s| s == id) {
                 h.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -469,7 +501,7 @@ impl App {
             let mut p = lock(&self.pending);
             let ids: Vec<String> = p
                 .iter()
-                .filter(|(_, e)| session.map_or(true, |s| s == e.session))
+                .filter(|(_, e)| session.is_none_or(|s| s == e.session))
                 .map(|(id, _)| id.clone())
                 .collect();
             ids.into_iter().filter_map(|id| p.remove(&id)).collect()
@@ -484,7 +516,7 @@ impl App {
             let mut q = lock(&self.questions);
             let ids: Vec<String> = q
                 .iter()
-                .filter(|(_, e)| session.map_or(true, |s| s == e.session))
+                .filter(|(_, e)| session.is_none_or(|s| s == e.session))
                 .map(|(id, _)| id.clone())
                 .collect();
             ids.into_iter().filter_map(|id| q.remove(&id)).collect()

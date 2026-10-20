@@ -91,11 +91,15 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             )?;
             // Role is the top-level directory the file sits in (app/ vs data/);
             // kept as a column so callers don't have to parse paths.
-            r["columns"].as_array_mut().map(|c| c.push(json!("role")));
+            if let Some(c) = r["columns"].as_array_mut() {
+                c.push(json!("role"));
+            }
             if let Some(rows) = r["rows"].as_array_mut() {
                 for row in rows {
                     let role = row[0].as_str().map(store::file_role).unwrap_or("app");
-                    row.as_array_mut().map(|a| a.push(json!(role)));
+                    if let Some(a) = row.as_array_mut() {
+                        a.push(json!(role));
+                    }
                 }
             }
             Ok(r)
@@ -1626,7 +1630,7 @@ fn files_fetch(app: &Arc<App>, p: Value) -> Result<Value> {
         None => {
             let base = url
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or("lib")
                 .split(['?', '#'])
                 .next()
