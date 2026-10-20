@@ -88,12 +88,6 @@ impl ChangeSet {
     pub fn any(&self) -> bool {
         self.data || self.files || self.chat || self.config
     }
-    pub fn merge(&mut self, o: ChangeSet) {
-        self.data |= o.data;
-        self.files |= o.files;
-        self.chat |= o.chat;
-        self.config |= o.config;
-    }
 }
 
 pub struct Engine {

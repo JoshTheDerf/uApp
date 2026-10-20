@@ -67,7 +67,7 @@ fn save_as_rehomes_and_persists() {
         "data survived the re-home"
     );
 
-    // A post-save edit must land in the NEW file's log/checkpoint.
+    // A post-save edit must land in the NEW file.
     eng.local_op(
         "sql",
         json!({"sql": "INSERT INTO t VALUES (40)", "params": []}),
@@ -80,7 +80,7 @@ fn save_as_rehomes_and_persists() {
     );
     drop(eng);
 
-    // Reopen the saved file fresh: every op (pre- and post-save) is durable.
+    // Reopen the saved file fresh: every write (pre- and post-save) is durable.
     let eng2 = Engine::open(saved.clone(), "devA".into(), "Tester".into()).unwrap();
     assert_eq!(
         q_i64(&eng2, "SELECT sum(x) FROM t"),

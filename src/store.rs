@@ -1471,9 +1471,8 @@ pub fn record_file_history(conn: &Connection, op: &Op, name: &str, action: &str)
     Ok(())
 }
 
-/// Apply one op to the materialized db. Deterministic: given the same op
-/// sequence every device computes identical state. Caller wraps in a
-/// SAVEPOINT so a failing op leaves no partial effects.
+/// Apply one op to the live database. The caller (`Engine::local_op`) runs
+/// it inside a transaction, so a failing op leaves no partial effects.
 pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
     let p = &op.payload;
     match op.kind.as_str() {
@@ -1541,9 +1540,9 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             let guard = Guard::new(conn, Access::Write)?;
             guard.run(|| import_rows(conn, table, p))
         }
-        // Names are normalized here, not at the caller: ops written before the
-        // app/data split (or by an app using root-absolute paths) must replay
-        // into the same canonical location on every device.
+        // Names are normalized here, not at the caller: a name from before the
+        // app/data split (or a root-absolute one from an app) lands in its
+        // canonical place whoever sent it.
         "file_put" => {
             let name = p["name"]
                 .as_str()
@@ -1626,14 +1625,14 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
                     op.user,
                     p["role"].as_str().unwrap_or("user"),
                     p["content"].to_string(),
-                    // Old logs carry no session — they replay into 'main'.
+                    // No session means the main chat.
                     p["session"].as_str().unwrap_or("main")
                 ],
             )?;
             Ok(json!({"ok": true}))
         }
         "chat_clear" => {
-            // No session in the payload = clear every session (old logs).
+            // No session in the payload = clear every session.
             match p["session"].as_str() {
                 Some(s) => conn.execute(
                     "DELETE FROM uapp_chat WHERE ts <= ?1 AND COALESCE(session,'main') = ?2",
@@ -1647,8 +1646,7 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             Ok(json!({"ok": true}))
         }
         // Create/update one chat session's metadata. Only the fields present in
-        // the payload overwrite; `created` is carried in the payload (never
-        // read from the clock) so replay is deterministic.
+        // the payload overwrite; `created` comes from the payload when given.
         "session_meta" => {
             let id = p["id"]
                 .as_str()
@@ -1692,7 +1690,7 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
         }
         // Replace everything up to (upto_ts, upto_ctr) in one session with a
         // single summary row. The summary TEXT is computed by the caller before
-        // the op is emitted — replay never calls a model.
+        // the op runs (no model is called inside the transaction).
         "chat_compact" => {
             let session = p["session"].as_str().unwrap_or("main");
             let mid = p["mid"]
@@ -1714,8 +1712,7 @@ pub fn apply_op(conn: &Connection, op: &Op) -> Result<Value> {
             )?;
             // The summary stands exactly where the compacted range ended, so
             // it sorts BEFORE the kept tail (using op.ts would file it after
-            // the messages it summarizes). Both values come from the payload,
-            // so replay stays deterministic.
+            // the messages it summarizes). Both values come from the payload.
             conn.execute(
                 "INSERT OR IGNORE INTO uapp_chat(mid,ts,ctr,device,user,role,content,session)
                  VALUES(?1,?2,?3,?4,?5,'summary',?6,?7)",
@@ -1793,7 +1790,7 @@ pub fn config_get(conn: &Connection, key: &str) -> Result<Option<Value>> {
 /// sqlar_compress(): keep the compressed form only when it is strictly
 /// smaller, and record the ORIGINAL length in sz so readers can tell the
 /// two apart (sz == length(data) means stored uncompressed). Fixed
-/// compression level so op replay produces identical bytes on every device.
+/// compression level, so the same content always gives the same bytes.
 fn sqlar_deflate(data: &[u8]) -> Result<Vec<u8>> {
     use std::io::Write as _;
     let mut enc = flate2::write::ZlibEncoder::new(
@@ -1809,7 +1806,6 @@ fn sqlar_deflate(data: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-/// Insert/replace one file row, sqlar-style (zlib-compressed when smaller).
 /// True when the app still has the default, un-customized index.html — i.e. a
 /// "new" app that hasn't been built yet. Drives the initial chat-sidebar state
 /// (open for a new app, closed once it's a real app).
@@ -1820,6 +1816,7 @@ pub fn is_blank_app(conn: &Connection) -> bool {
     }
 }
 
+/// Insert/replace one file row, sqlar-style (zlib-compressed when smaller).
 /// Writes always land in the canonical location, so the archive can never grow
 /// a third top-level directory.
 pub fn sqlar_write(conn: &Connection, name: &str, mtime: i64, data: &[u8]) -> Result<()> {
