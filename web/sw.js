@@ -443,7 +443,7 @@ self.addEventListener("fetch", (ev) => {
   // published version, and an edit the visitor just made would otherwise be
   // invisible. The shell's own bundle never lives in an archive, so its
   // lookups miss and fall through; before the engine is up the shell
-  // passes straight through (see handleSwRequest in boot.js).
+  // passes straight through (see handleSwRequest in uapp-boot/sw-responder.js).
   ev.respondWith((async () => {
     try {
       // A page that is not ours, whose navigation this worker never saw (it

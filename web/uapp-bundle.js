@@ -16,6 +16,7 @@
 self.UAPP_BUNDLE = {
   "index.html": "web/index.html",
   "boot.js": "web/boot.js",
+  "uapp-boot/": "web/uapp-boot/",
   "worker.js": "web/worker.js",
   "sw.js": "web/sw.js",
   "uapp_glue.js": "web/uapp_glue.js",

@@ -61,13 +61,12 @@ cp examples/*.uapp dist-web/examples/
 rm -f dist-web/sample.uapp dist-web/sample-expenses.uapp dist-web/samples.json
 
 # The build id: a hash of everything above. It is stamped into the files
-# that talk to each other (page, workers, glue) and into the runtime URLs
-# (?v=), so a page from one deploy never runs with another deploy's wasm or
-# glue, and a mismatch is detected and shown instead (see BUILD in boot.js).
+# that talk to each other (page, workers, glue), the runtime URLs and
+# boot.js's own module imports (?v=), so a page from one deploy never runs
+# with another deploy's wasm or glue, and a mismatch is detected and shown
+# instead (see BUILD in uapp-boot/env.js).
 build=$(cd dist-web && find . -type f ! -path './examples/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)
-for f in boot.js worker.js sw.js uapp_glue.js; do
-  sed -i "s/__UAPP_BUILD__/$build/g" "dist-web/$f"
-done
+grep -rlZ --include='*.js' __UAPP_BUILD__ dist-web | xargs -0 -r sed -i "s/__UAPP_BUILD__/$build/g"
 # The generated glue imports ours by a bare path; pin it to this build too
 # (the import statements only: the same string is also the wasm's import
 # module name, which has to stay as it is), and say which build it is.

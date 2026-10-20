@@ -98,7 +98,7 @@
 
   // ---- the entry path -------------------------------------------------------
   // The frame opens on whatever the reader was looking at. `/app/` is a ROUTE
-  // into the archive, not a stored prefix (see handleSwRequest in boot.js), so
+  // into the archive, not a stored prefix (see handleSwRequest in uapp-boot/sw-responder.js), so
   // "/how-do-bikes-work/" becomes "app/how-do-bikes-work/" and the archive's
   // own index/extension resolution takes it from there.
   function entryPath() {
