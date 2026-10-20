@@ -1377,7 +1377,7 @@ pub(crate) fn check_public_url(url: &str) -> Result<()> {
         if allow_local_fetch() {
             return Ok(());
         }
-        // Parsed the way the request will be (WHATWG rules, as ureq does):
+        // Parsed the way the request will be (WHATWG rules, see net.rs):
         // a hand split read `http://127.0.0.1\@example.com/` as example.com.
         let host = url::Url::parse(url)
             .ok()
@@ -2220,7 +2220,8 @@ mod tests {
 mod fetch_tests {
     #[test]
     fn the_up_front_check_parses_hosts_like_the_request_does() {
-        // ureq (WHATWG URL rules) treats `\` as `/`, so this is 127.0.0.1.
+        // WHATWG URL rules (net.rs requests follow them) treat `\` as `/`,
+        // so this is 127.0.0.1.
         assert!(super::check_public_url("http://127.0.0.1:1\\@example.com/").is_err());
         assert!(super::check_public_url("http://[::1]:8080/").is_err());
         assert!(super::check_public_url("http://169.254.169.254/latest").is_err());

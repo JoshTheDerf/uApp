@@ -95,24 +95,27 @@ mod native_serve {
     fn reusable_server(path: &Path) -> Option<(String, u16)> {
         let (port, token) = registry::read_addr(path)?;
         let url = format!("http://127.0.0.1:{port}/?t={token}");
-        let Ok(resp) = ureq::get(&format!("http://127.0.0.1:{port}/health"))
-            .timeout(std::time::Duration::from_millis(1500))
-            .call()
-        else {
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_millis(1500)))
+                .proxy(None)
+                .build(),
+        );
+        let Ok(resp) = agent.get(&format!("http://127.0.0.1:{port}/health")).call() else {
             return None;
         };
+        let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok());
         // A lingering server from an older build would otherwise be reused
         // silently — a fresh `uapp open` after an upgrade must run the new code.
         // …and a server that has a DIFFERENT file open (a crashed server's .addr
         // outlived it and the port was recycled) is not ours either.
-        if resp
-            .header("x-uapp-key")
+        if header("x-uapp-key")
             .map(|k| k != registry::key(path))
             .unwrap_or(true)
         {
             return None;
         }
-        let theirs = resp.header("x-uapp-version").unwrap_or("");
+        let theirs = header("x-uapp-version").unwrap_or("");
         if theirs != env!("CARGO_PKG_VERSION") {
             tracing::warn!(
                 "a server of another version ({}) still has {} open; stop it (or wait for it to exit) so this build can open the file",

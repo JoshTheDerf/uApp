@@ -11,6 +11,13 @@
 
 use anyhow::Result;
 use std::io::BufRead;
+#[cfg(not(target_arch = "wasm32"))]
+use ureq::unversioned::{
+    resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver},
+    transport::{
+        Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport, time,
+    },
+};
 
 pub struct Resp {
     pub status: u16,
@@ -52,25 +59,29 @@ pub fn request(
     connect_timeout_secs: u64,
     read_timeout_secs: u64,
 ) -> Result<Resp> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(connect_timeout_secs))
-        .timeout_read(std::time::Duration::from_secs(read_timeout_secs))
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64) uapp/0.1")
-        .build();
-    let mut req = agent.request(method, url);
+    // WHATWG parsing, the same as `get_public` (`http::Uri` on its own
+    // refuses a `\`, a space or a non-ASCII host).
+    let url = url::Url::parse(url).map_err(|e| anyhow::anyhow!("bad URL {url}: {e}"))?;
+    let agent = agent(
+        connect_timeout_secs,
+        read_timeout_secs,
+        None,
+        DefaultResolver::default(),
+    );
+    let mut req = ureq::http::Request::builder()
+        .method(method)
+        .uri(url.as_str());
     for (k, v) in headers {
-        req = req.set(k, v);
+        req = req.header(*k, *v);
     }
     let result = match body {
-        Some(b) => req.send_string(b),
-        None => req.call(),
+        Some(b) => agent.run(req.body(b)?),
+        None => agent.run(req.body(())?),
     };
-    let resp = match result {
-        Ok(r) => r,
-        Err(ureq::Error::Status(_code, r)) => r,
+    match result {
+        Ok(r) => Ok(into_resp(r)),
         Err(e) => anyhow::bail!("request failed: {e}"),
-    };
-    Ok(into_resp(resp))
+    }
 }
 
 /// A GET of a URL that an app or the model chose (`web.fetch`,
@@ -83,13 +94,15 @@ pub fn request(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn get_public(url: &str, connect_timeout_secs: u64, read_timeout_secs: u64) -> Result<Resp> {
     const MAX_REDIRECTS: usize = 10;
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(connect_timeout_secs))
-        .timeout_read(std::time::Duration::from_secs(read_timeout_secs))
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64) uapp/0.1")
-        .redirects(0)
-        .resolver(PublicOnly)
-        .build();
+    let agent = agent(
+        connect_timeout_secs,
+        read_timeout_secs,
+        Some(0),
+        PublicOnly::default(),
+    );
+    // The request gets the URL as `url` serialized it, so its host is the one
+    // `rpc::check_public_url` checked (WHATWG rules: `\` is `/`, `2130706433`
+    // is 127.0.0.1).
     let mut current = url::Url::parse(url).map_err(|e| anyhow::anyhow!("bad URL {url}: {e}"))?;
     for _ in 0..=MAX_REDIRECTS {
         if !matches!(current.scheme(), "http" | "https") {
@@ -97,11 +110,10 @@ pub fn get_public(url: &str, connect_timeout_secs: u64, read_timeout_secs: u64) 
         }
         let resp = match agent.get(current.as_str()).call() {
             Ok(r) => r,
-            Err(ureq::Error::Status(_code, r)) => r,
             Err(e) => anyhow::bail!("request failed: {e}"),
         };
-        if (300..400).contains(&resp.status())
-            && let Some(loc) = resp.header("location")
+        if resp.status().is_redirection()
+            && let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok())
         {
             current = current
                 .join(loc)
@@ -113,26 +125,109 @@ pub fn get_public(url: &str, connect_timeout_secs: u64, read_timeout_secs: u64) 
     anyhow::bail!("too many redirects")
 }
 
+/// The agent behind both requests. An HTTP error status comes back as a
+/// response, and proxy settings in the environment are ignored (through a
+/// proxy, `PublicOnly` would never see the target's address).
+#[cfg(not(target_arch = "wasm32"))]
+fn agent(
+    connect_timeout_secs: u64,
+    read_timeout_secs: u64,
+    max_redirects: Option<u32>,
+    resolver: impl Resolver,
+) -> ureq::Agent {
+    let mut config = ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(connect_timeout_secs)))
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) uapp/0.1")
+        .http_status_as_error(false)
+        .proxy(None);
+    if let Some(n) = max_redirects {
+        config = config.max_redirects(n);
+    }
+    let connector = DefaultConnector::new().chain(ReadTimeout(std::time::Duration::from_secs(
+        read_timeout_secs,
+    )));
+    ureq::Agent::with_parts(config.build(), connector, resolver)
+}
+
 /// Resolves like the default, then refuses the lot if any address is
 /// loopback, private, link-local or otherwise not on the public internet.
+/// The connection is made to exactly these addresses.
 #[cfg(not(target_arch = "wasm32"))]
-struct PublicOnly;
+#[derive(Debug, Default)]
+struct PublicOnly(DefaultResolver);
 
 #[cfg(not(target_arch = "wasm32"))]
-impl ureq::Resolver for PublicOnly {
-    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
-        use std::net::ToSocketAddrs;
-        let addrs: Vec<_> = netloc.to_socket_addrs()?.collect();
+impl Resolver for PublicOnly {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let addrs = self.0.resolve(uri, config, timeout)?;
         if let Some(a) = addrs.iter().find(|a| is_local_ip(a.ip())) {
-            return Err(std::io::Error::new(
+            return Err(ureq::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
-                    "refusing to connect to {netloc}: it resolves to a local/private address ({})",
+                    "refusing to connect to {}: it resolves to a local/private address ({})",
+                    uri.host().unwrap_or(""),
                     a.ip()
                 ),
-            ));
+            )));
         }
         Ok(addrs)
+    }
+}
+
+/// Gives up once nothing has arrived for this long, like a socket read
+/// timeout. (ureq's own body timeout is a budget for the whole body, which
+/// would cut off a long SSE stream.)
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct ReadTimeout(std::time::Duration);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Connector<Box<dyn Transport>> for ReadTimeout {
+    type Out = ReadTimeoutTransport;
+
+    fn connect(
+        &self,
+        _: &ConnectionDetails,
+        chained: Option<Box<dyn Transport>>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        Ok(chained.map(|inner| ReadTimeoutTransport {
+            inner,
+            after: self.0,
+        }))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct ReadTimeoutTransport {
+    inner: Box<dyn Transport>,
+    after: std::time::Duration,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Transport for ReadTimeoutTransport {
+    fn buffers(&mut self) -> &mut dyn Buffers {
+        self.inner.buffers()
+    }
+    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+        self.inner.transmit_output(amount, timeout)
+    }
+    fn await_input(&mut self, mut timeout: NextTimeout) -> Result<bool, ureq::Error> {
+        if *timeout.after > self.after {
+            timeout.after = time::Duration::Exact(self.after);
+        }
+        self.inner.await_input(timeout)
+    }
+    fn is_open(&mut self) -> bool {
+        self.inner.is_open()
+    }
+    fn is_tls(&self) -> bool {
+        self.inner.is_tls()
     }
 }
 
@@ -180,22 +275,24 @@ pub fn is_local_ip(ip: std::net::IpAddr) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn into_resp(resp: ureq::Response) -> Resp {
-    let status = resp.status();
-    let content_type = resp.content_type().to_string();
-    let headers = resp
-        .headers_names()
-        .into_iter()
-        .filter_map(|n| {
-            resp.header(&n)
-                .map(|v| (n.to_ascii_lowercase(), v.to_string()))
-        })
+fn into_resp(resp: ureq::http::Response<ureq::Body>) -> Resp {
+    let status = resp.status().as_u16();
+    let headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .filter_map(|(n, v)| Some((n.as_str().to_string(), v.to_str().ok()?.to_string())))
         .collect();
+    // The media type without parameters.
+    let content_type = headers
+        .iter()
+        .find(|(n, _)| n == "content-type")
+        .map(|(_, v)| v.split(';').next().unwrap_or("").to_string())
+        .unwrap_or_else(|| "text/plain".to_string());
     Resp {
         status,
         content_type,
         headers,
-        reader: Box::new(std::io::BufReader::new(resp.into_reader())),
+        reader: Box::new(std::io::BufReader::new(resp.into_body().into_reader())),
     }
 }
 
@@ -364,8 +461,49 @@ mod tests {
             .expect("must refuse")
             .to_string();
         assert!(err.contains("local/private"), "{err}");
-        // The same through a name that resolves to loopback.
-        let url = format!("http://localhost:{}/", l.local_addr().unwrap().port());
-        assert!(get_public(&url, 2, 2).is_err());
+        // The same through a name that resolves to loopback, and spelled
+        // other ways.
+        let port = l.local_addr().unwrap().port();
+        for url in [
+            format!("http://localhost:{port}/"),
+            format!("http://127.0.0.1:{port}\\@example.com/"),
+            format!("http://[::ffff:127.0.0.1]:{port}/"),
+            format!("http://[::1]:{port}/"),
+        ] {
+            assert!(get_public(&url, 2, 2).is_err(), "{url}");
+        }
+    }
+
+    /// The read timeout is for a quiet connection: a slow stream that keeps
+    /// sending runs past it, one that stops doesn't.
+    #[test]
+    fn the_read_timeout_is_per_read() {
+        use std::io::Write;
+        let serve = |stall: bool| {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = l.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                let (mut s, _) = l.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = std::io::Read::read(&mut s, &mut buf);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+                for i in 0..6 {
+                    std::thread::sleep(std::time::Duration::from_millis(if stall && i == 2 {
+                        3000
+                    } else {
+                        400
+                    }));
+                    if s.write_all(format!("data: {i}\n").as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            });
+            format!("http://127.0.0.1:{port}/")
+        };
+        let resp = request("GET", &serve(false), &[], None, 2, 1).unwrap();
+        assert_eq!(resp.content_type, "text/event-stream");
+        assert_eq!(resp.into_string().unwrap().lines().count(), 6);
+        let resp = request("GET", &serve(true), &[], None, 2, 1).unwrap();
+        assert!(resp.into_string().is_err());
     }
 }
