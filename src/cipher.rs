@@ -15,7 +15,7 @@
 //! Plaintext files keep working exactly as before; encryption is opt-in per
 //! file (`uapp encrypt <file>` or open with a password).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -99,10 +99,10 @@ fn fsync_file(p: &Path) -> Result<()> {
 }
 
 fn fsync_dir(p: &Path) {
-    if let Some(dir) = p.parent() {
-        if let Ok(d) = std::fs::File::open(dir) {
-            let _ = d.sync_all();
-        }
+    if let Some(dir) = p.parent()
+        && let Ok(d) = std::fs::File::open(dir)
+    {
+        let _ = d.sync_all();
     }
 }
 

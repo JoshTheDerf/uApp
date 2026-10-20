@@ -11,8 +11,8 @@
 //! made to fit, and the toolset keeps the map from offered name to what it
 //! runs, so a server name containing `__` can't be misread either.
 
-use anyhow::{anyhow, bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -240,14 +240,15 @@ pub(crate) fn unwrap_call_action(target: Target, input: &Value) -> (Target, Valu
 
 /// The app's registered actions, for a model that called one that isn't.
 pub(crate) fn action_list(app: &Arc<App>) -> Value {
-    json!(app
-        .actions_snapshot()
-        .into_iter()
-        .map(
-            |(name, a)| json!({"action": name, "description": a.description,
+    json!(
+        app.actions_snapshot()
+            .into_iter()
+            .map(
+                |(name, a)| json!({"action": name, "description": a.description,
                                 "readonly": a.readonly, "params": a.schema})
-        )
-        .collect::<Vec<_>>())
+            )
+            .collect::<Vec<_>>()
+    )
 }
 
 pub(crate) fn run_target(app: &Arc<App>, target: &Target, input: &Value) -> Result<Value> {

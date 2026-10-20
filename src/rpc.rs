@@ -1,11 +1,11 @@
 //! JSON-RPC method implementations. Shared by the shell UI, embedded apps
 //! (via /uapp.js) and the AI tool loop — everyone gets the same API surface.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use base64::Engine as _;
-use serde_json::{json, Value};
-use std::sync::atomic::Ordering;
+use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::app::App;
 use crate::{secrets, store};
@@ -510,7 +510,9 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             if crate::tools::is_gated(app, &name)
                 && !crate::ai::app_approval_gate(app, &name, &p["input"])?
             {
-                bail!("denied: '{name}' was not allowed to run (the user said no, or the prompt timed out)");
+                bail!(
+                    "denied: '{name}' was not allowed to run (the user said no, or the prompt timed out)"
+                );
             }
             crate::ai::run_tool(app, &name, &p["input"])
         }
@@ -823,10 +825,10 @@ fn crypt_set(app: &Arc<App>, p: Value) -> Result<Value> {
             bail!("current password is incorrect");
         }
     }
-    if let Some(pw) = &new_password {
-        if pw.len() < 4 {
-            bail!("choose a master password of at least 4 characters");
-        }
+    if let Some(pw) = &new_password
+        && pw.len() < 4
+    {
+        bail!("choose a master password of at least 4 characters");
     }
     eng.reencrypt(new_password.clone())?;
     drop(eng);
@@ -1431,12 +1433,13 @@ fn url_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&b[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(v) = u8::from_str_radix(&b[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -1505,7 +1508,9 @@ fn web_search(p: Value) -> Result<Value> {
         }
     }
     if results.is_empty() {
-        bail!("no results parsed (search engine may be rate-limiting; try again or fetch_url a known site)");
+        bail!(
+            "no results parsed (search engine may be rate-limiting; try again or fetch_url a known site)"
+        );
     }
     Ok(json!({"query": query, "results": results}))
 }
@@ -1578,10 +1583,10 @@ fn mcp_add(app: &Arc<App>, p: Value) -> Result<Value> {
         bail!("MCP server URL must be http(s)");
     }
     let mut entry = json!({"name": name, "url": url, "enabled": true});
-    if let Some(tok) = p["bearer_token"].as_str() {
-        if !tok.is_empty() {
-            entry["headers"] = json!({"Authorization": format!("Bearer {tok}")});
-        }
+    if let Some(tok) = p["bearer_token"].as_str()
+        && !tok.is_empty()
+    {
+        entry["headers"] = json!({"Authorization": format!("Bearer {tok}")});
     }
     if p["headers"].is_object() {
         entry["headers"] = p["headers"].clone();
@@ -1950,7 +1955,9 @@ fn files_rename(app: &Arc<App>, p: Value) -> Result<Value> {
         bail!("a folder needs a name");
     }
     if from == store::APP_DIR || from == store::DATA_DIR {
-        bail!("App and Data are the app's two top-level folders — they can't be renamed. Rename or move what's inside them instead.");
+        bail!(
+            "App and Data are the app's two top-level folders — they can't be renamed. Rename or move what's inside them instead."
+        );
     }
     if to == store::APP_DIR || to == store::DATA_DIR {
         bail!("that would replace a top-level folder — give the folder a name inside App or Data");
@@ -2060,10 +2067,10 @@ fn infer(v: &str) -> Value {
             return json!(i);
         }
     }
-    if let Ok(f) = t.parse::<f64>() {
-        if t.chars().any(|c| c == '.' || c == 'e' || c == 'E') {
-            return json!(f);
-        }
+    if let Ok(f) = t.parse::<f64>()
+        && t.chars().any(|c| c == '.' || c == 'e' || c == 'E')
+    {
+        return json!(f);
     }
     json!(v)
 }

@@ -6,12 +6,12 @@
 //! assistant needs them for every run, and a server that is down must not
 //! stall every chat message while its connection times out.
 
-use anyhow::{anyhow, bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The protocol version we ask for. The server answers with the version it
 /// speaks, and that one is sent on every later request of the session.

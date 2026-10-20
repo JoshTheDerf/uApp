@@ -58,10 +58,10 @@ mod native_serve {
     /// Stable per-user-per-machine device id, e.g. "karen-a3f9k2".
     /// UAPP_DEVICE overrides (useful for testing several "devices" on one box).
     pub fn device_id() -> Result<String> {
-        if let Ok(d) = std::env::var("UAPP_DEVICE") {
-            if !d.is_empty() {
-                return Ok(d);
-            }
+        if let Ok(d) = std::env::var("UAPP_DEVICE")
+            && !d.is_empty()
+        {
+            return Ok(d);
         }
         let dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -115,10 +115,10 @@ mod native_serve {
         let theirs = resp.header("x-uapp-version").unwrap_or("");
         if theirs != env!("CARGO_PKG_VERSION") {
             tracing::warn!(
-            "a server of another version ({}) still has {} open; stop it (or wait for it to exit) so this build can open the file",
-            if theirs.is_empty() { "unknown" } else { theirs },
-            path.display()
-        );
+                "a server of another version ({}) still has {} open; stop it (or wait for it to exit) so this build can open the file",
+                if theirs.is_empty() { "unknown" } else { theirs },
+                path.display()
+            );
             return None;
         }
         Some((url, port))
@@ -208,7 +208,7 @@ mod native_serve {
                             return Ok(());
                         }
                         None => {
-                            return Err(e).with_context(|| format!("opening {}", path.display()))
+                            return Err(e).with_context(|| format!("opening {}", path.display()));
                         }
                     }
                 }
@@ -217,15 +217,15 @@ mod native_serve {
                 // with a redirect to the running server, or a readable error —
                 // never a bare "connection refused".
                 let (redirect, message) = match &reuse {
-                Some((url, _)) => (Some(url.clone()), String::new()),
-                None => (
-                    None,
-                    format!(
-                        "<!doctype html><meta charset=utf-8><title>Couldn't open</title>                         <body style=\"font:15px system-ui;margin:3em;color:#333\">                         <h1>Couldn't open this app</h1><p>{}</p>",
-                        e
+                    Some((url, _)) => (Some(url.clone()), String::new()),
+                    None => (
+                        None,
+                        format!(
+                            "<!doctype html><meta charset=utf-8><title>Couldn't open</title>                         <body style=\"font:15px system-ui;margin:3em;color:#333\">                         <h1>Couldn't open this app</h1><p>{}</p>",
+                            e
+                        ),
                     ),
-                ),
-            };
+                };
                 rt.block_on(server::run_notice(&listener, redirect, &message));
                 return Ok(());
             }
@@ -422,7 +422,10 @@ mod native_serve {
         if let Some(t) = &token {
             secrets::check_token(t).context("--token / UAPP_TOKEN")?;
             if t.len() < 16 {
-                tracing::warn!("the token is short ({} characters); anyone who guesses it can edit and publish this site", t.len());
+                tracing::warn!(
+                    "the token is short ({} characters); anyone who guesses it can edit and publish this site",
+                    t.len()
+                );
             }
         }
         let token = token.unwrap_or_else(secrets::new_token);
@@ -441,50 +444,58 @@ mod native_serve {
 
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(async move {
-        let stop = crate::shutdown_signal();
-        let listener = tokio::net::TcpListener::bind((bind, port)).await?;
-        let addr = listener.local_addr()?;
-        app.port.store(addr.port(), std::sync::atomic::Ordering::Relaxed);
-        eprintln!("uapp: serving {} at http://{}/", path.display(), addr);
-        if opts.archive {
-            eprintln!("uapp: archive endpoint: http://{addr}/site.uapp (PUT with the token publishes)");
-        }
-        if generated {
-            eprintln!("uapp: token (pass --token or set UAPP_TOKEN to fix it): {token}");
-        }
-        if std::fs::OpenOptions::new().write(true).open(&path).is_err() {
-            tracing::warn!("{} is not writable, so publishing (PUT /site.uapp) will fail", path.display());
-        }
-        match &chrome_dir {
-            Some(dir) => tracing::info!("editing chrome enabled (web build: {})", dir.display()),
-            None => tracing::info!("no editing chrome (pass --chrome <dist-web> to enable)"),
-        }
-        // Rolling rescue snapshot while publishes keep landing.
-        {
-            let app = app.clone();
-            tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
-                loop {
-                    tick.tick().await;
-                    let app2 = app.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        app2.eng().maybe_snapshot();
-                    })
-                    .await;
+            let stop = crate::shutdown_signal();
+            let listener = tokio::net::TcpListener::bind((bind, port)).await?;
+            let addr = listener.local_addr()?;
+            app.port
+                .store(addr.port(), std::sync::atomic::Ordering::Relaxed);
+            eprintln!("uapp: serving {} at http://{}/", path.display(), addr);
+            if opts.archive {
+                eprintln!(
+                    "uapp: archive endpoint: http://{addr}/site.uapp (PUT with the token publishes)"
+                );
+            }
+            if generated {
+                eprintln!("uapp: token (pass --token or set UAPP_TOKEN to fix it): {token}");
+            }
+            if std::fs::OpenOptions::new().write(true).open(&path).is_err() {
+                tracing::warn!(
+                    "{} is not writable, so publishing (PUT /site.uapp) will fail",
+                    path.display()
+                );
+            }
+            match &chrome_dir {
+                Some(dir) => {
+                    tracing::info!("editing chrome enabled (web build: {})", dir.display())
                 }
-            });
-        }
-        let shutdown_app = app.clone();
-        axum::serve(listener, server::router(app))
-            .with_graceful_shutdown(async move {
-                stop.await;
-                shutdown_app.graceful_cleanup();
-                tracing::info!("shutting down");
-                crate::exit_soon();
-            })
-            .await?;
-        Ok::<_, anyhow::Error>(())
-    })
+                None => tracing::info!("no editing chrome (pass --chrome <dist-web> to enable)"),
+            }
+            // Rolling rescue snapshot while publishes keep landing.
+            {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                    loop {
+                        tick.tick().await;
+                        let app2 = app.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            app2.eng().maybe_snapshot();
+                        })
+                        .await;
+                    }
+                });
+            }
+            let shutdown_app = app.clone();
+            axum::serve(listener, server::router(app))
+                .with_graceful_shutdown(async move {
+                    stop.await;
+                    shutdown_app.graceful_cleanup();
+                    tracing::info!("shutting down");
+                    crate::exit_soon();
+                })
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        })
     }
 
     /// Serve the browser build with NO archive (`uapp serve --chrome <dir>` and
@@ -551,7 +562,7 @@ pub use native_serve::*;
 pub fn shutdown_signal() -> impl std::future::Future<Output = ()> + Send {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let int = signal(SignalKind::interrupt()).ok();
         let term = signal(SignalKind::terminate()).ok();
         async move {

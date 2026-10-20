@@ -16,8 +16,8 @@
 //! ("Shortcut" here is a keystroke. `shortcut.rs` is the unrelated business of
 //! installing OS launcher entries.)
 
-use anyhow::{bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, bail};
+use serde_json::{Value, json};
 
 /// F9 because it is the one key that is free everywhere: no browser binds it
 /// (unlike Ctrl+Shift+B, which is Firefox's bookmarks library and Chrome's
@@ -123,7 +123,9 @@ fn normalize_combo(combo: &str) -> Result<String> {
         bail!("\"{key}\" is not a key we can match (try a letter, a digit or F1-F12)");
     };
     if !(m || c || a || sh || me || standalone(&key.to_ascii_lowercase())) {
-        bail!("\"{key}\" on its own would fire while typing in the app — add Ctrl, Alt or Shift, or use an F-key");
+        bail!(
+            "\"{key}\" on its own would fire while typing in the app — add Ctrl, Alt or Shift, or use an F-key"
+        );
     }
     // Fixed order, so the same shortcut always reads and compares the same way.
     let mut s = String::new();

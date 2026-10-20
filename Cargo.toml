@@ -1,7 +1,7 @@
 [package]
 name = "uapp"
 version = "0.2.12"
-edition = "2021"
+edition = "2024"
 # The oldest toolchain the dependency tree builds with (CI runs stable).
 rust-version = "1.88"
 description = "Single-file shareable apps: app + data + AI in one .uapp file"

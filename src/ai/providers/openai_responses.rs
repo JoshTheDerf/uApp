@@ -2,17 +2,17 @@
 //! recommends for tool-using work. Used only for direct OpenAI: OpenRouter
 //! and local servers only implement chat/completions.
 
-use anyhow::{anyhow, bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::app::App;
 
 use super::{
-    ai_timeout, open_stream, post_json, read_sse, retryable, tool_input, transient_kind, Live,
-    Reply, Request, Usage,
+    Live, Reply, Request, Usage, ai_timeout, open_stream, post_json, read_sse, retryable,
+    tool_input, transient_kind,
 };
-use crate::ai::{default_max_tokens, AiConfig};
+use crate::ai::{AiConfig, default_max_tokens};
 
 const DEFAULT_MODEL: &str = "gpt-5.1";
 
@@ -92,12 +92,11 @@ pub(crate) fn parse_response(resp: &Value) -> Result<Parsed> {
         match item["type"].as_str().unwrap_or("") {
             "message" => {
                 for c in item["content"].as_array().cloned().unwrap_or_default() {
-                    if c["type"] == "output_text" {
-                        if let Some(t) = c["text"].as_str() {
-                            if !t.is_empty() {
-                                blocks.push(json!({"type": "text", "text": t}));
-                            }
-                        }
+                    if c["type"] == "output_text"
+                        && let Some(t) = c["text"].as_str()
+                        && !t.is_empty()
+                    {
+                        blocks.push(json!({"type": "text", "text": t}));
                     }
                 }
             }

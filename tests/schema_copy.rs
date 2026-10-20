@@ -11,7 +11,10 @@ fn root(name: &str) -> std::path::PathBuf {
     // Keep the registry and snapshots out of the real per-user data dir. One
     // dir for the whole binary: the tests run in parallel and share the env.
     static DATA: std::sync::Once = std::sync::Once::new();
-    DATA.call_once(|| std::env::set_var("XDG_DATA_HOME", base.join("data")));
+    // SAFETY: test-only. Other tests may already be running on their own
+    // threads, so this is not strictly race-free, but it runs once, before
+    // any of them reaches the data dir (they all come through here first).
+    DATA.call_once(|| unsafe { std::env::set_var("XDG_DATA_HOME", base.join("data")) });
     let dir = base.join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -206,9 +209,11 @@ fn tampered_template_schema_is_not_run() {
     assert!(!outside.exists(), "the smuggled ATTACH never ran");
 
     // Published, or rebuilt by a library: the whole thing fails.
-    assert!(target
-        .local_op("publish", json!({"b64": base64_encode(&bytes)}))
-        .is_err());
+    assert!(
+        target
+            .local_op("publish", json!({"b64": base64_encode(&bytes)}))
+            .is_err()
+    );
     let src =
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();

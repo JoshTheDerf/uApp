@@ -5,7 +5,7 @@
 //! - templates/launcher.html - main launcher UI
 //! - templates/samples.json - catalog of demo apps
 
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

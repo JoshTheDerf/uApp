@@ -6,7 +6,7 @@
 //! and are ALWAYS gated (unknown side effects).
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::app::App;
@@ -32,20 +32,31 @@ pub fn registry() -> Vec<ToolDef> {
             gated: false,
             schema: || obj(json!({}), &[]),
             run: |app, _input| {
-                let tables = rpc::dispatch(app, "sql.query", json!({
-                    "sql": "SELECT name, sql FROM sqlite_master WHERE type IN ('table','view','index') AND name NOT LIKE 'sqlite_%'"
-                }))?;
-                let names = rpc::dispatch(app, "sql.query", json!({
-                    "sql": "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'"
-                }))?;
+                let tables = rpc::dispatch(
+                    app,
+                    "sql.query",
+                    json!({
+                        "sql": "SELECT name, sql FROM sqlite_master WHERE type IN ('table','view','index') AND name NOT LIKE 'sqlite_%'"
+                    }),
+                )?;
+                let names = rpc::dispatch(
+                    app,
+                    "sql.query",
+                    json!({
+                        "sql": "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'uapp_%' AND name != 'sqlar'"
+                    }),
+                )?;
                 let mut counts = serde_json::Map::new();
                 if let Some(rows) = names["rows"].as_array() {
                     for r in rows {
-                        if let Some(t) = r[0].as_str() {
-                            if let Ok(c) = rpc::dispatch(app, "sql.query",
-                                json!({"sql": format!("SELECT count(*) FROM \"{}\"", t)})) {
-                                counts.insert(t.to_string(), c["rows"][0][0].clone());
-                            }
+                        if let Some(t) = r[0].as_str()
+                            && let Ok(c) = rpc::dispatch(
+                                app,
+                                "sql.query",
+                                json!({"sql": format!("SELECT count(*) FROM \"{}\"", t)}),
+                            )
+                        {
+                            counts.insert(t.to_string(), c["rows"][0][0].clone());
                         }
                     }
                 }
@@ -56,14 +67,24 @@ pub fn registry() -> Vec<ToolDef> {
             name: "sql_query",
             description: "Run read-only SQL (SELECT/WITH/PRAGMA) against the app database. Complex queries, joins and aggregates are encouraged.",
             gated: false,
-            schema: || obj(json!({"sql": {"type": "string"}, "params": {"type": "array"}}), &["sql"]),
+            schema: || {
+                obj(
+                    json!({"sql": {"type": "string"}, "params": {"type": "array"}}),
+                    &["sql"],
+                )
+            },
             run: |app, input| rpc::dispatch(app, "sql.query", input.clone()),
         },
         ToolDef {
             name: "sql_exec",
             description: "Run ONE write statement (INSERT/UPDATE/DELETE/DDL) with optional params.",
             gated: true,
-            schema: || obj(json!({"sql": {"type": "string"}, "params": {"type": "array"}}), &["sql"]),
+            schema: || {
+                obj(
+                    json!({"sql": {"type": "string"}, "params": {"type": "array"}}),
+                    &["sql"],
+                )
+            },
             run: |app, input| rpc::dispatch(app, "sql.exec", input.clone()),
         },
         ToolDef {
@@ -98,21 +119,35 @@ pub fn registry() -> Vec<ToolDef> {
             name: "write_file",
             description: "Create or overwrite a text file in the app archive (e.g. index.html, js/app.js — those land under app/; user data goes under data/). Previous version is kept in history. read_file always returns what you just wrote.",
             gated: true,
-            schema: || obj(json!({"name": {"type": "string"}, "content": {"type": "string"}}),
-                           &["name", "content"]),
-            run: |app, input| rpc::dispatch(app, "files.write",
-                json!({"name": input["name"], "text": input["content"]})),
+            schema: || {
+                obj(
+                    json!({"name": {"type": "string"}, "content": {"type": "string"}}),
+                    &["name", "content"],
+                )
+            },
+            run: |app, input| {
+                rpc::dispatch(
+                    app,
+                    "files.write",
+                    json!({"name": input["name"], "text": input["content"]}),
+                )
+            },
         },
         ToolDef {
             name: "edit_file",
             description: "Edit a text file in the archive by exact string replacement — PREFER this over write_file for any change to an existing file (write_file resends the whole file). old_string must match the file byte-for-byte, whitespace included, and appear exactly once — include enough surrounding lines to make it unique — or set replace_all to change every occurrence. Previous version is kept in history.",
             gated: true,
-            schema: || obj(json!({
-                "name": {"type": "string"},
-                "old_string": {"type": "string", "description": "exact existing text to replace (must be unique in the file unless replace_all)"},
-                "new_string": {"type": "string", "description": "the replacement text"},
-                "replace_all": {"type": "boolean", "description": "replace every occurrence (default false)"}
-            }), &["name", "old_string", "new_string"]),
+            schema: || {
+                obj(
+                    json!({
+                        "name": {"type": "string"},
+                        "old_string": {"type": "string", "description": "exact existing text to replace (must be unique in the file unless replace_all)"},
+                        "new_string": {"type": "string", "description": "the replacement text"},
+                        "replace_all": {"type": "boolean", "description": "replace every occurrence (default false)"}
+                    }),
+                    &["name", "old_string", "new_string"],
+                )
+            },
             run: |app, input| {
                 let old = input["old_string"].as_str().unwrap_or("");
                 let new = input["new_string"].as_str().unwrap_or("");
@@ -129,13 +164,21 @@ pub fn registry() -> Vec<ToolDef> {
                 };
                 let n = text.matches(old).count();
                 if n == 0 {
-                    anyhow::bail!("old_string not found in {name} — read the file and copy the text exactly (whitespace included)");
+                    anyhow::bail!(
+                        "old_string not found in {name} — read the file and copy the text exactly (whitespace included)"
+                    );
                 }
                 let replace_all = input["replace_all"].as_bool().unwrap_or(false);
                 if n > 1 && !replace_all {
-                    anyhow::bail!("old_string appears {n} times in {name} — add surrounding context to make it unique, or set replace_all");
+                    anyhow::bail!(
+                        "old_string appears {n} times in {name} — add surrounding context to make it unique, or set replace_all"
+                    );
                 }
-                let updated = if replace_all { text.replace(old, new) } else { text.replacen(old, new, 1) };
+                let updated = if replace_all {
+                    text.replace(old, new)
+                } else {
+                    text.replacen(old, new, 1)
+                };
                 rpc::dispatch(app, "files.write", json!({"name": name, "text": updated}))?;
                 Ok(json!({"name": name, "replacements": n, "size": updated.len()}))
             },
@@ -151,11 +194,16 @@ pub fn registry() -> Vec<ToolDef> {
             name: "run_js",
             description: "Execute JavaScript in the browser. context \"scratchpad\" (default): a hidden empty page with the full uapp API (uapp.query/exec/readFile/tool/...) and a loadScript(url) helper — globals persist between calls; ideal for parsing uploaded files (Excel via SheetJS), transforming data, testing logic. context \"app\": runs inside the LIVE app page — its DOM, globals, and uapp.call(...) actions. The code is the body of an async function; use `return` for the result (must be JSON-serializable). console output is captured.",
             gated: true,
-            schema: || obj(json!({
-                "code": {"type": "string", "description": "async function body; `return` the result"},
-                "context": {"type": "string", "enum": ["scratchpad", "app"],
-                             "description": "where to run (default scratchpad)"}
-            }), &["code"]),
+            schema: || {
+                obj(
+                    json!({
+                        "code": {"type": "string", "description": "async function body; `return` the result"},
+                        "context": {"type": "string", "enum": ["scratchpad", "app"],
+                                     "description": "where to run (default scratchpad)"}
+                    }),
+                    &["code"],
+                )
+            },
             run: |app, input| rpc::dispatch(app, "eval.run", input.clone()),
         },
         ToolDef {
@@ -172,69 +220,116 @@ pub fn registry() -> Vec<ToolDef> {
             name: "call_action",
             description: "Call one of the app's actions (registered with uapp.action) by name. Use it for actions that aren't in your tool list as app__<name>, such as ones you just added (reload_app first). Called with an empty or unknown action name, it returns the registered actions and their parameters.",
             gated: true,
-            schema: || obj(json!({
-                "action": {"type": "string", "description": "the action's name, as passed to uapp.action"},
-                "input": {"type": "object", "description": "the action's parameters"}
-            }), &["action"]),
-            run: |app, input| crate::ai::run_tool(
-                app,
-                &format!("app__{}", input["action"].as_str().unwrap_or("")),
-                input.get("input").filter(|v| !v.is_null()).unwrap_or(&json!({})),
-            ),
+            schema: || {
+                obj(
+                    json!({
+                        "action": {"type": "string", "description": "the action's name, as passed to uapp.action"},
+                        "input": {"type": "object", "description": "the action's parameters"}
+                    }),
+                    &["action"],
+                )
+            },
+            run: |app, input| {
+                crate::ai::run_tool(
+                    app,
+                    &format!("app__{}", input["action"].as_str().unwrap_or("")),
+                    input
+                        .get("input")
+                        .filter(|v| !v.is_null())
+                        .unwrap_or(&json!({})),
+                )
+            },
         },
         ToolDef {
             name: "read_console",
             description: "Read recent console output and uncaught errors (with stack traces) from the LIVE app page — the app's real runtime logs, not just code you ran via run_js. Use this to debug: after reload_app (the page may throw on load) or after a run_js that drives the UI, and whenever a turn ends with a '[console] …' alert. Defaults to the latest page load only (so stale pre-edit errors don't show); set only_latest=false for older lines, only_errors=true for just errors/warnings.",
             gated: false,
-            schema: || obj(json!({
-                "only_errors": {"type": "boolean", "description": "only error/warn lines (default false)"},
-                "only_latest": {"type": "boolean", "description": "only the most recent page load (default true)"},
-                "limit": {"type": "integer", "description": "max lines, newest kept (default 100, max 500)"}
-            }), &[]),
+            schema: || {
+                obj(
+                    json!({
+                        "only_errors": {"type": "boolean", "description": "only error/warn lines (default false)"},
+                        "only_latest": {"type": "boolean", "description": "only the most recent page load (default true)"},
+                        "limit": {"type": "integer", "description": "max lines, newest kept (default 100, max 500)"}
+                    }),
+                    &[],
+                )
+            },
             run: |app, input| rpc::dispatch(app, "console.read", input.clone()),
         },
         ToolDef {
             name: "present_file",
             description: "Show a file from the app archive to the user: it opens in their file viewer right away (images, video, audio, PDF, markdown rendered, code with highlighting). Use it whenever you produce or find a file worth looking at — a report you wrote, a chart, a document, a photo, a code file you changed. Display only: nothing is modified. mode \"pretty\" renders markdown, \"raw\" shows the source, \"edit\" opens the editor, \"auto\" (default) picks per file type.",
             gated: false,
-            schema: || obj(json!({
-                "name": {"type": "string", "description": "archive path, e.g. app/reports/q3.md or data/sales.csv"},
-                "mode": {"type": "string", "enum": ["auto", "raw", "pretty", "edit"],
-                          "description": "how to open it (default auto)"}
-            }), &["name"]),
-            run: |app, input| rpc::dispatch(app, "files.present",
-                json!({"name": input["name"], "mode": input["mode"], "_assistant": true})),
+            schema: || {
+                obj(
+                    json!({
+                        "name": {"type": "string", "description": "archive path, e.g. app/reports/q3.md or data/sales.csv"},
+                        "mode": {"type": "string", "enum": ["auto", "raw", "pretty", "edit"],
+                                  "description": "how to open it (default auto)"}
+                    }),
+                    &["name"],
+                )
+            },
+            run: |app, input| {
+                rpc::dispatch(
+                    app,
+                    "files.present",
+                    json!({"name": input["name"], "mode": input["mode"], "_assistant": true}),
+                )
+            },
         },
         ToolDef {
             name: "show_toolbar",
             description: "Show or hide the uApp toolbar — the bar around the app with its name, Files, Database, Tools, Settings and chat. Hide it to hand the user the app on its own, filling the window (a demo, a screenshot, using rather than building it); show it to bring the controls back. This session only: it does NOT change how the app opens next time — set_toolbar_default does that. Hiding never traps anyone; a small reveal button appears in the corner and the keyboard shortcut keeps working.",
             gated: false,
-            schema: || obj(json!({
-                "visible": {"type": "boolean", "description": "true shows the toolbar, false hides it"}
-            }), &["visible"]),
-            run: |app, input| rpc::dispatch(app, "toolbar.set", json!({"visible": input["visible"]})),
+            schema: || {
+                obj(
+                    json!({
+                        "visible": {"type": "boolean", "description": "true shows the toolbar, false hides it"}
+                    }),
+                    &["visible"],
+                )
+            },
+            run: |app, input| {
+                rpc::dispatch(app, "toolbar.set", json!({"visible": input["visible"]}))
+            },
         },
         ToolDef {
             name: "set_toolbar_default",
             description: "Change how this app OPENS: whether the uApp toolbar starts hidden, and which keystroke toggles it. Saved in the .uapp file, so it travels with the app to everyone who opens it. Use this when the user wants it to stick (\"always open this without the bar\"), and show_toolbar when they just mean now. Pass either field or both.",
             gated: true,
-            schema: || obj(json!({
-                "hidden": {"type": "boolean", "description": "true = the toolbar starts hidden every time this app is opened"},
-                "shortcut": {"type": "string", "description": "keystroke that toggles it, e.g. \"F9\" or \"Mod+Alt+B\" (Mod = Cmd on macOS, Ctrl elsewhere). Comma-separate alternatives. \"\" removes it, leaving only the on-screen buttons."}
-            }), &[]),
+            schema: || {
+                obj(
+                    json!({
+                        "hidden": {"type": "boolean", "description": "true = the toolbar starts hidden every time this app is opened"},
+                        "shortcut": {"type": "string", "description": "keystroke that toggles it, e.g. \"F9\" or \"Mod+Alt+B\" (Mod = Cmd on macOS, Ctrl elsewhere). Comma-separate alternatives. \"\" removes it, leaving only the on-screen buttons."}
+                    }),
+                    &[],
+                )
+            },
             run: |app, input| rpc::dispatch(app, "toolbar.setDefault", input.clone()),
         },
         ToolDef {
             name: "show_panel",
             description: "Open or close one of the uApp panels beside the app: \"chat\" (this conversation), \"files\" (the file browser), \"database\" (browse tables and run SQL), \"settings\", \"tools\" (tools & integrations). Use it to put the user where the answer is instead of describing where to click — open \"database\" after building a table, \"files\" after writing files they should look through. Opening one closes whichever was open (they share the same edge) and reveals the toolbar if it was hidden. Display only, this session: nothing about the app changes.",
             gated: false,
-            schema: || obj(json!({
-                "panel": {"type": "string", "enum": crate::toolbar::PANELS,
-                          "description": "which panel"},
-                "open": {"type": "boolean", "description": "true opens it, false closes it"}
-            }), &["panel", "open"]),
-            run: |app, input| rpc::dispatch(app, "panel.set",
-                json!({"panel": input["panel"], "open": input["open"]})),
+            schema: || {
+                obj(
+                    json!({
+                        "panel": {"type": "string", "enum": crate::toolbar::PANELS,
+                                  "description": "which panel"},
+                        "open": {"type": "boolean", "description": "true opens it, false closes it"}
+                    }),
+                    &["panel", "open"],
+                )
+            },
+            run: |app, input| {
+                rpc::dispatch(
+                    app,
+                    "panel.set",
+                    json!({"panel": input["panel"], "open": input["open"]}),
+                )
+            },
         },
         // Sub-agents: ungated. The inner loop runs every tool through the same
         // approval_gate with the parent's mode, so gated work inside still
@@ -243,54 +338,74 @@ pub fn registry() -> Vec<ToolDef> {
             name: "agent_run",
             description: "Delegate a big, self-contained task to an autonomous sub-agent. It works in its own conversation with the same tools you have (except delegating further), then hands back a written report — so a long research/audit/build job doesn't fill up this conversation. Give it a fully self-contained prompt: it cannot ask questions. mode \"fresh\" (default) starts clean; \"fork\" prefixes a digest of this conversation. Returns {session, steps, report}.",
             gated: false,
-            schema: || obj(json!({
-                "description": {"type": "string", "description": "short label, e.g. 'audit invoice tables'"},
-                "prompt": {"type": "string", "description": "the complete, self-contained task"},
-                "mode": {"type": "string", "enum": ["fresh", "fork"],
-                          "description": "fresh (default) or fork this conversation's context"},
-                "max_steps": {"type": "integer", "description": "tool-loop steps, default 12, max 24"}
-            }), &["description", "prompt"]),
+            schema: || {
+                obj(
+                    json!({
+                        "description": {"type": "string", "description": "short label, e.g. 'audit invoice tables'"},
+                        "prompt": {"type": "string", "description": "the complete, self-contained task"},
+                        "mode": {"type": "string", "enum": ["fresh", "fork"],
+                                  "description": "fresh (default) or fork this conversation's context"},
+                        "max_steps": {"type": "integer", "description": "tool-loop steps, default 12, max 24"}
+                    }),
+                    &["description", "prompt"],
+                )
+            },
             run: |app, input| crate::ai::agent_run(app, input),
         },
         ToolDef {
             name: "agent_send",
             description: "Send a follow-up instruction to a sub-agent conversation started with agent_run (use the session id it returned). Runs its loop again and returns the new report.",
             gated: false,
-            schema: || obj(json!({
-                "session": {"type": "string", "description": "agent session id from agent_run"},
-                "message": {"type": "string"}
-            }), &["session", "message"]),
+            schema: || {
+                obj(
+                    json!({
+                        "session": {"type": "string", "description": "agent session id from agent_run"},
+                        "message": {"type": "string"}
+                    }),
+                    &["session", "message"],
+                )
+            },
             run: |app, input| crate::ai::agent_send(app, input),
         },
         ToolDef {
             name: "ask_user",
             description: "Ask the user 1-4 questions and wait for their answers. Each question renders its options as radio buttons (or checkboxes with multiSelect) and ALWAYS offers a free-form 'Other' field, so give concrete options — if you recommend one, put it first and append ' (Recommended)' to its label. Use it when a decision genuinely belongs to the user (destructive changes, ambiguous requirements, taste); don't use it for choices with an obvious default. Returns {answered, answers: [{question, choices, other?}]} — unanswered prompts time out, so proceed on your best judgment then.",
             gated: false,
-            schema: || obj(json!({
-                "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": {
-                    "type": "object",
-                    "properties": {
-                        "question": {"type": "string", "description": "the complete question, ending with a question mark"},
-                        "header": {"type": "string", "description": "very short chip label, max 12 chars (e.g. 'Approach')"},
-                        "options": {"type": "array", "items": {"type": "object", "properties": {
-                            "label": {"type": "string", "description": "concise choice text (1-5 words)"},
-                            "description": {"type": "string", "description": "what this option means / its trade-offs"}
-                        }, "required": ["label"]}, "description": "2-12 distinct choices (omit for pure free-form)"},
-                        "multiSelect": {"type": "boolean", "description": "allow selecting several options (checkboxes)"}
-                    },
-                    "required": ["question"]
-                }}
-            }), &["questions"]),
+            schema: || {
+                obj(
+                    json!({
+                        "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {"type": "string", "description": "the complete question, ending with a question mark"},
+                                "header": {"type": "string", "description": "very short chip label, max 12 chars (e.g. 'Approach')"},
+                                "options": {"type": "array", "items": {"type": "object", "properties": {
+                                    "label": {"type": "string", "description": "concise choice text (1-5 words)"},
+                                    "description": {"type": "string", "description": "what this option means / its trade-offs"}
+                                }, "required": ["label"]}, "description": "2-12 distinct choices (omit for pure free-form)"},
+                                "multiSelect": {"type": "boolean", "description": "allow selecting several options (checkboxes)"}
+                            },
+                            "required": ["question"]
+                        }}
+                    }),
+                    &["questions"],
+                )
+            },
             run: |app, input| crate::ai::ask_user(app, input),
         },
         ToolDef {
             name: "web_search",
             description: "Search the web (DuckDuckGo, no API key). Returns titles, URLs and snippets. Use for current information, reference data, docs.",
             gated: false,
-            schema: || obj(json!({
-                "query": {"type": "string"},
-                "count": {"type": "integer", "description": "max results, default 6"}
-            }), &["query"]),
+            schema: || {
+                obj(
+                    json!({
+                        "query": {"type": "string"},
+                        "count": {"type": "integer", "description": "max results, default 6"}
+                    }),
+                    &["query"],
+                )
+            },
             run: |app, input| rpc::dispatch(app, "web.search", input.clone()),
         },
         ToolDef {
@@ -304,11 +419,16 @@ pub fn registry() -> Vec<ToolDef> {
             name: "add_mcp_server",
             description: "Connect a remote MCP server for this app (verified before saving; its tools appear as mcp__<name>__* from your next step on. The server is saved in the app; its token stays on this computer).",
             gated: true,
-            schema: || obj(json!({
-                "name": {"type": "string", "description": "short identifier, e.g. 'crm'"},
-                "url": {"type": "string", "description": "https URL of the MCP endpoint"},
-                "bearer_token": {"type": "string", "description": "optional Authorization bearer token"}
-            }), &["name", "url"]),
+            schema: || {
+                obj(
+                    json!({
+                        "name": {"type": "string", "description": "short identifier, e.g. 'crm'"},
+                        "url": {"type": "string", "description": "https URL of the MCP endpoint"},
+                        "bearer_token": {"type": "string", "description": "optional Authorization bearer token"}
+                    }),
+                    &["name", "url"],
+                )
+            },
             run: |app, input| rpc::dispatch(app, "mcp.add", input.clone()),
         },
         ToolDef {
@@ -322,22 +442,32 @@ pub fn registry() -> Vec<ToolDef> {
             name: "download_lib",
             description: "Vendor a JS/CSS/WASM library or asset into the app archive by downloading it from a URL (e.g. cdn.jsdelivr.net, unpkg.com, cdn.sheetjs.com). Stored under app/vendor/ by default, served same-origin so it works offline and WASM can instantiateStreaming. Reference it with a relative path afterward.",
             gated: true,
-            schema: || obj(json!({
-                "url": {"type": "string", "description": "http(s) URL of the file to download"},
-                "name": {"type": "string", "description": "archive path to store it at (default: app/vendor/<filename from url>)"}
-            }), &["url"]),
+            schema: || {
+                obj(
+                    json!({
+                        "url": {"type": "string", "description": "http(s) URL of the file to download"},
+                        "name": {"type": "string", "description": "archive path to store it at (default: app/vendor/<filename from url>)"}
+                    }),
+                    &["url"],
+                )
+            },
             run: |app, input| rpc::dispatch(app, "files.fetch", input.clone()),
         },
         ToolDef {
             name: "import_csv",
             description: "Parse a CSV/TSV file already in the archive (usually data/...) into a database table as one efficient bulk write. Auto-detects delimiter and column types.",
             gated: true,
-            schema: || obj(json!({
-                "file": {"type": "string", "description": "archive path, e.g. data/sales.csv"},
-                "table": {"type": "string", "description": "target table name (default: from filename)"},
-                "header": {"type": "boolean", "description": "first row is headers (default true)"},
-                "replace": {"type": "boolean", "description": "delete existing rows first"}
-            }), &["file"]),
+            schema: || {
+                obj(
+                    json!({
+                        "file": {"type": "string", "description": "archive path, e.g. data/sales.csv"},
+                        "table": {"type": "string", "description": "target table name (default: from filename)"},
+                        "header": {"type": "boolean", "description": "first row is headers (default true)"},
+                        "replace": {"type": "boolean", "description": "delete existing rows first"}
+                    }),
+                    &["file"],
+                )
+            },
             run: |app, input| rpc::dispatch(app, "import.csv", input.clone()),
         },
     ]

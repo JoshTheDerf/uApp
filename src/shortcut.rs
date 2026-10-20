@@ -9,8 +9,8 @@
 //! re-install removes the recorded files first — no duplicate launcher is
 //! left behind after a rename.
 
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 /// Can this platform create launcher entries at all?
@@ -61,18 +61,18 @@ pub fn install(app_id: &str, name: &str, path: &Path, icon_png: Option<&[u8]>) -
 /// the recorded paths first; falls back to the current name's default path
 /// (covers a record lost to e.g. a wiped prefs.json).
 pub fn status(app_id: &str, name: &str) -> (bool, Option<String>) {
-    if let Some((files, detail)) = record(app_id) {
-        if files.iter().any(|f| f.exists()) {
-            return (
-                true,
-                detail.or_else(|| files.first().map(|f| f.display().to_string())),
-            );
-        }
+    if let Some((files, detail)) = record(app_id)
+        && files.iter().any(|f| f.exists())
+    {
+        return (
+            true,
+            detail.or_else(|| files.first().map(|f| f.display().to_string())),
+        );
     }
-    if let Some(p) = default_entry(display_name(name)) {
-        if p.exists() {
-            return (true, Some(p.display().to_string()));
-        }
+    if let Some(p) = default_entry(display_name(name))
+        && p.exists()
+    {
+        return (true, Some(p.display().to_string()));
     }
     (false, None)
 }
@@ -82,10 +82,10 @@ pub fn status(app_id: &str, name: &str) -> (bool, Option<String>) {
 pub fn remove(app_id: &str, name: &str) -> Result<String> {
     let name = display_name(name);
     let mut targets = record(app_id).map(|(f, _)| f).unwrap_or_default();
-    if let Some(p) = default_entry(name) {
-        if !targets.contains(&p) {
-            targets.push(p);
-        }
+    if let Some(p) = default_entry(name)
+        && !targets.contains(&p)
+    {
+        targets.push(p);
     }
     let removed = targets.iter().filter(|f| remove_path(f)).count();
     // A stale record (files already gone) is cleared either way.
@@ -105,11 +105,7 @@ pub fn remove(app_id: &str, name: &str) -> Result<String> {
 /// Names may come in blank (a brand-new app); the entry still needs one.
 fn display_name(name: &str) -> &str {
     let t = name.trim();
-    if t.is_empty() {
-        "uapp"
-    } else {
-        t
-    }
+    if t.is_empty() { "uapp" } else { t }
 }
 
 /// Where an install of the *current* name would land — the status/remove
@@ -242,11 +238,7 @@ fn slug(name: &str) -> String {
         })
         .collect();
     let s = s.trim_matches('-').to_string();
-    if s.is_empty() {
-        "app".into()
-    } else {
-        s
-    }
+    if s.is_empty() { "app".into() } else { s }
 }
 
 /// Wrap one PNG as a minimal .icns: modern icns entries (10.7+) may hold raw
@@ -462,13 +454,7 @@ fn png_to_ico(png: &[u8]) -> Vec<u8> {
             .map(u32::from_be_bytes)
             .unwrap_or(0)
     };
-    let dim = |v: u32| -> u8 {
-        if v == 0 || v >= 256 {
-            0
-        } else {
-            v as u8
-        }
-    };
+    let dim = |v: u32| -> u8 { if v == 0 || v >= 256 { 0 } else { v as u8 } };
     let mut ico = Vec::with_capacity(22 + png.len());
     ico.extend_from_slice(&[0, 0, 1, 0, 1, 0]); // reserved, type=icon, count=1
     ico.push(dim(be(16))); // width
@@ -505,11 +491,7 @@ fn sanitize_win(name: &str) -> String {
         })
         .collect();
     let s = s.trim().trim_matches('.').to_string();
-    if s.is_empty() {
-        "app".into()
-    } else {
-        s
-    }
+    if s.is_empty() { "app".into() } else { s }
 }
 
 // ---- macOS: ~/Applications/<Name>.app wrapping `uapp <file>` ---------------
@@ -580,11 +562,7 @@ fn sanitize_mac(name: &str) -> String {
         })
         .collect();
     let s = s.trim().to_string();
-    if s.is_empty() {
-        "app".into()
-    } else {
-        s
-    }
+    if s.is_empty() { "app".into() } else { s }
 }
 
 /// POSIX-shell single-quoted literal ('' has no escapes; a literal quote is

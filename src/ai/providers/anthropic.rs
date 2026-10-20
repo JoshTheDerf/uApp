@@ -1,15 +1,15 @@
 //! Anthropic Messages API (also z.ai's Anthropic-compatible endpoint).
 
-use anyhow::{anyhow, bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::app::App;
 
 use super::{
-    open_stream, post, read_sse, retryable, tool_input, transient_kind, Live, Reply, Request, Usage,
+    Live, Reply, Request, Usage, open_stream, post, read_sse, retryable, tool_input, transient_kind,
 };
-use crate::ai::{default_max_tokens, AiConfig};
+use crate::ai::{AiConfig, default_max_tokens};
 
 pub(crate) const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const ZAI_MODEL: &str = "glm-5.3";
@@ -99,10 +99,10 @@ pub(crate) fn cache_last_message(messages: &[Value], cache: bool) -> Value {
         return json!(messages);
     }
     let mut out = messages.to_vec();
-    if let Some(content) = out.last_mut().and_then(|m| m["content"].as_array_mut()) {
-        if let Some(block) = content.last_mut() {
-            block["cache_control"] = json!({"type": "ephemeral"});
-        }
+    if let Some(content) = out.last_mut().and_then(|m| m["content"].as_array_mut())
+        && let Some(block) = content.last_mut()
+    {
+        block["cache_control"] = json!({"type": "ephemeral"});
     }
     json!(out)
 }
@@ -614,9 +614,11 @@ mod tests {
         assert_eq!(p.blocks[2]["input"], json!({"a": 1}));
         // Hidden thinking still produced a heartbeat.
         assert!(events.iter().any(|e| e["state"] == "thinking"));
-        assert!(events
-            .iter()
-            .any(|e| e["state"] == "streaming" && e["text"] == "Hi"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e["state"] == "streaming" && e["text"] == "Hi")
+        );
     }
 
     #[test]

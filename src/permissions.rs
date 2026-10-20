@@ -269,10 +269,8 @@ pub fn ask_in_background(ask: Ask) {
     }
     std::thread::spawn(move || {
         let allowed = decide(ask);
-        if allowed {
-            if let Ok(mut s) = SESSION_ALLOW.get_or_init(Default::default).lock() {
-                s.insert(key.clone());
-            }
+        if allowed && let Ok(mut s) = SESSION_ALLOW.get_or_init(Default::default).lock() {
+            s.insert(key.clone());
         }
         if let Ok(mut f) = ASK_IN_FLIGHT.get_or_init(Default::default).lock() {
             f.remove(&key);
@@ -499,9 +497,15 @@ fn wording(l: &str, key: &str) -> (&'static str, &'static str) {
 
 fn note(l: &str) -> &'static str {
     match l {
-        "fr" => "Les applications sont des fichiers que l'on se partage. N'autorisez que si vous avez confiance en sa provenance.",
-        "es" => "Las aplicaciones son archivos que se comparten. Permítelo solo si confías en su procedencia.",
-        "de" => "Apps sind Dateien, die weitergegeben werden. Erlaube dies nur, wenn du der Quelle vertraust.",
+        "fr" => {
+            "Les applications sont des fichiers que l'on se partage. N'autorisez que si vous avez confiance en sa provenance."
+        }
+        "es" => {
+            "Las aplicaciones son archivos que se comparten. Permítelo solo si confías en su procedencia."
+        }
+        "de" => {
+            "Apps sind Dateien, die weitergegeben werden. Erlaube dies nur, wenn du der Quelle vertraust."
+        }
         "zh" => "应用是可以互相传递的文件。只有在你信任其来源时才允许。",
         _ => "Apps are files people share. Only allow this if you trust where this one came from.",
     }
@@ -509,11 +513,19 @@ fn note(l: &str) -> &'static str {
 
 fn note_strong(l: &str) -> &'static str {
     match l {
-        "fr" => "Cela peut capturer des éléments hors de cette application. N'autorisez que si vous avez confiance en sa provenance.",
-        "es" => "Esto puede capturar cosas fuera de esta aplicación. Permítelo solo si confías en su procedencia.",
-        "de" => "Dies kann Inhalte außerhalb dieser App erfassen. Erlaube es nur, wenn du der Quelle vertraust.",
+        "fr" => {
+            "Cela peut capturer des éléments hors de cette application. N'autorisez que si vous avez confiance en sa provenance."
+        }
+        "es" => {
+            "Esto puede capturar cosas fuera de esta aplicación. Permítelo solo si confías en su procedencia."
+        }
+        "de" => {
+            "Dies kann Inhalte außerhalb dieser App erfassen. Erlaube es nur, wenn du der Quelle vertraust."
+        }
         "zh" => "这可能会捕获此应用之外的内容。只有在你信任其来源时才允许。",
-        _ => "This can capture things outside this app. Only allow it if you trust where this app came from.",
+        _ => {
+            "This can capture things outside this app. Only allow it if you trust where this app came from."
+        }
     }
 }
 

@@ -16,11 +16,11 @@
 //! would be, plus the COI headers the shell needs from its very first load
 //! and the default-open meta.
 
+use axum::Router;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use std::sync::Arc;
 
 use crate::app::Chrome;
@@ -121,11 +121,11 @@ fn inject_default_open(bytes: Vec<u8>, open: Option<&str>) -> Vec<u8> {
         crate::server::html_escape(open)
     );
     let lower = html.to_lowercase();
-    if let Some(pos) = lower.find("<head") {
-        if let Some(gt) = html[pos..].find('>') {
-            let at = pos + gt + 1;
-            return format!("{}\n{}{}", &html[..at], tag, &html[at..]).into_bytes();
-        }
+    if let Some(pos) = lower.find("<head")
+        && let Some(gt) = html[pos..].find('>')
+    {
+        let at = pos + gt + 1;
+        return format!("{}\n{}{}", &html[..at], tag, &html[at..]).into_bytes();
     }
     format!("{tag}\n{html}").into_bytes()
 }

@@ -1,7 +1,7 @@
 //! The tool loop.
 
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::app::App;
@@ -10,12 +10,12 @@ use crate::store;
 
 use super::approval::approval_gate;
 use super::compact::Compactor;
-use super::history::{build_messages, Budget};
+use super::history::{Budget, build_messages};
 use super::prompt::{app_snapshot, system_prompt};
-use super::providers::{call_provider_retrying, is_stopped, Request, Usage};
-use super::toolset::{action_list, run_target, toolset_key, unwrap_call_action, Target, Toolset};
+use super::providers::{Request, Usage, call_provider_retrying, is_stopped};
+use super::toolset::{Target, Toolset, action_list, run_target, toolset_key, unwrap_call_action};
 use super::{
-    compact_bytes, load_config, plan_mode, CtxGuard, RunCtx, MAX_ITERATIONS, TOOL_RESULT_LIMIT,
+    CtxGuard, MAX_ITERATIONS, RunCtx, TOOL_RESULT_LIMIT, compact_bytes, load_config, plan_mode,
 };
 
 /// What a finished loop produced: how many provider turns it took and the
@@ -182,12 +182,11 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         // errors/warnings since the AI last looked — e.g. the edit just made
         // reloaded the iframe and it threw — staple a one-line nudge to the
         // final result so the model knows to call read_console.
-        if let Some(note) = app.console_alert() {
-            if let Some(last) = results.last_mut() {
-                if let Some(c) = last["content"].as_str() {
-                    last["content"] = json!(format!("{c}{note}"));
-                }
-            }
+        if let Some(note) = app.console_alert()
+            && let Some(last) = results.last_mut()
+            && let Some(c) = last["content"].as_str()
+        {
+            last["content"] = json!(format!("{c}{note}"));
         }
         // The results say what ran, so they are kept after a Stop too, unless
         // the chat itself is gone (sessions.delete stops the run first).
@@ -256,13 +255,14 @@ fn run_call(app: &Arc<App>, ctx: &RunCtx, toolset: &Toolset, tu: &Value) -> Valu
     }
     // A registered action decides whether it's gated (its readonly flag), so
     // let one the page is still registering after a reload arrive first.
-    if let Target::App(action) = &target {
-        if !action.is_empty() && app.wait_for_action(action).is_err() {
-            return fail(format!(
-                "Error: no app action named '{action}' is registered. Registered actions: {}",
-                action_list(app)
-            ));
-        }
+    if let Target::App(action) = &target
+        && !action.is_empty()
+        && app.wait_for_action(action).is_err()
+    {
+        return fail(format!(
+            "Error: no app action named '{action}' is registered. Registered actions: {}",
+            action_list(app)
+        ));
     }
     // Plan mode backstop: write tools are absent from the offered toolset,
     // but a hallucinated call must not execute either.

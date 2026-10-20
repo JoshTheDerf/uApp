@@ -21,9 +21,9 @@
 //! column type) is reported as a warning rather than forced: the user sees it
 //! in the confirmation dialog and can fix it in the SQL panel.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::store::{self, Op, SchemaObject};

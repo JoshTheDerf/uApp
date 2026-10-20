@@ -4,7 +4,7 @@
 //! (API keys), chat or history — and a publish over a moved-on copy is a 409.
 
 use std::sync::Arc;
-use uapp::library::{router, Library};
+use uapp::library::{Library, router};
 
 const TOKEN: &str = "lib-token-0123456789";
 

@@ -19,14 +19,14 @@
 //!   * `/site.uapp` is `store::export_public` output: no chat, no config
 //!     secrets, `data/` only with `--publish-data`.
 
+use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxPath, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 use std::sync::Arc;
@@ -129,10 +129,10 @@ fn authed(app: &App, headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
 ///     absence there means a non-browser client (the CLI, curl, the tests),
 ///     which has to present the token itself.
 fn from_own_origin(app: &App, headers: &HeaderMap) -> bool {
-    if let Some(site) = headers.get("sec-fetch-site") {
-        if !matches!(site.to_str(), Ok("same-origin" | "none")) {
-            return false;
-        }
+    if let Some(site) = headers.get("sec-fetch-site")
+        && !matches!(site.to_str(), Ok("same-origin" | "none"))
+    {
+        return false;
     }
     match headers.get(header::ORIGIN) {
         Some(o) => o.to_str().is_ok_and(|o| origin_is_self(app, headers, o)),
@@ -615,12 +615,13 @@ pub(crate) fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -641,27 +642,27 @@ async fn root_file(
     let path = percent_decode(uri.path());
     // The browser build's assets win over site files of the same name — the
     // editing chrome cannot boot if the site shadows its loader.
-    if let Some(chrome) = &app.chrome {
-        if let Some(bytes) = chrome.bundle.get(path.as_str()) {
-            let etag = etag_for(bytes);
-            if if_none_match(&headers, &etag) {
-                return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
-            }
-            return (
-                [
-                    (header::CONTENT_TYPE, content_type_for(&path).to_string()),
-                    (header::ETAG, etag),
-                    // Changes only with the server image, but must never outlive
-                    // a deploy: revalidate, and let the ETag make that cheap.
-                    (
-                        header::CACHE_CONTROL,
-                        "public, max-age=0, must-revalidate".to_string(),
-                    ),
-                ],
-                bytes.clone(),
-            )
-                .into_response();
+    if let Some(chrome) = &app.chrome
+        && let Some(bytes) = chrome.bundle.get(path.as_str())
+    {
+        let etag = etag_for(bytes);
+        if if_none_match(&headers, &etag) {
+            return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
         }
+        return (
+            [
+                (header::CONTENT_TYPE, content_type_for(&path).to_string()),
+                (header::ETAG, etag),
+                // Changes only with the server image, but must never outlive
+                // a deploy: revalidate, and let the ETag make that cheap.
+                (
+                    header::CACHE_CONTROL,
+                    "public, max-age=0, must-revalidate".to_string(),
+                ),
+            ],
+            bytes.clone(),
+        )
+            .into_response();
     }
     if let Visitor::Reader = who {
         return public_page(&app, &path, &headers);
@@ -1046,17 +1047,17 @@ async fn handle_unlock_conn(
         })
     };
     let host = header("host");
-    if let Some(h) = &host {
-        if !host_and_port(h, 80).is_some_and(|(h, _)| is_loopback(&h)) {
-            let _ = write_status(
-                &mut stream,
-                "403 Forbidden",
-                "application/json",
-                br#"{"ok":false}"#,
-            )
-            .await;
-            return;
-        }
+    if let Some(h) = &host
+        && !host_and_port(h, 80).is_some_and(|(h, _)| is_loopback(&h))
+    {
+        let _ = write_status(
+            &mut stream,
+            "403 Forbidden",
+            "application/json",
+            br#"{"ok":false}"#,
+        )
+        .await;
+        return;
     }
 
     if method == "POST" && route == "/unlock" {
@@ -1567,22 +1568,22 @@ fn inject_chrome(bytes: Vec<u8>, chrome: Option<&str>) -> Vec<u8> {
         inject.push('\n');
         inject.push_str(META);
     }
-    if let Some(v) = chrome {
-        if !loads_chrome_entry(&lower) {
-            inject.push('\n');
-            inject.push_str(&format!(
-                r#"<script src="/chrome.js?v={v}" defer></script>"#
-            ));
-        }
+    if let Some(v) = chrome
+        && !loads_chrome_entry(&lower)
+    {
+        inject.push('\n');
+        inject.push_str(&format!(
+            r#"<script src="/chrome.js?v={v}" defer></script>"#
+        ));
     }
     if inject.is_empty() {
         return text.into_bytes();
     }
-    if let Some(pos) = lower.find("<head") {
-        if let Some(gt) = text[pos..].find('>') {
-            let at = pos + gt + 1;
-            return format!("{}{}{}", &text[..at], inject, &text[at..]).into_bytes();
-        }
+    if let Some(pos) = lower.find("<head")
+        && let Some(gt) = text[pos..].find('>')
+    {
+        let at = pos + gt + 1;
+        return format!("{}{}{}", &text[..at], inject, &text[at..]).into_bytes();
     }
     format!("{inject}\n{text}").into_bytes()
 }
@@ -1731,10 +1732,10 @@ fn public_lookup(app: &App, path: &str) -> Option<Arc<crate::app::CachedPage>> {
     let writes = app.eng().writes;
     {
         let c = crate::app::lock(&app.page_cache);
-        if c.writes == writes {
-            if let Some(p) = c.pages.get(path) {
-                return Some(p.clone());
-            }
+        if c.writes == writes
+            && let Some(p) = c.pages.get(path)
+        {
+            return Some(p.clone());
         }
     }
     let (found, not_found, writes) = {
@@ -1791,10 +1792,10 @@ fn current_archive(app: &App) -> anyhow::Result<Arc<crate::app::PublicArchive>> 
     let opts = app.public.unwrap_or_default();
     let eng = app.eng();
     let mut cache = crate::app::lock(&app.archive_cache);
-    if let Some((gen, arc)) = cache.as_ref() {
-        if *gen == eng.writes {
-            return Ok(arc.clone());
-        }
+    if let Some((stamp, arc)) = cache.as_ref()
+        && *stamp == eng.writes
+    {
+        return Ok(arc.clone());
     }
     let name = crate::store::meta_get(&eng.db, "name")
         .ok()

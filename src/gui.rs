@@ -56,7 +56,9 @@ pub fn run_with(launch: Launch) {
                 }
                 if let Ok(cache) = p.app_cache_dir() {
                     let _ = std::fs::create_dir_all(&cache);
-                    std::env::set_var("TMPDIR", &cache);
+                    // SAFETY: Tauri's setup hook, before the server or any
+                    // thread of ours starts that could read the environment.
+                    unsafe { std::env::set_var("TMPDIR", &cache) };
                 }
                 // Android/iOS suspend the webview when the app is backgrounded:
                 // every socket drops and all JS timers freeze, so the shell's
@@ -64,7 +66,8 @@ pub fn run_with(launch: Launch) {
                 // exit-on-zero-clients watcher — here the OS owns the process
                 // lifecycle, and the AI turn runs on a server thread that must
                 // keep going while the page is suspended (see lib.rs).
-                std::env::set_var("UAPP_LINGER_SECS", "never");
+                // SAFETY: as for TMPDIR above.
+                unsafe { std::env::set_var("UAPP_LINGER_SECS", "never") };
                 // Only now that the working dir is the app's own does the log
                 // file have somewhere to go (registry::local_root).
                 crate::logging::init(0, true);
@@ -127,7 +130,7 @@ pub fn run_with(launch: Launch) {
 /// window — the webview never gets HTML5 `dragover`/`drop` events for them —
 /// so without this, dragging a file into the desktop app does nothing.
 fn install_drop_forwarding<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
-    use crate::native::{deliver_drop, DropInfo, DropPhase};
+    use crate::native::{DropInfo, DropPhase, deliver_drop};
     use tauri::DragDropEvent;
     // Tracked rather than queried inside the handler: asking the runtime for
     // the window's scale from a window-event callback can deadlock.

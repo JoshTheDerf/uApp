@@ -21,8 +21,8 @@
 //! Also here: the session/publish token helpers, since a token is the other
 //! secret the server handles.
 
-use anyhow::{bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, bail};
+use serde_json::{Value, json};
 
 use crate::app::App;
 
@@ -398,19 +398,21 @@ pub fn redact_mcp(app: &App, servers: Value) -> Value {
     let Some(list) = servers.as_array() else {
         return servers;
     };
-    json!(mcp_with_credentials(app, list.clone())
-        .into_iter()
-        .map(|mut s| {
-            let has = s
-                .as_object_mut()
-                .and_then(|o| o.remove("headers"))
-                .is_some();
-            if s.is_object() {
-                s["hasAuth"] = json!(has);
-            }
-            s
-        })
-        .collect::<Vec<_>>())
+    json!(
+        mcp_with_credentials(app, list.clone())
+            .into_iter()
+            .map(|mut s| {
+                let has = s
+                    .as_object_mut()
+                    .and_then(|o| o.remove("headers"))
+                    .is_some();
+                if s.is_object() {
+                    s["hasAuth"] = json!(has);
+                }
+                s
+            })
+            .collect::<Vec<_>>()
+    )
 }
 
 // ---- "always allow" for app-triggered tools ----------------------------------
@@ -444,10 +446,10 @@ pub fn approve_app(app: &App, app_id: &str, tool: &str) -> Result<()> {
             if !list.is_array() {
                 *list = json!([]);
             }
-            if let Some(a) = list.as_array_mut() {
-                if !a.iter().any(|t| t.as_str() == Some(tool)) {
-                    a.push(json!(tool));
-                }
+            if let Some(a) = list.as_array_mut()
+                && !a.iter().any(|t| t.as_str() == Some(tool))
+            {
+                a.push(json!(tool));
             }
         })
     }
@@ -494,12 +496,12 @@ pub fn migrate(app: &App) -> Result<()> {
         app.eng()
             .local_op("config_set", json!({"key": "ai", "value": ai}))?;
     }
-    if let Some(list) = mcp.as_ref().and_then(Value::as_array) {
-        if list.iter().any(|s| s.get("headers").is_some()) {
-            let stripped = mcp_store_credentials(app, list.clone())?;
-            app.eng()
-                .local_op("config_set", json!({"key": "mcp", "value": stripped}))?;
-        }
+    if let Some(list) = mcp.as_ref().and_then(Value::as_array)
+        && list.iter().any(|s| s.get("headers").is_some())
+    {
+        let stripped = mcp_store_credentials(app, list.clone())?;
+        app.eng()
+            .local_op("config_set", json!({"key": "mcp", "value": stripped}))?;
     }
     Ok(())
 }

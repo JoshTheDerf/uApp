@@ -15,8 +15,7 @@ use crate::store;
 
 pub(crate) const SUBAGENT_SUFFIX: &str = "\n\nYou are an autonomous sub-agent. Complete the task fully and return a clear, self-contained final report as your final message. You cannot ask the user questions.";
 
-const PLAN_SUFFIX: &str =
-    "\n\nYou are in PLAN MODE (read-only). Do NOT modify data, files or config — \
+const PLAN_SUFFIX: &str = "\n\nYou are in PLAN MODE (read-only). Do NOT modify data, files or config — \
      write tools are unavailable. Investigate with the read tools and propose a \
      concrete plan; the user will switch modes before you apply it.";
 

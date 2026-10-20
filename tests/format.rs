@@ -9,7 +9,10 @@ fn setup(name: &str) -> std::path::PathBuf {
     // Keep the registry and snapshots out of the real per-user data dir. One
     // dir for the whole binary: the tests run in parallel and share the env.
     static DATA: std::sync::Once = std::sync::Once::new();
-    DATA.call_once(|| std::env::set_var("XDG_DATA_HOME", base.join("data")));
+    // SAFETY: test-only. Other tests may already be running on their own
+    // threads, so this is not strictly race-free, but it runs once, before
+    // any of them reaches the data dir (they all come through here first).
+    DATA.call_once(|| unsafe { std::env::set_var("XDG_DATA_HOME", base.join("data")) });
     let root = base.join(name);
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();

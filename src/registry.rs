@@ -23,7 +23,7 @@
 //! of an app share their app_id (and the file decides what it says), so an
 //! app_id-keyed directory let one copy's snapshot be restored over another.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use fs2::FileExt;
 use std::fs::File;
 use std::path::{Path, PathBuf};

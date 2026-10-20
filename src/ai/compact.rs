@@ -1,15 +1,15 @@
 //! Summarizing old chat rows into one summary row.
 
-use anyhow::{bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, bail};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::app::App;
 use crate::rpc;
 use crate::store;
 
-use super::providers::{call_provider, Request};
-use super::{compact_bytes, load_config, AiConfig, RunCtx};
+use super::providers::{Request, call_provider};
+use super::{AiConfig, RunCtx, compact_bytes, load_config};
 
 pub const COMPACT_PROMPT: &str = "You are a summarizer. Produce a concise but complete summary of the conversation so far: what the user asked for, key decisions, changes made to the app and its data, the current state, what was being done when the transcript ends, and open TODOs. This summary will REPLACE the prior messages as context, so preserve everything needed to continue the work, including exact file names, table names and values that matter.";
 

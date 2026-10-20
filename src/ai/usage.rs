@@ -2,7 +2,7 @@
 //! `ai.usage` RPC.
 
 use anyhow::Result;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
 use crate::app::App;

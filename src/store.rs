@@ -3,11 +3,11 @@
 //! exports. The engine holds one live connection on the file; everything here
 //! takes `&Connection`.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
-use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use rusqlite::types::{Value as SqlValue, ValueRef};
+use serde_json::{Value, json};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 

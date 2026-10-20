@@ -6,14 +6,14 @@
 //! the main thread shows the prompt and writes the decision back. Both paths
 //! go through [`prompt_approval`] and [`prompt_questions`].
 
-use anyhow::{anyhow, bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::app::App;
 use crate::store;
 
-use super::{current_ctx, RunCtx};
+use super::{RunCtx, current_ctx};
 
 /// One approval prompt.
 struct ApprovalReq<'a> {

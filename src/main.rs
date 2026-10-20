@@ -11,12 +11,12 @@
     windows_subsystem = "windows"
 )]
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use uapp::{device_id, install, serve_opts, store, OnReady};
+use uapp::{OnReady, device_id, install, serve_opts, store};
 
 #[derive(Parser)]
 #[command(
@@ -340,7 +340,7 @@ fn wants_window(o: &OpenOpts, has_file: bool) -> bool {
 /// there is no parent console (a double-click) or the handles are redirected.
 #[cfg(all(windows, feature = "gui"))]
 fn attach_console() {
-    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
     // SAFETY: plain Win32 call with no pointers; failure just means no console.
     unsafe {
         AttachConsole(ATTACH_PARENT_PROCESS);

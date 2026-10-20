@@ -10,8 +10,8 @@ mod anthropic;
 mod openai_chat;
 mod openai_responses;
 
-use anyhow::{anyhow, bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::io::BufRead;
 use std::sync::Arc;
 
@@ -455,7 +455,7 @@ pub(crate) fn post(
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    break Err(retryable("provider request failed: worker ended"))
+                    break Err(retryable("provider request failed: worker ended"));
                 }
             }
         }
@@ -516,9 +516,11 @@ mod tests {
             }
             _ => panic!("429 should retry"),
         }
-        assert!(http_error(529, &[], "overloaded")
-            .downcast_ref::<CallError>()
-            .is_some());
+        assert!(
+            http_error(529, &[], "overloaded")
+                .downcast_ref::<CallError>()
+                .is_some()
+        );
         let e = http_error(400, &[], r#"{"error":{"message":"bad"}}"#);
         assert!(e.downcast_ref::<CallError>().is_none());
         assert_eq!(e.to_string(), "provider returned 400: bad");

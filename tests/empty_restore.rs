@@ -9,7 +9,8 @@ fn zero_byte_known_file_restores_snapshot() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     // Keep the registry and snapshots out of the real per-user data dir.
-    std::env::set_var("XDG_DATA_HOME", root.join("data"));
+    // SAFETY: runs first thing in the test, before it starts any threads.
+    unsafe { std::env::set_var("XDG_DATA_HOME", root.join("data")) };
     let path = root.join("notes.uapp");
 
     {

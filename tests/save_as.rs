@@ -16,7 +16,10 @@ fn q_i64(eng: &Engine, sql: &str) -> i64 {
 fn scratch(name: &str) -> std::path::PathBuf {
     let base = std::env::temp_dir().join(format!("uapp-saveas-{}", std::process::id()));
     static DATA: std::sync::Once = std::sync::Once::new();
-    DATA.call_once(|| std::env::set_var("XDG_DATA_HOME", base.join("data")));
+    // SAFETY: test-only. Other tests may already be running on their own
+    // threads, so this is not strictly race-free, but it runs once, before
+    // any of them reaches the data dir (they all come through here first).
+    DATA.call_once(|| unsafe { std::env::set_var("XDG_DATA_HOME", base.join("data")) });
     let dir = base.join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

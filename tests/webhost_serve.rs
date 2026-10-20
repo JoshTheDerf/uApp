@@ -4,7 +4,7 @@
 //! and nothing served that is not in the bundle.
 
 use std::sync::Arc;
-use uapp::webhost::{router, WebHost};
+use uapp::webhost::{WebHost, router};
 
 fn fake_bundle() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("uapp-webhost-{}", fastrand::u32(..)));

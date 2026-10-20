@@ -27,7 +27,7 @@
 
 use anyhow::Result;
 #[cfg(not(target_arch = "wasm32"))]
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use rusqlite::Connection;
 use serde_json::Value;
 #[cfg(not(target_arch = "wasm32"))]
@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::registry;
-use crate::store::{self, now_ms, Op};
+use crate::store::{self, Op, now_ms};
 
 pub const SNAPSHOT_KEEP: usize = 10;
 /// In a snapshot dir: the canonical path of the file the snapshots are of.
@@ -198,10 +198,10 @@ impl Engine {
         // The open-time rescue point (also what a corrupt future open
         // restores), unless the newest snapshot already holds this exact file:
         // opening an unchanged app ten times shouldn't churn all ten slots.
-        if !eng.snapshot_is_current() {
-            if let Err(e) = eng.snapshot() {
-                tracing::warn!("snapshot on open failed: {e:#}");
-            }
+        if !eng.snapshot_is_current()
+            && let Err(e) = eng.snapshot()
+        {
+            tracing::warn!("snapshot on open failed: {e:#}");
         }
         Ok(eng)
     }
@@ -224,16 +224,14 @@ impl Engine {
                 path.display()
             ));
         }
-        if is_sqlite {
-            if let Some(pw) = passphrase {
-                // A plaintext file opened WITH a password: encrypt it in place
-                // so the password takes effect immediately.
-                crate::cipher::encrypt_file_in_place(path, pw)?;
-                tracing::info!(
-                    "{} was not encrypted, so it was encrypted in place with the provided password",
-                    path.display()
-                );
-            }
+        if is_sqlite && let Some(pw) = passphrase {
+            // A plaintext file opened WITH a password: encrypt it in place
+            // so the password takes effect immediately.
+            crate::cipher::encrypt_file_in_place(path, pw)?;
+            tracing::info!(
+                "{} was not encrypted, so it was encrypted in place with the provided password",
+                path.display()
+            );
         }
         // An encrypted file is keyed (and the key verified, with a clear
         // "wrong password" error) before anything else reads it.
@@ -356,20 +354,21 @@ impl Engine {
     /// Refresh the rolling snapshot if there have been writes since the last
     /// one and it's been a while. Called from the server's background timer.
     pub fn maybe_snapshot(&mut self) {
-        if self.dirty && now_ms().saturating_sub(self.last_snapshot_ms) >= SNAPSHOT_INTERVAL_MS {
-            if let Err(e) = self.snapshot() {
-                tracing::warn!("periodic snapshot failed: {e:#}");
-            }
+        if self.dirty
+            && now_ms().saturating_sub(self.last_snapshot_ms) >= SNAPSHOT_INTERVAL_MS
+            && let Err(e) = self.snapshot()
+        {
+            tracing::warn!("periodic snapshot failed: {e:#}");
         }
     }
 
     /// Shutdown rescue point: snapshot now if any write happened since the
     /// last one (no time gate — the process is going away).
     pub fn snapshot_if_dirty(&mut self) {
-        if self.dirty {
-            if let Err(e) = self.snapshot() {
-                tracing::warn!("snapshot on shutdown failed: {e:#}");
-            }
+        if self.dirty
+            && let Err(e) = self.snapshot()
+        {
+            tracing::warn!("snapshot on shutdown failed: {e:#}");
         }
     }
 
@@ -580,10 +579,10 @@ impl Engine {
                 }
             }
         }
-        if snapshot_files(&self.snapshot_dir).is_empty() {
-            if let Err(e) = self.snapshot() {
-                tracing::warn!("snapshot after encryption change failed: {e:#}");
-            }
+        if snapshot_files(&self.snapshot_dir).is_empty()
+            && let Err(e) = self.snapshot()
+        {
+            tracing::warn!("snapshot after encryption change failed: {e:#}");
         }
     }
 }
@@ -744,10 +743,10 @@ fn snapshot_files(snapdir: &Path) -> Vec<PathBuf> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn fsync_parent(path: &Path) {
-    if let Some(dir) = path.parent() {
-        if let Ok(d) = File::open(dir) {
-            let _ = d.sync_all();
-        }
+    if let Some(dir) = path.parent()
+        && let Ok(d) = File::open(dir)
+    {
+        let _ = d.sync_all();
     }
 }
 

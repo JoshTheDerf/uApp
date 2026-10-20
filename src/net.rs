@@ -100,13 +100,13 @@ pub fn get_public(url: &str, connect_timeout_secs: u64, read_timeout_secs: u64) 
             Err(ureq::Error::Status(_code, r)) => r,
             Err(e) => anyhow::bail!("request failed: {e}"),
         };
-        if (300..400).contains(&resp.status()) {
-            if let Some(loc) = resp.header("location") {
-                current = current
-                    .join(loc)
-                    .map_err(|e| anyhow::anyhow!("bad redirect to {loc}: {e}"))?;
-                continue;
-            }
+        if (300..400).contains(&resp.status())
+            && let Some(loc) = resp.header("location")
+        {
+            current = current
+                .join(loc)
+                .map_err(|e| anyhow::anyhow!("bad redirect to {loc}: {e}"))?;
+            continue;
         }
         return Ok(into_resp(resp));
     }

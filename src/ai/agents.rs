@@ -1,7 +1,7 @@
 //! Sub-agents: delegated loops in their own chat session.
 
-use anyhow::{anyhow, bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::app::App;
@@ -9,9 +9,9 @@ use crate::rpc;
 use crate::store;
 
 use super::compact::clip;
-use super::history::{load_messages, Msg};
+use super::history::{Msg, load_messages};
 use super::run::run_loop;
-use super::{current_ctx, RunCtx, FORK_DIGEST_BYTES};
+use super::{FORK_DIGEST_BYTES, RunCtx, current_ctx};
 
 /// A `fork` sub-agent's copy of the parent conversation: the newest `cap`
 /// bytes of it as JSON. The end matters most (it holds the task at hand),
@@ -78,7 +78,9 @@ pub fn agent_run(app: &Arc<App>, input: &Value) -> Result<Value> {
         let digest = load_messages(app, &ctx.session)
             .map(|msgs| fork_digest(msgs, FORK_DIGEST_BYTES))
             .unwrap_or_default();
-        format!("Context from the conversation you are helping with (JSON digest):\n{digest}\n\nYour task:\n{prompt}")
+        format!(
+            "Context from the conversation you are helping with (JSON digest):\n{digest}\n\nYour task:\n{prompt}"
+        )
     } else {
         prompt.to_string()
     };

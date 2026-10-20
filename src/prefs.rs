@@ -4,7 +4,7 @@
 //! Stored as JSON at <config_dir>/uapp/prefs.json.
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 

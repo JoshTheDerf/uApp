@@ -140,7 +140,10 @@ fn fixture() -> std::path::PathBuf {
     );
     // A page that stored the browser build's old wasm-mode marker (a site
     // whose build pipeline renders pages from fetched HTML did exactly this).
-    put("app/stale.html", "<html><head>\n<script>window.__uappWasm=1</script>\n<title>S</title></head><body>stale marker</body></html>");
+    put(
+        "app/stale.html",
+        "<html><head>\n<script>window.__uappWasm=1</script>\n<title>S</title></head><body>stale marker</body></html>",
+    );
     put("data/secret.csv", "ssn,salary\n123,999");
     conn.execute_batch(
         "CREATE TABLE posts(slug TEXT PRIMARY KEY, title TEXT);

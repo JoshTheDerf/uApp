@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use base64::Engine as _;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::app::App;
@@ -418,15 +418,15 @@ pub(crate) fn trim_bulky(msgs: &mut [Msg], budget: usize) {
             ));
         } else {
             for key in ["old_string", "new_string"] {
-                if let Some(s) = b["input"][key].as_str() {
-                    if s.len() > 256 {
-                        let short = format!(
-                            "{}…[trimmed, was {}KB]",
-                            clip_at(s, 200),
-                            s.len().div_ceil(1024)
-                        );
-                        b["input"][key] = json!(short);
-                    }
+                if let Some(s) = b["input"][key].as_str()
+                    && s.len() > 256
+                {
+                    let short = format!(
+                        "{}…[trimmed, was {}KB]",
+                        clip_at(s, 200),
+                        s.len().div_ceil(1024)
+                    );
+                    b["input"][key] = json!(short);
                 }
             }
         }
@@ -557,11 +557,11 @@ pub(crate) fn push_msg(msgs: &mut Vec<Msg>, role: &str, blocks: Vec<Value>) {
     if blocks.is_empty() {
         return;
     }
-    if let Some((last_role, last_blocks)) = msgs.last_mut() {
-        if last_role == role {
-            last_blocks.extend(blocks);
-            return;
-        }
+    if let Some((last_role, last_blocks)) = msgs.last_mut()
+        && last_role == role
+    {
+        last_blocks.extend(blocks);
+        return;
     }
     msgs.push((role.into(), blocks));
 }
@@ -668,13 +668,15 @@ mod tests {
         assert_valid(&msgs);
         assert!(!msgs.iter().flat_map(|m| &m.1).any(|b| b["id"] == "gone"));
         let flat: Vec<&Value> = msgs.iter().flat_map(|m| &m.1).collect();
-        assert!(flat
-            .iter()
-            .any(|b| b["type"] == "image" && b["name"] == "data/a.png"));
+        assert!(
+            flat.iter()
+                .any(|b| b["type"] == "image" && b["name"] == "data/a.png")
+        );
         assert!(flat.iter().any(|b| b["origin"] == "context"));
-        assert!(flat
-            .iter()
-            .any(|b| b["content"] == "(interrupted — no result recorded)"));
+        assert!(
+            flat.iter()
+                .any(|b| b["content"] == "(interrupted — no result recorded)")
+        );
     }
 
     #[test]
@@ -758,10 +760,12 @@ mod tests {
         let mut msgs = rows_to_messages(&rows);
         trim_bulky(&mut msgs, 20_000);
         let first = &msgs[1].1[0];
-        assert!(first["input"]["content"]
-            .as_str()
-            .unwrap()
-            .starts_with("[trimmed"));
+        assert!(
+            first["input"]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("[trimmed")
+        );
         let last = &msgs[msgs.len() - 2].1[0];
         assert_eq!(last["input"]["content"].as_str().unwrap().len(), 10_000);
     }

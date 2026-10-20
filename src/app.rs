@@ -8,10 +8,10 @@
 //! notifications to JS and routes page invocations over the worker bridge
 //! (`wasm.rs`).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::broadcast;
 
 use crate::engine::{ChangeSet, Engine};
@@ -82,7 +82,7 @@ pub struct ConsoleEntry {
     pub seq: u64,
     /// Which page load produced this. Bumps on every iframe (re)load, so the
     /// AI can filter to just the latest reload after an edit.
-    pub gen: u64,
+    pub page_load: u64,
     /// "log" | "info" | "warn" | "error" | "debug".
     pub level: String,
     pub text: String,
@@ -366,7 +366,7 @@ impl App {
         let seq = self.console_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let entry = ConsoleEntry {
             seq,
-            gen: self.console_gen.load(Ordering::Relaxed),
+            page_load: self.console_gen.load(Ordering::Relaxed),
             level: level.to_string(),
             // A single runaway line shouldn't be able to pin megabytes.
             text: text.chars().take(8000).collect(),
@@ -387,7 +387,7 @@ impl App {
         let buf = lock(&self.console);
         let mut rows: Vec<&ConsoleEntry> = buf
             .iter()
-            .filter(|e| !only_latest || e.gen == latest_gen)
+            .filter(|e| !only_latest || e.page_load == latest_gen)
             .filter(|e| !only_errors || e.level == "error" || e.level == "warn")
             .collect();
         let total = rows.len();
@@ -397,7 +397,7 @@ impl App {
         let max_seq = buf.iter().map(|e| e.seq).max().unwrap_or(0);
         let entries: Vec<Value> = rows
             .iter()
-            .map(|e| json!({"level": e.level, "text": e.text, "gen": e.gen, "ts": e.ts}))
+            .map(|e| json!({"level": e.level, "text": e.text, "gen": e.page_load, "ts": e.ts}))
             .collect();
         drop(buf);
         // Ack up to the newest line that EXISTS (not just what we returned), so
@@ -847,7 +847,9 @@ impl App {
         };
         let before = app_conns();
         if before.is_empty() {
-            anyhow::bail!("no app page is connected, so there is nothing to reload (is the app open in a shell?)");
+            anyhow::bail!(
+                "no app page is connected, so there is nothing to reload (is the app open in a shell?)"
+            );
         }
         self.notify("reload", json!({}));
         let start = crate::store::now_ms();
@@ -890,7 +892,9 @@ fn sleep_ms(ms: u64) -> anyhow::Result<()> {
         if crate::wasm::sleep_ms(ms) {
             Ok(())
         } else {
-            anyhow::bail!("page bridge unavailable (the page is not cross-origin isolated — run_js, app actions and reload waits need COOP/COEP headers)")
+            anyhow::bail!(
+                "page bridge unavailable (the page is not cross-origin isolated — run_js, app actions and reload waits need COOP/COEP headers)"
+            )
         }
     }
 }

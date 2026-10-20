@@ -1,17 +1,17 @@
 //! OpenAI chat/completions: OpenRouter, local servers, and any other
 //! OpenAI-compatible endpoint.
 
-use anyhow::{anyhow, bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::app::App;
 
 use super::{
-    ai_timeout, open_stream, post_json, read_sse, retryable, tool_input, transient_kind, Live,
-    Reply, Request, Usage,
+    Live, Reply, Request, Usage, ai_timeout, open_stream, post_json, read_sse, retryable,
+    tool_input, transient_kind,
 };
-use crate::ai::{default_max_tokens, AiConfig};
+use crate::ai::{AiConfig, default_max_tokens};
 
 const OPENROUTER_MODEL: &str = "anthropic/claude-opus-5.5";
 
@@ -94,10 +94,10 @@ pub(crate) fn read_stream(
             p.model = m.to_string();
         }
         read_usage(&ev["usage"], &mut p.usage);
-        if let Some(f) = ev["choices"][0]["finish_reason"].as_str() {
-            if !f.is_empty() {
-                p.finish = f.to_string();
-            }
+        if let Some(f) = ev["choices"][0]["finish_reason"].as_str()
+            && !f.is_empty()
+        {
+            p.finish = f.to_string();
         }
         let delta = &ev["choices"][0]["delta"];
         // Thinking models (Qwen3, DeepSeek-R1, GLM) stream reasoning in a
@@ -106,30 +106,30 @@ pub(crate) fn read_stream(
         // think looks like a stalled connection, and a turn that spends its
         // whole budget reasoning would come back as a bare "empty response".
         for key in ["reasoning_content", "reasoning"] {
-            if let Some(r) = delta[key].as_str() {
-                if !r.is_empty() {
-                    live.thinking(r.len(), false);
-                }
+            if let Some(r) = delta[key].as_str()
+                && !r.is_empty()
+            {
+                live.thinking(r.len(), false);
             }
         }
-        if let Some(t) = delta["content"].as_str() {
-            if !t.is_empty() {
-                text.push_str(t);
-                live.text(t);
-            }
+        if let Some(t) = delta["content"].as_str()
+            && !t.is_empty()
+        {
+            text.push_str(t);
+            live.text(t);
         }
         for tc in delta["tool_calls"].as_array().cloned().unwrap_or_default() {
             let idx = tc["index"].as_u64().unwrap_or(0);
             let call = calls.entry(idx).or_default();
-            if let Some(id) = tc["id"].as_str() {
-                if !id.is_empty() {
-                    call.id = id.to_string();
-                }
+            if let Some(id) = tc["id"].as_str()
+                && !id.is_empty()
+            {
+                call.id = id.to_string();
             }
-            if let Some(n) = tc["function"]["name"].as_str() {
-                if !n.is_empty() {
-                    call.name = n.to_string();
-                }
+            if let Some(n) = tc["function"]["name"].as_str()
+                && !n.is_empty()
+            {
+                call.name = n.to_string();
             }
             if let Some(a) = tc["function"]["arguments"].as_str() {
                 call.args.push_str(a);
@@ -177,10 +177,10 @@ pub(crate) fn parse_response(resp: &Value) -> Result<Parsed> {
         ..Default::default()
     };
     read_usage(&resp["usage"], &mut p.usage);
-    if let Some(t) = m["content"].as_str() {
-        if !t.is_empty() {
-            p.blocks.push(json!({"type": "text", "text": t}));
-        }
+    if let Some(t) = m["content"].as_str()
+        && !t.is_empty()
+    {
+        p.blocks.push(json!({"type": "text", "text": t}));
     }
     for tc in m["tool_calls"].as_array().cloned().unwrap_or_default() {
         let args = tool_input(tc["function"]["arguments"].as_str().unwrap_or(""));

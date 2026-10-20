@@ -22,12 +22,12 @@
 //! The token (`--token` / `UAPP_TOKEN`) arrives as `Authorization: Bearer` or
 //! `?t=`. Reads are anonymous: a library is a public shelf.
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path as AxPath, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,11 +88,7 @@ impl axum::extract::FromRequestParts<Arc<Library>> for Owner {
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(|t| crate::secrets::token_eq(t.trim(), &lib.token))
             .unwrap_or(false);
-        if bearer {
-            Ok(Owner)
-        } else {
-            Err(deny())
-        }
+        if bearer { Ok(Owner) } else { Err(deny()) }
     }
 }
 

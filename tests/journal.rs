@@ -20,7 +20,8 @@ fn hot_journal_rolls_back_on_open() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     // Keep the registry and snapshots out of the real per-user data dir.
-    std::env::set_var("XDG_DATA_HOME", root.join("data"));
+    // SAFETY: runs first thing in the test, before it starts any threads.
+    unsafe { std::env::set_var("XDG_DATA_HOME", root.join("data")) };
     let path = root.join("app.uapp");
     let journal = store::journal_path(&path);
     assert!(journal.to_string_lossy().ends_with("app.uapp-journal"));
