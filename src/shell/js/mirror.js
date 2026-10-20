@@ -54,6 +54,9 @@ async function flush() {
     const r = await fetch("/download.uapp");
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const bytes = new Uint8Array(await r.arrayBuffer());
+    // An empty or stub body must never reach the original (the native side
+    // checks the file shape too).
+    if (bytes.length < 512) throw new Error(`export was only ${bytes.length} bytes`);
     bridge().writeLinked(appPath, bytesToB64(bytes));
   } catch (e) {
     console.warn("uapp: write-back to the original file failed:", e);

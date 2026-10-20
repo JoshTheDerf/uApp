@@ -664,13 +664,19 @@ fn resolve_app_path(mobile_data: Option<&std::path::Path>) -> (std::path::PathBu
             let docs = data_root.join("UApp");
             let _ = std::fs::create_dir_all(&docs);
             let dest = docs.join(&name);
-            if std::fs::rename(&pending, &dest).is_err() {
-                if std::fs::copy(&pending, &dest).is_ok() {
+            let _ = std::fs::remove_file(dir.join("pending_open.name"));
+            match import_pending(&pending, &dest) {
+                Ok(()) => return (dest, false),
+                Err(e) => {
+                    // The working copy (if any) is untouched; open it, or
+                    // fall through to the default document.
+                    eprintln!("uapp: not importing {name}: {e:#}");
                     let _ = std::fs::remove_file(&pending);
+                    if dest.exists() {
+                        return (dest, false);
+                    }
                 }
             }
-            let _ = std::fs::remove_file(dir.join("pending_open.name"));
-            return (dest, false);
         }
         }
     }
@@ -685,4 +691,57 @@ fn resolve_app_path(mobile_data: Option<&std::path::Path>) -> (std::path::PathBu
         .join("UApp");
     let _ = std::fs::create_dir_all(&dir);
     (dir.join("My App.uapp"), true)
+}
+
+/// How many replaced working copies to keep per document name.
+#[cfg(mobile)]
+const REPLACED_KEEP: usize = 3;
+
+/// Move a staged "open with" document over its working copy. Refuses an
+/// empty or cut-off file (that is how a good working copy used to get
+/// replaced by zero bytes), does nothing when the content is identical, and
+/// otherwise keeps the previous working copy under `UApp/.replaced/` first:
+/// re-opening an older original must not silently discard newer edits.
+#[cfg(mobile)]
+fn import_pending(pending: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<()> {
+    crate::store::check_whole_file(pending)?;
+    if dest.exists() {
+        if std::fs::read(pending)? == std::fs::read(dest)? {
+            std::fs::remove_file(pending)?;
+            return Ok(());
+        }
+        let docs = dest.parent().unwrap_or(std::path::Path::new("."));
+        let keep = docs.join(".replaced");
+        std::fs::create_dir_all(&keep)?;
+        let stem = dest.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let backup = keep.join(format!("{stem}-{}.uapp", crate::store::now_ms()));
+        std::fs::rename(dest, &backup)?;
+        // Rolling retention, per document name (now_ms sorts lexically).
+        let prefix = format!("{stem}-");
+        let mut old: Vec<_> = std::fs::read_dir(&keep)?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n.strip_prefix(&prefix)
+                        .and_then(|rest| rest.strip_suffix(".uapp"))
+                        .is_some_and(|ts| ts.chars().all(|c| c.is_ascii_digit()))
+                })
+            })
+            .collect();
+        old.sort();
+        while old.len() > REPLACED_KEEP {
+            let _ = std::fs::remove_file(old.remove(0));
+        }
+    }
+    if std::fs::rename(pending, dest).is_err() {
+        // Different filesystem: copy beside the destination, then rename, so
+        // a cut-off copy never sits at the working path.
+        let tmp = dest.with_extension("uapp.part");
+        std::fs::copy(pending, &tmp)?;
+        std::fs::File::open(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, dest)?;
+        let _ = std::fs::remove_file(pending);
+    }
+    Ok(())
 }

@@ -116,6 +116,20 @@ impl Engine {
         passphrase: Option<String>,
     ) -> Result<Engine> {
         let lock = registry::lock_exclusive(&path)?;
+        // A file we have served before that is now zero bytes was emptied by
+        // something outside us (an interrupted copy or sync, a provider
+        // write-back cut short). Opening it would quietly start a blank app,
+        // and on Android the write-back mirror would then copy that blank
+        // app over the user's original. Treat it as damage instead.
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() == 0)
+            && registry::known_encrypted(&path).is_some()
+            && Self::restore_newest_snapshot(&path).is_none()
+        {
+            eprintln!(
+                "uapp: {} is empty and has no snapshot to restore — opening it as a new app",
+                path.display()
+            );
+        }
         let db = match Self::open_db(&path, passphrase.as_deref()) {
             Ok(db) => db,
             Err(first_err) => {
@@ -140,10 +154,7 @@ impl Engine {
         };
         let crypt = passphrase.map(|passphrase| crate::cipher::Key { passphrase });
         let app_id = store::meta_get(&db, "app_id")?.unwrap_or_else(|| "unknown".into());
-        let local_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("uapp")
-            .join(&app_id);
+        let local_dir = registry::local_root().join(&app_id);
         std::fs::create_dir_all(local_dir.join("snapshots"))?;
         registry::write_app_map(&path, &app_id, crypt.is_some());
 

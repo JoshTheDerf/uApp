@@ -92,7 +92,11 @@ class MainActivity : TauriActivity() {
       val relaunch = Intent(this, MainActivity::class.java)
       relaunch.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
       startActivity(relaunch)
-      Runtime.getRuntime().exit(0)
+      // onPause (which always precedes onNewIntent) may have started a
+      // write-back to the linked original. Exiting in the middle of it is how
+      // originals got cut off, so wait for it, and exit holding the lock so
+      // no new one can start.
+      synchronized(fileLock) { Runtime.getRuntime().exit(0) }
     }
   }
 
@@ -366,10 +370,25 @@ class MainActivity : TauriActivity() {
         .joinToString("").trim('.').trim()
       if (name.isEmpty()) name = "Shared App"
       if (!name.endsWith(".uapp")) name = "$name.uapp"
-      contentResolver.openInputStream(uri)!!.use { input ->
-        File(markerDir, PENDING_DOC).outputStream().use { input.copyTo(it) }
+      // Copy into a .part file and check it before it can replace anything:
+      // a provider can hand over zero bytes, and a copy can be cut off. The
+      // Rust side checks again, but a bad file should never be staged at all.
+      // Under fileLock, so a write-back to this same document can't be
+      // halfway through while we read it.
+      val part = File(markerDir, "$PENDING_DOC.part")
+      synchronized(fileLock) {
+        java.io.FileOutputStream(part).use { out ->
+          contentResolver.openInputStream(uri)!!.use { it.copyTo(out) }
+          out.fd.sync()
+        }
+      }
+      wholeUappProblem(part)?.let { problem ->
+        part.delete()
+        Toast.makeText(this, "Could not open $name: $problem", Toast.LENGTH_LONG).show()
+        return false
       }
       File(markerDir, PENDING_NAME).writeText(name)
+      if (!part.renameTo(File(markerDir, PENDING_DOC))) throw Exception("could not stage the file")
       // Keep write access to the tapped original when the grant allows it,
       // so changes mirror back without the manual Settings → Link step.
       val dest = File(File(markerDir, "UApp"), name).absolutePath
@@ -544,22 +563,11 @@ class MainActivity : TauriActivity() {
       val uri = linkedUri(path) ?: return
       try {
         val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
-        if (uri.scheme == "file") {
-          // Raw path via all-files access: write a sibling temp file and
-          // rename over the original, so a mid-write crash can't leave a
-          // truncated document.
-          val f = File(uri.path!!)
-          val tmp = File(f.parentFile, f.name + ".uapp-tmp")
-          tmp.writeBytes(bytes)
-          if (!tmp.renameTo(f)) { f.writeBytes(bytes); tmp.delete() }
-          return
+        // Never write something that isn't a whole .uapp over the original.
+        wholeUappProblem(bytes.copyOf(minOf(bytes.size, 100)), bytes.size.toLong())?.let {
+          throw Exception(it)
         }
-        // "wt" truncates; some providers only accept "rwt" (and plain "w"
-        // famously may NOT truncate, leaving trailing garbage — never use it).
-        val out = try { contentResolver.openOutputStream(uri, "wt") } catch (e: Exception) { null }
-          ?: contentResolver.openOutputStream(uri, "rwt")
-          ?: throw Exception("provider refused to open the file")
-        out.use { it.write(bytes) }
+        synchronized(fileLock) { writeOriginal(uri, bytes) }
       } catch (e: SecurityException) {
         mirrorPrefs.edit().remove(path).apply()
         sessionMirror.remove(path)
@@ -612,6 +620,77 @@ class MainActivity : TauriActivity() {
     }
   }
 
+  /// Replace the linked original's content with `bytes`, keeping the window
+  /// in which a kill leaves it damaged as small as the provider allows.
+  /// Callers hold fileLock.
+  private fun writeOriginal(uri: Uri, bytes: ByteArray) {
+    if (uri.scheme == "file") {
+      // Raw path via all-files access: write a synced sibling temp file and
+      // rename it over the original, so the original is never partial.
+      val f = File(uri.path!!)
+      val tmp = File(f.parentFile, f.name + ".uapp-tmp")
+      java.io.FileOutputStream(tmp).use { it.write(bytes); it.fd.sync() }
+      if (!tmp.renameTo(f)) { tmp.delete(); throw Exception("could not replace ${f.name}") }
+      return
+    }
+    // SAF has no atomic replace. "wt" truncates to zero the moment it opens,
+    // so a kill before the write lands leaves an EMPTY original. Prefer "rw":
+    // overwrite in place, sync, then cut off whatever is left of a longer
+    // old file. A kill midway leaves old and new pages mixed but never an
+    // empty file, and the working copy stays whole either way.
+    val pfd = try { contentResolver.openFileDescriptor(uri, "rw") } catch (e: Exception) { null }
+    if (pfd != null) {
+      android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd).use { out ->
+        out.write(bytes)
+        out.channel.truncate(bytes.size.toLong())
+        // Some providers hand out descriptors that can't be synced; the
+        // write itself has still landed.
+        try { out.fd.sync() } catch (e: java.io.SyncFailedException) { }
+      }
+      return
+    }
+    // Providers that only stream (no seekable descriptor). "wt" truncates;
+    // some only accept "rwt" (plain "w" may NOT truncate, leaving trailing
+    // garbage, so never use it).
+    val out = try { contentResolver.openOutputStream(uri, "wt") } catch (e: Exception) { null }
+      ?: contentResolver.openOutputStream(uri, "rwt")
+      ?: throw Exception("provider refused to open the file")
+    out.use { it.write(bytes) }
+  }
+
+  /// Why `f` is not a whole .uapp, or null if it looks whole. Mirrors
+  /// store::check_whole_bytes on the Rust side.
+  private fun wholeUappProblem(f: File): String? {
+    val len = f.length()
+    if (len == 0L) return "the file is empty"
+    val head = ByteArray(100)
+    val n = f.inputStream().use { it.read(head) }.coerceAtLeast(0)
+    return wholeUappProblem(head.copyOf(n), len)
+  }
+
+  private fun wholeUappProblem(head: ByteArray, len: Long): String? {
+    if (len == 0L) return "the file is empty"
+    if (head.size >= 100 && String(head, 0, 15, Charsets.US_ASCII) == "SQLite format 3") {
+      fun be32(i: Int): Long =
+        ((head[i].toLong() and 0xff) shl 24) or ((head[i + 1].toLong() and 0xff) shl 16) or
+          ((head[i + 2].toLong() and 0xff) shl 8) or (head[i + 3].toLong() and 0xff)
+      val raw = ((head[16].toInt() and 0xff) shl 8) or (head[17].toInt() and 0xff)
+      val page = if (raw == 1) 65536L else raw.toLong()
+      if (page < 512 || page > 65536 || (page and (page - 1)) != 0L) return "the file has a damaged header"
+      // The in-header page count is only valid when the change counter
+      // matches version-valid-for.
+      val pages = be32(28)
+      if (pages > 0 && be32(24) == be32(92) && len < pages * page) {
+        return "the file is cut off ($len of ${pages * page} bytes)"
+      }
+      if (len < page) return "the file is cut off ($len bytes)"
+      return null
+    }
+    // Encrypted: no readable header, so only whole pages can be checked.
+    if (len < 1024 || len % 512 != 0L) return "the file is not a whole .uapp ($len bytes)"
+    return null
+  }
+
   // Launched from a pinned shortcut: write the target .uapp path to a marker
   // the Rust core checks at startup (see resolve_app_path in gui.rs). Returns
   // true if a shortcut was staged (caller may restart the process).
@@ -637,6 +716,10 @@ class MainActivity : TauriActivity() {
     // Transient auto-links (write grant valid only while this process lives);
     // process-static so an activity recreation doesn't lose them.
     private val sessionMirror = HashMap<String, String>()
+    // Held while a linked original is being written or an incoming document
+    // copied, and by the relaunch exit, so a process exit can never cut a
+    // write short.
+    private val fileLock = Any()
     private const val PENDING_DOC = "pending_open.uapp"
     private const val PENDING_NAME = "pending_open.name"
     private const val EXTRA_SHORTCUT_PATH = "uapp.shortcut_path"

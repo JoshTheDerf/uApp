@@ -21,11 +21,21 @@ use fs2::FileExt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-fn dir() -> PathBuf {
+/// Root of uapp's per-user local state (`<data_local>/uapp`): the servers
+/// registry and each app's snapshots. Mobile has no data_local dir (the
+/// `dirs` crate returns None on Android/iOS), so fall back to the working
+/// directory, which the GUI anchors in the app's private data dir. Writers and
+/// readers must both go through here, or snapshots get written somewhere a
+/// later open never looks.
+pub fn local_root() -> PathBuf {
     dirs::data_local_dir()
+        .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
         .join("uapp")
-        .join("servers")
+}
+
+fn dir() -> PathBuf {
+    local_root().join("servers")
 }
 
 /// Stable key for a path: FNV-1a 64 over the canonicalized path string. The
@@ -129,6 +139,6 @@ pub fn known_encrypted(path: &Path) -> Option<bool> {
 /// path, when we've served it before and the dir still exists.
 pub fn known_local_dir(path: &Path) -> Option<PathBuf> {
     let (app_id, _) = read_app_map(path)?;
-    let d = dirs::data_local_dir()?.join("uapp").join(app_id);
+    let d = local_root().join(app_id);
     d.is_dir().then_some(d)
 }

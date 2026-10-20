@@ -548,6 +548,55 @@ pub fn looks_like_sqlite(path: &Path) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Is this file plausibly a WHOLE .uapp, as opposed to an empty or cut-off
+/// copy? Used before an incoming file is allowed to replace a working copy
+/// (Android "open with", where a provider or an interrupted copy can hand us
+/// zero bytes). A plain file must hold at least the pages its header claims;
+/// an encrypted one has no readable header, so it only has to be a non-empty
+/// run of whole pages.
+pub fn check_whole_file(path: &Path) -> Result<()> {
+    use std::io::Read as _;
+    let len = std::fs::metadata(path)?.len();
+    if len == 0 {
+        bail!("{} is empty", path.display());
+    }
+    let mut head = [0u8; 100];
+    let n = std::fs::File::open(path)?.read(&mut head)?;
+    check_whole_bytes(&head[..n], len).map_err(|e| anyhow!("{}: {e}", path.display()))
+}
+
+/// [`check_whole_file`] over the first (up to) 100 bytes and the total length.
+pub fn check_whole_bytes(head: &[u8], len: u64) -> Result<()> {
+    if len == 0 {
+        bail!("the file is empty");
+    }
+    if head.len() >= 100 && &head[..15] == b"SQLite format 3" {
+        let be32 = |i: usize| u32::from_be_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]);
+        let page = match u16::from_be_bytes([head[16], head[17]]) {
+            1 => 65536u64,
+            p => p as u64,
+        };
+        if !(512..=65536).contains(&page) || !page.is_power_of_two() {
+            bail!("the file has a damaged header");
+        }
+        // The in-header page count is only valid when the change counter
+        // matches version-valid-for (SQLite file format, section 1.3.7).
+        let pages = be32(28) as u64;
+        if pages > 0 && be32(24) == be32(92) && len < pages * page {
+            bail!("the file is cut off ({len} of {} bytes)", pages * page);
+        }
+        if len < page {
+            bail!("the file is cut off ({len} bytes)");
+        }
+        return Ok(());
+    }
+    if len < 1024 || len % 512 != 0 {
+        bail!("the file is not a whole .uapp ({len} bytes)");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 /// A non-empty file that isn't plain SQLite: an encrypted .uapp (SQLCipher) that
 /// needs a master password before it can be opened. Used to decide whether to
 /// show the unlock prompt.
@@ -1159,4 +1208,55 @@ pub fn add_app_approval(conn: &Connection, app_id: &str, tool: &str) -> Result<(
         rusqlite::params![key, value],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 100-byte plain-SQLite header claiming `pages` pages of `page` bytes.
+    fn header(page: u16, pages: u32) -> Vec<u8> {
+        let mut h = vec![0u8; 100];
+        h[..16].copy_from_slice(b"SQLite format 3\0");
+        h[16..18].copy_from_slice(&page.to_be_bytes());
+        h[24..28].copy_from_slice(&7u32.to_be_bytes()); // change counter
+        h[28..32].copy_from_slice(&pages.to_be_bytes());
+        h[92..96].copy_from_slice(&7u32.to_be_bytes()); // version-valid-for
+        h
+    }
+
+    #[test]
+    fn whole_file_check() {
+        assert!(check_whole_bytes(&[], 0).is_err(), "empty");
+        assert!(check_whole_bytes(&header(4096, 3), 3 * 4096).is_ok());
+        assert!(check_whole_bytes(&header(4096, 3), 3 * 4096 + 10).is_ok(), "trailing bytes are harmless");
+        assert!(check_whole_bytes(&header(4096, 3), 2 * 4096).is_err(), "cut off");
+        assert!(check_whole_bytes(&header(4096, 0), 100).is_err(), "less than one page");
+        assert!(check_whole_bytes(&header(1000, 1), 4096).is_err(), "bad page size");
+        // Stale in-header count (counter != valid-for): only the page floor applies.
+        let mut stale = header(4096, 9);
+        stale[92] = 1;
+        assert!(check_whole_bytes(&stale, 4096).is_ok());
+        // Encrypted: whole pages only.
+        let enc = [0x5au8; 100];
+        assert!(check_whole_bytes(&enc, 8192).is_ok());
+        assert!(check_whole_bytes(&enc, 8000).is_err());
+        assert!(check_whole_bytes(&enc[..10], 512).is_err());
+    }
+
+    #[test]
+    fn whole_file_check_real_file() {
+        let dir = std::env::temp_dir().join(format!("uapp-whole-{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.uapp");
+        bootstrap(&p, "a", None).unwrap();
+        assert!(check_whole_file(&p).is_ok());
+        let len = std::fs::metadata(&p).unwrap().len();
+        let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_len(len / 2).unwrap();
+        assert!(check_whole_file(&p).is_err(), "half a file");
+        f.set_len(0).unwrap();
+        assert!(check_whole_file(&p).is_err(), "zero bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
