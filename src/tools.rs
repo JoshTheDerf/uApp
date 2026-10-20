@@ -165,6 +165,23 @@ pub fn registry() -> Vec<ToolDef> {
             schema: || obj(json!({}), &[]),
             run: |app, _input| app.invoke_reload(),
         },
+        // The way to reach actions the page registered after the run's tool
+        // list was fixed (see ai/toolset.rs). Gated like the action itself:
+        // the loop gates on the action's own readonly flag.
+        ToolDef {
+            name: "call_action",
+            description: "Call one of the app's actions (registered with uapp.action) by name. Use it for actions that aren't in your tool list as app__<name>, such as ones you just added (reload_app first). Called with an empty or unknown action name, it returns the registered actions and their parameters.",
+            gated: true,
+            schema: || obj(json!({
+                "action": {"type": "string", "description": "the action's name, as passed to uapp.action"},
+                "input": {"type": "object", "description": "the action's parameters"}
+            }), &["action"]),
+            run: |app, input| crate::ai::run_tool(
+                app,
+                &format!("app__{}", input["action"].as_str().unwrap_or("")),
+                input.get("input").filter(|v| !v.is_null()).unwrap_or(&json!({})),
+            ),
+        },
         ToolDef {
             name: "read_console",
             description: "Read recent console output and uncaught errors (with stack traces) from the LIVE app page — the app's real runtime logs, not just code you ran via run_js. Use this to debug: after reload_app (the page may throw on load) or after a run_js that drives the UI, and whenever a turn ends with a '[console] …' alert. Defaults to the latest page load only (so stale pre-edit errors don't show); set only_latest=false for older lines, only_errors=true for just errors/warnings.",
@@ -385,10 +402,7 @@ pub fn is_gated(app: &Arc<App>, name: &str) -> bool {
         return true;
     }
     if let Some(action) = name.strip_prefix("app__") {
-        return app
-            .actions
-            .lock()
-            .unwrap()
+        return crate::app::lock(&app.actions)
             .get(action)
             .map(|a| !a.readonly)
             .unwrap_or(true);

@@ -11,9 +11,9 @@ use crate::store;
 use super::approval::approval_gate;
 use super::compact::auto_compact;
 use super::history::{build_messages, Budget};
-use super::prompt::system_prompt;
+use super::prompt::{app_snapshot, system_prompt};
 use super::providers::{call_provider_retrying, is_stopped, Request, Usage};
-use super::toolset::{app_action_tools, builtin_tools, mcp_tools, run_tool};
+use super::toolset::{action_list, run_target, toolset_key, unwrap_call_action, Target, Toolset};
 use super::{
     compact_bytes, load_config, plan_mode, CtxGuard, RunCtx, MAX_ITERATIONS, TOOL_RESULT_LIMIT,
 };
@@ -29,6 +29,60 @@ pub fn run(app: &Arc<App>, ctx: &RunCtx) -> Result<()> {
     run_loop(app, ctx, MAX_ITERATIONS).map(|_| ())
 }
 
+/// What a run fixes at its start and keeps for every step: the system
+/// prompt and the tool list (see toolset.rs for why). Rebuilt only when
+/// plan mode, the MCP servers or the disabled tools change mid-run, which
+/// are explicit choices.
+struct Frozen {
+    system: String,
+    toolset: Toolset,
+    plan: bool,
+}
+
+impl Frozen {
+    fn build(app: &Arc<App>, ctx: &RunCtx, plan: bool) -> Frozen {
+        Frozen {
+            system: system_prompt(app, ctx, plan),
+            toolset: Toolset::freeze(app, ctx, plan),
+            plan,
+        }
+    }
+    fn refresh(&mut self, app: &Arc<App>, ctx: &RunCtx, plan: bool) {
+        if plan != self.plan || toolset_key(app, plan) != self.toolset.key {
+            *self = Frozen::build(app, ctx, plan);
+        }
+    }
+}
+
+/// Append the app snapshot to the session when it differs from the newest
+/// one there. Each one stays where it was written, so earlier requests
+/// remain a prefix of later ones.
+fn deliver_snapshot(app: &Arc<App>, session: &str) -> Result<()> {
+    let snapshot = app_snapshot(app);
+    let last = {
+        let eng = app.eng();
+        store::query(
+            &eng.db,
+            "SELECT content FROM uapp_chat WHERE COALESCE(session,'main') = ?1 \
+             AND role = 'context' ORDER BY id DESC LIMIT 1",
+            &[json!(session)],
+        )?["rows"][0][0]
+            .as_str()
+            .and_then(|c| serde_json::from_str::<Value>(c).ok())
+            .and_then(|c| c["text"].as_str().map(String::from))
+    };
+    if last.as_deref() == Some(snapshot.as_str()) {
+        return Ok(());
+    }
+    rpc::local_op(
+        app,
+        "chat",
+        json!({"mid": format!("c-{}-{}", crate::store::now_ms(), fastrand::u32(..)),
+               "role": "context", "session": session, "content": {"text": snapshot}}),
+    )?;
+    Ok(())
+}
+
 pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result<Outcome> {
     let _guard = CtxGuard::enter(ctx);
     let cfg = load_config(app)?;
@@ -36,13 +90,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
     // context window is far smaller than a cloud model's, so it gets a tighter
     // one.
     let cap = compact_bytes(&cfg);
-    // Builtins are stable for the run. MCP tools are re-listed whenever the
-    // mcp config changes (the model can add servers mid-run with
-    // add_mcp_server). App actions are re-read each iteration because the
-    // page re-registers them after every reload.
-    let builtins = builtin_tools(app, ctx);
-    let mut mcp_snapshot = String::new();
-    let mut mcp_cached: Vec<Value> = Vec::new();
+    let mut frozen = Frozen::build(app, ctx, plan_mode(app));
     let mut steps = 0usize;
     let mut report = String::new();
 
@@ -54,15 +102,8 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         // the history by tens of KB per step and would otherwise sail past the
         // model's context window mid-run.
         auto_compact(app, ctx, cap);
-        let system = system_prompt(app, ctx); // refreshed: schema/files change as we work
-        let mcp_now = serde_json::to_string(&rpc::mcp_servers_enabled(app)).unwrap_or_default();
-        if mcp_now != mcp_snapshot {
-            mcp_cached = mcp_tools(app);
-            mcp_snapshot = mcp_now;
-        }
-        let mut tools = builtins.clone();
-        tools.extend(mcp_cached.clone());
-        tools.extend(app_action_tools(app));
+        frozen.refresh(app, ctx, plan_mode(app));
+        deliver_snapshot(app, &ctx.session)?;
         // Captured BEFORE building: any user row landing after this id was not
         // part of this turn's context and still needs an answer.
         let seen_id = last_chat_id(app, &ctx.session);
@@ -73,9 +114,9 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         let stop = || ctx.stopped();
         let req = Request {
             session: &ctx.session,
-            system: &system,
+            system: &frozen.system,
             msgs: &msgs,
-            tools: &tools,
+            tools: &frozen.toolset.tools,
             stop: &stop,
         };
         let reply = match call_provider_retrying(app, ctx, &cfg, &req) {
@@ -123,73 +164,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         }
         let mut results = Vec::new();
         for tu in &tool_uses {
-            if ctx.stopped() {
-                results.push(json!({"id": tu["id"], "name": tu["name"],
-                    "content": "(stopped by user)", "is_error": true}));
-                continue;
-            }
-            let name = tu["name"].as_str().unwrap_or("");
-            let id = tu["id"].as_str().unwrap_or("");
-            // Plan mode backstop: write tools are absent from the offered
-            // toolset, but a hallucinated call must not execute either.
-            if plan_mode(app)
-                && (crate::tools::is_gated(app, name) || crate::tools::is_agent_tool(name))
-            {
-                results.push(json!({"id": tu["id"], "name": tu["name"],
-                    "content": "Plan mode is read-only — this tool is unavailable. \
-                                Propose the change; the user will switch modes to apply it.",
-                    "is_error": true}));
-                continue;
-            }
-            let forced = crate::tools::forced_gate(name, &tu["input"]);
-            if !approval_gate(app, ctx, id, name, &tu["input"], &forced) {
-                // Denied: a normal (non-crashing) result the model can adapt to.
-                results.push(json!({"id": tu["id"], "name": tu["name"],
-                    "content": format!("The user denied permission to run {name}."),
-                    "is_error": true, "denied": true}));
-                continue;
-            }
-            app.notify(
-                "ai",
-                json!({"state": "tool", "tool": name, "session": ctx.session}),
-            );
-            let mut input = tu["input"].clone();
-            if forced.is_some() {
-                // Marks the user's approval for the RPC layer; stripped from
-                // anything arriving over the wire, so only this path sets it.
-                input["_user_approved"] = json!(true);
-            }
-            let r = if let Some(bad) = input["_invalid"].as_str() {
-                Err(anyhow!(
-                    "the arguments of this tool call did not arrive as valid JSON (the response was \
-                     probably cut off) — the tool did NOT run. Send the call again. Received: {}",
-                    bad.chars().take(200).collect::<String>()
-                ))
-            } else {
-                run_tool(app, name, &input)
-            };
-            let (mut content, is_error) = match r {
-                Ok(v) => (v.to_string(), false),
-                // A schema-shaped failure (bad/missing params) is fed back WITH
-                // the tool's schema so the model can repair the call itself
-                // instead of guessing the same shape again.
-                Err(e) => (format!("Error: {e}{}", schema_hint(name, &e)), true),
-            };
-            // Cap results AND errors: an MCP server's error text can be
-            // arbitrarily large and would otherwise ride along in every later
-            // request of the conversation.
-            if content.len() > TOOL_RESULT_LIMIT {
-                let was = content.len();
-                // char-boundary-safe: a plain truncate panics mid-UTF-8
-                crate::rpc::truncate_utf8(&mut content, TOOL_RESULT_LIMIT);
-                content.push_str(&format!(
-                    "…(truncated — output was {}KB. Re-run with narrower parameters \
-                     (LIMIT, column lists, byte/row ranges) rather than requesting it all.)",
-                    was.div_ceil(1024)
-                ));
-            }
-            results.push(json!({"id": tu["id"], "name": tu["name"],
-                "content": content, "is_error": is_error}));
+            results.push(run_call(app, ctx, &frozen.toolset, tu));
         }
         // Auto-surface (but don't dump): if the live app has logged new
         // errors/warnings since the AI last looked — e.g. the edit just made
@@ -202,15 +177,122 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
                 }
             }
         }
-        let mid = format!("t-{}-{}", crate::store::now_ms(), fastrand::u32(..));
+        // The results say what ran, so they are kept after a Stop too, unless
+        // the chat itself is gone (sessions.delete stops the run first).
+        if ctx.stopped() && !row_exists(app, &mid) {
+            break;
+        }
+        let tmid = format!("t-{}-{}", crate::store::now_ms(), fastrand::u32(..));
         rpc::local_op(
             app,
             "chat",
-            json!({"mid": mid, "role": "tool", "session": ctx.session,
+            json!({"mid": tmid, "role": "tool", "session": ctx.session,
                    "content": {"results": results}}),
         )?;
     }
     Ok(Outcome { steps, report })
+}
+
+/// Does this chat row still exist?
+fn row_exists(app: &Arc<App>, mid: &str) -> bool {
+    let eng = app.eng();
+    store::query(
+        &eng.db,
+        "SELECT count(*) FROM uapp_chat WHERE mid = ?1",
+        &[json!(mid)],
+    )
+    .map(|r| r["rows"][0][0].as_i64().unwrap_or(0) > 0)
+    .unwrap_or(false)
+}
+
+/// Run one tool call the model made, through plan mode, the disabled list
+/// and the approval gate, and shape its result.
+fn run_call(app: &Arc<App>, ctx: &RunCtx, toolset: &Toolset, tu: &Value) -> Value {
+    let fail = |content: String| json!({"id": tu["id"], "name": tu["name"], "content": content, "is_error": true});
+    if ctx.stopped() {
+        return fail("(stopped by user)".into());
+    }
+    let called = tu["name"].as_str().unwrap_or("");
+    let id = tu["id"].as_str().unwrap_or("");
+    let (target, mut input) = match toolset.resolve(app, called) {
+        Ok(t) => unwrap_call_action(t, &tu["input"]),
+        Err(e) => return fail(format!("Error: {e}")),
+    };
+    let name = target.raw_name();
+    if crate::tools::disabled_set(app).contains(&name) {
+        return fail(format!(
+            "Error: {name} is switched off in this app's tool settings"
+        ));
+    }
+    // A registered action decides whether it's gated (its readonly flag), so
+    // let one the page is still registering after a reload arrive first.
+    if let Target::App(action) = &target {
+        if !action.is_empty() && app.wait_for_action(action).is_err() {
+            return fail(format!(
+                "Error: no app action named '{action}' is registered. Registered actions: {}",
+                action_list(app)
+            ));
+        }
+    }
+    // Plan mode backstop: write tools are absent from the offered toolset,
+    // but a hallucinated call must not execute either.
+    if plan_mode(app)
+        && (matches!(target, Target::Mcp { .. })
+            || crate::tools::is_gated(app, &name)
+            || crate::tools::is_agent_tool(&name))
+    {
+        return fail(
+            "Plan mode is read-only — this tool is unavailable. \
+             Propose the change; the user will switch modes to apply it."
+                .into(),
+        );
+    }
+    let forced = crate::tools::forced_gate(&name, &input);
+    if !approval_gate(app, ctx, id, &name, &input, &forced) {
+        // Denied: a normal (non-crashing) result the model can adapt to.
+        let mut r = fail(format!("The user denied permission to run {name}."));
+        r["denied"] = json!(true);
+        return r;
+    }
+    app.notify(
+        "ai",
+        json!({"state": "tool", "tool": name, "session": ctx.session}),
+    );
+    if forced.is_some() {
+        // Marks the user's approval for the RPC layer; stripped from
+        // anything arriving over the wire, so only this path sets it.
+        input["_user_approved"] = json!(true);
+    }
+    let r = if let Some(bad) = tu["input"]["_invalid"].as_str() {
+        Err(anyhow!(
+            "the arguments of this tool call did not arrive as valid JSON (the response was \
+             probably cut off) — the tool did NOT run. Send the call again. Received: {}",
+            bad.chars().take(200).collect::<String>()
+        ))
+    } else {
+        run_target(app, &target, &input)
+    };
+    let (mut content, is_error) = match r {
+        Ok(v) => (v.to_string(), false),
+        // A schema-shaped failure (bad/missing params) is fed back WITH
+        // the tool's schema so the model can repair the call itself
+        // instead of guessing the same shape again.
+        Err(e) => (format!("Error: {e}{}", schema_hint(&name, &e)), true),
+    };
+    // Cap results AND errors: an MCP server's error text can be
+    // arbitrarily large and would otherwise ride along in every later
+    // request of the conversation.
+    if content.len() > TOOL_RESULT_LIMIT {
+        let was = content.len();
+        // char-boundary-safe: a plain truncate panics mid-UTF-8
+        crate::rpc::truncate_utf8(&mut content, TOOL_RESULT_LIMIT);
+        content.push_str(&format!(
+            "…(truncated — output was {}KB. Re-run with narrower parameters \
+             (LIMIT, column lists, byte/row ranges) rather than requesting it all.)",
+            was.div_ceil(1024)
+        ));
+    }
+    json!({"id": tu["id"], "name": tu["name"], "content": content, "is_error": is_error})
 }
 
 /// An assistant row's content: the blocks, plus which model answered and
@@ -258,7 +340,8 @@ pub fn unanswered(app: &Arc<App>, session: &str) -> bool {
     let eng = app.eng();
     store::query(
         &eng.db,
-        "SELECT role FROM uapp_chat WHERE COALESCE(session,'main') = ?1 ORDER BY id DESC LIMIT 1",
+        "SELECT role FROM uapp_chat WHERE COALESCE(session,'main') = ?1 AND role != 'context'
+         ORDER BY id DESC LIMIT 1",
         &[json!(session)],
     )
     .map(|r| r["rows"][0][0].as_str() == Some("user"))

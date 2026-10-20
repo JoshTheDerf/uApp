@@ -72,7 +72,11 @@ pub(crate) fn build_messages(app: &Arc<App>, session: &str, budget: Budget) -> R
 
 /// The session's rows as messages, images still unread references.
 pub(crate) fn load_messages(app: &Arc<App>, session: &str) -> Result<Vec<Msg>> {
-    let chat = rpc::dispatch(app, "chat.list", json!({"session": session}))?;
+    let chat = rpc::dispatch(
+        app,
+        "chat.list",
+        json!({"session": session, "context": true}),
+    )?;
     Ok(rows_to_messages(
         chat["rows"].as_array().map(Vec::as_slice).unwrap_or(&[]),
     ))

@@ -11,7 +11,7 @@ let passed = 0, failed = 0;
 const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (failed++, console.log(`  ✗ FAIL: ${n} ${x}`)); };
 
 // ---------- mock provider + MCP ----------
-let oaCalls = [], anthCalls = [], mcpCalls = [], thinkCalls = [], nsCalls = [], respCalls = [];
+let oaCalls = [], anthCalls = [], mcpCalls = [], thinkCalls = [], nsCalls = [], respCalls = [], namesCalls = [], mcp2Calls = [];
 const readBody = (req) => new Promise((res) => { let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => res(b)); });
 
 const mock = createServer(async (req, res) => {
@@ -128,6 +128,26 @@ const mock = createServer(async (req, res) => {
     return send({ status: "completed", output: [
       { type: "message", role: "assistant", content: [{ type: "output_text", text: "done via responses api" }] } ] });
   }
+  if (req.url === "/names/v1/messages") {
+    namesCalls.push(body);
+    if (namesCalls.length === 1) {
+      const long = body.tools.find((t) => t.name.startsWith("mcp__a__b"));
+      return send({ stop_reason: "tool_use", content: [
+        { type: "tool_use", id: "n1", name: long ? long.name : "missing", input: { msg: "via long name" } },
+        { type: "tool_use", id: "n2", name: "call_action", input: { action: "" } } ] });
+    }
+    return send({ stop_reason: "end_turn", content: [{ type: "text", text: "names done" }] });
+  }
+  if (req.url === "/mcp2") {
+    mcp2Calls.push(body);
+    if (body.method === "initialize")
+      return send({ jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "mock2" } } });
+    if (body.method === "notifications/initialized") { res.writeHead(202); return res.end(); }
+    if (body.method === "tools/list")
+      return send({ jsonrpc: "2.0", id: body.id, result: { tools: [{ name: "résumé.".padEnd(90, "x"), description: "long", inputSchema: { type: "object", properties: { msg: { type: "string" } } } }] } });
+    if (body.method === "tools/call")
+      return send({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: `MCP2:${body.params.name.length}:${body.params.arguments.msg}` }] } });
+  }
   if (req.url === "/mcp") {
     mcpCalls.push(body);
     if (body.method === "initialize")
@@ -217,10 +237,18 @@ await A.rpc("config.set", { key: "ai", value: { provider: "anthropic", api_key: 
   const req = anthCalls[1];
   ok(req && req.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === "tool_result" && b.tool_use_id === "a1")),
      "tool_result threaded back in Anthropic format");
-  // Real Anthropic gets system as cacheable blocks: stable prompt (cached) + volatile tail.
-  ok(Array.isArray(req.system) && req.system[0].text.includes("uapp")
-     && req.system[0].cache_control && req.system.map((b) => b.text).join("").includes("CURRENT APP FILES"),
-     "anthropic system prompt sent as cached blocks");
+  // Real Anthropic gets the system prompt as one cached block, frozen for
+  // the run; the app's files and schema travel as an [App state] note.
+  ok(Array.isArray(req.system) && req.system.length === 1 && req.system[0].text.includes("uapp")
+     && req.system[0].cache_control, "anthropic system prompt sent as one cached block");
+  ok(JSON.stringify(anthCalls[0].system) === JSON.stringify(req.system)
+     && JSON.stringify(anthCalls[0].tools) === JSON.stringify(req.tools), "system prompt and tools identical across the run's steps");
+  const flat = req.messages.flatMap((m) => m.content);
+  ok(flat.some((b) => b.type === "text" && b.text.startsWith("[App state]") && b.text.includes("index.html")),
+     "app snapshot sent in the conversation");
+  // Step 1's messages are a prefix of step 2's (cache markers aside).
+  const strip = (ms) => JSON.stringify(ms.map((m) => ({ ...m, content: m.content.map(({ cache_control, ...b }) => b) })));
+  ok(strip(req.messages).startsWith(strip(anthCalls[0].messages).slice(0, -1)), "earlier messages resent unchanged");
   ok(req.tools.at(-1).cache_control && req.messages.at(-1).content.at(-1).cache_control,
      "cache_control on the last tool and last message");
   const hist = await A.rpc("files.history", { name: "index.html" });
@@ -342,6 +370,24 @@ await A.rpc("config.set", { key: "ai", value: { provider: "openai", api_key: "te
   // section, so pick the LAST function_call_output — the one from this turn.
   const out = (respCalls[1].input || []).filter((i) => i.type === "function_call_output").at(-1);
   ok(!!out && out.call_id === "r1", "tool result threaded back as function_call_output");
+}
+
+console.log("\n[8] tool names: every offered name is valid, odd MCP names still route");
+await A.rpc("config.set", { key: "mcp", value: [{ name: "crm", url: `${MOCK}/mcp` }, { name: "a__b", url: `${MOCK}/mcp2` }] });
+await A.rpc("config.set", { key: "ai", value: { provider: "anthropic", api_key: "test", model: "claude-sonnet-5-5", base_url: `${MOCK}/names` } });
+{
+  await A.rpc("chat.send", { text: "use the odd tools" });
+  const done = await waitFor(async () => {
+    const r = await A.rpc("chat.list");
+    return r.rows.some((row) => row[5].includes("names done")) ? r : null;
+  });
+  ok(!!done, "loop completed");
+  const names = namesCalls[0].tools.map((t) => t.name);
+  ok(names.every((n) => /^[a-zA-Z0-9_-]{1,64}$/.test(n)), `all names valid (${names.filter((n) => !/^[a-zA-Z0-9_-]{1,64}$/.test(n))})`);
+  ok(new Set(names).size === names.length, "names unique");
+  const results = done.rows.filter((r) => r[4] === "tool").map((r) => r[5]).join("");
+  ok(results.includes("MCP2:90:via long name"), "the shortened name reached the right server with the full tool name");
+  ok(results.includes("call_action needs an action name"), "call_action without a name lists the registered actions");
 }
 
 await A.stop();

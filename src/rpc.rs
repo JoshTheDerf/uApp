@@ -343,13 +343,16 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         }
         "chat.list" => {
             let session = session_arg(&p)?;
+            // `context` rows are the app snapshots the assistant's loop
+            // appends for the model (see ai/run.rs); only it asks for them.
+            let context = p["context"].as_bool().unwrap_or(false);
             let eng = app.eng();
             store::query(
                 &eng.db,
                 "SELECT mid, ts, device, user, role, content, COALESCE(session,'main') AS session
-                 FROM uapp_chat WHERE COALESCE(session,'main') = ?1
+                 FROM uapp_chat WHERE COALESCE(session,'main') = ?1 AND (?2 OR role != 'context')
                  ORDER BY ts, ctr, device, id",
-                &[json!(session)],
+                &[json!(session), json!(context)],
             )
         }
         "chat.send" => chat_send(app, p),
@@ -1178,7 +1181,7 @@ pub fn sessions_list(app: &Arc<App>) -> Result<Value> {
             store::query(
                 &eng.db,
                 "SELECT COALESCE(session,'main') AS s, count(*), max(ts) FROM uapp_chat
-                 GROUP BY 1",
+                 WHERE role != 'context' GROUP BY 1",
                 &[],
             )?,
         )

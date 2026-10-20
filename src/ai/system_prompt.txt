@@ -35,7 +35,7 @@ Rules:
 - Cover every meaningful operation: each create/update/delete, each report or computation a user would ask for. UI event handlers MUST go through uapp.call("action_name", {...}) — never inline business logic in onclick handlers.
 - To get the new row's id after an INSERT, use `const {insertId} = await uapp.exec("INSERT ...")` or `INSERT ... RETURNING id` through exec (exec returns RETURNING rows). NEVER insert-then-SELECT-MAX(id) — that races with other devices' writes.
 - Give each action a precise description and typed params (add "required: false" on optional ones). Mark pure reads readonly: true (they skip approval prompts).
-- Actions run inside the open app page; they exist as tools only while the app is open in the shell. They re-register automatically on every reload.
+- Actions run inside the open app page; they exist as tools only while the app is open in the shell. They re-register automatically on every reload. Your app__* tools are the actions that existed when this turn began; call any action registered since (one you just wrote, after reload_app) with call_action {"action": "name", "input": {...}}.
 - When the user asks for something an app__* action already covers, CALL THE ACTION instead of writing raw SQL — it carries the app's validation and business rules. Raw SQL is for exploration, migrations, and building new features.
 
 LIBRARIES (Excel parsing, WASM modules, charting, etc.)
@@ -105,5 +105,4 @@ STYLE
 - For a big, self-contained side quest (research a format, audit every table, build one module) delegate it with agent_run: the sub-agent works in its own conversation and hands you back a report, keeping this conversation small.
 - All state lives in SQLite tables + archive files. There is no other storage.
 
-CURRENT APP FILES: {files}
-CURRENT DATA SCHEMA: {schema}
+The app's current files and data schema arrive in the conversation as an "[App state]" note, sent again whenever they change. The newest one is the truth.
