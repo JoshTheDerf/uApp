@@ -1,19 +1,27 @@
 //! The per-app engine: one direct SQLite connection on the .uapp file.
 //!
-//! Single-user model — one process owns the file (exclusive lock in the
+//! Single-user model: one process owns the file (exclusive lock in the
 //! per-user servers registry, see `registry`), and every write is one SQLite
-//! transaction committed straight into the file. No sibling files ever appear
-//! next to the .uapp: the rollback journal is kept in memory
-//! (`journal_mode=MEMORY`, `synchronous=FULL`).
+//! transaction committed straight into the file in rollback-journal mode
+//! (`journal_mode=DELETE`, `synchronous=FULL`). While a commit is in progress
+//! SQLite keeps `<name>.uapp-journal` next to the file and deletes it when
+//! the commit is done, so between writes the .uapp stands alone. If the
+//! process dies mid-commit (a crash, an Android process kill), the journal
+//! stays behind and SQLite uses it to roll the half-written transaction back
+//! the next time the file is opened. That only works while the journal sits
+//! next to the file it belongs to, so code that moves or replaces a .uapp
+//! deals with its journal too (see `store::journal_path`).
 //!
 //! Durability contract:
 //!   * a write is acknowledged only after its transaction has committed
-//!     (synchronous=FULL — the pages are fsync'd);
-//!   * the in-memory journal means a crash in the middle of a commit can tear
-//!     the file. The rescue net is the rolling snapshot directory in app-
-//!     private state (`<data_local>/uapp/<app_id>/snapshots/`): a snapshot is
-//!     taken on every open, periodically while writes happen, and before
-//!     risky whole-file transforms (encryption changes). `open` detects an
+//!     (synchronous=FULL: journal and pages are fsync'd);
+//!   * a crash at any point leaves the file holding either the old state or
+//!     the new one;
+//!   * for damage from outside (a truncated copy, a sync tool writing half a
+//!     file) there are rolling snapshots in app-private state
+//!     (`<data_local>/uapp/<app_id>/snapshots/`). A snapshot is taken on
+//!     every open, periodically while writes happen, and before risky
+//!     whole-file transforms (encryption changes). `open` detects an
 //!     unreadable file, moves it aside, and restores the newest snapshot.
 
 use anyhow::Result;
@@ -133,9 +141,8 @@ impl Engine {
         let db = match Self::open_db(&path, passphrase.as_deref()) {
             Ok(db) => db,
             Err(first_err) => {
-                // Crash rescue: a crash mid-commit (in-memory journal) can
-                // tear the file. If the failure looks like damage — never a
-                // missing/wrong password — move the file aside, restore the
+                // Damage rescue: if the failure looks like damage (never a
+                // missing/wrong password), move the file aside, restore the
                 // newest snapshot, and retry once (rolled back on failure).
                 if !Self::damage_shaped(&first_err, &path) {
                     return Err(first_err);
@@ -178,7 +185,8 @@ impl Engine {
         Ok(eng)
     }
 
-    /// Bootstrap (idempotent schema/meta) and open the live connection.
+    /// Open the live connection: checked, migrated and hardened (see
+    /// `store::open_file` and `store::harden`).
     fn open_db(path: &Path, passphrase: Option<&str>) -> Result<Connection> {
         let app_name = path
             .file_stem()
@@ -186,20 +194,16 @@ impl Engine {
             .unwrap_or_else(|| "app".into());
         let is_sqlite = store::looks_like_sqlite(path);
         let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        if !is_sqlite && len > 0 {
+        if !is_sqlite && len > 0 && passphrase.is_none() {
             // Not a plain SQLite file. Either an encrypted .uapp (openable
             // with the master password) or a foreign/damaged file.
-            let Some(pw) = passphrase else {
-                return Err(anyhow!(
-                    "{} exists but is not a plain .uapp/SQLite file — it may be \
-                     password-encrypted; pass --password or set UAPP_PASSWORD",
-                    path.display()
-                ));
-            };
-            // bootstrap verifies the key (clear "wrong password" error) and
-            // fills in any missing schema inside the encrypted file.
-            store::bootstrap(path, &app_name, Some(pw))?;
-        } else if is_sqlite {
+            return Err(anyhow!(
+                "{} exists but is not a plain .uapp/SQLite file — it may be \
+                 password-encrypted; pass --password or set UAPP_PASSWORD",
+                path.display()
+            ));
+        }
+        if is_sqlite {
             if let Some(pw) = passphrase {
                 // A plaintext file opened WITH a password: encrypt it in place
                 // so the password takes effect immediately.
@@ -208,32 +212,11 @@ impl Engine {
                     "uapp: {} was not encrypted — encrypted in place with the provided password",
                     path.display()
                 );
-                store::bootstrap(path, &app_name, Some(pw))?;
-            } else {
-                store::bootstrap(path, &app_name, None)?; // idempotent: fills in missing tables
             }
-        } else {
-            // Empty/missing: create (encrypted if a password was given).
-            store::bootstrap(path, &app_name, passphrase)?;
         }
-
-        let conn = store::with_open_retry(|| match passphrase {
-            Some(p) => crate::cipher::open_file(path, p),
-            None => Ok(Connection::open(path)?),
-        })
-        .with_context(|| format!("opening {}", path.display()))?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        // The no-sibling-files rule: rollback journal in memory. A crash mid-
-        // commit can tear the file — that's what the snapshots are for.
-        conn.pragma_update(None, "journal_mode", "MEMORY")?;
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        let verdict: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
-        if verdict != "ok" {
-            return Err(anyhow!(
-                "{} failed its integrity check: {verdict}",
-                path.display()
-            ));
-        }
+        // An encrypted file is keyed (and the key verified, with a clear
+        // "wrong password" error) before anything else reads it.
+        let conn = store::open_file(path, &app_name, passphrase)?;
         store::harden(&conn)?;
         Ok(conn)
     }
@@ -251,8 +234,20 @@ impl Engine {
         }
         // Unreadable header/pages on a file we remember serving as PLAINTEXT:
         // damage. If we remember it encrypted (or never served it), a bad
-        // open is a password problem or a foreign file — leave it alone.
-        registry::known_encrypted(path) == Some(false)
+        // open is a password problem or a foreign file — leave it alone. So
+        // is anything that isn't SQLite saying the bytes are bad (a lock, a
+        // permission problem, a file from a newer uApp).
+        let unreadable = err.chain().any(|e| {
+            e.downcast_ref::<rusqlite::Error>()
+                .and_then(|e| e.sqlite_error_code())
+                .is_some_and(|c| {
+                    matches!(
+                        c,
+                        rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+                    )
+                })
+        });
+        unreadable && registry::known_encrypted(path) == Some(false)
     }
 
     /// Move an unreadable .uapp aside and put the newest rolling snapshot in
@@ -265,6 +260,12 @@ impl Engine {
         let aside = path.with_extension(format!("uapp.corrupt-{}", now_ms()));
         if path.exists() && std::fs::rename(path, &aside).is_err() {
             return None;
+        }
+        // A journal left by a crash belongs to the damaged file: keep it with
+        // that file, so it can't be "rolled back" into the restored one.
+        let journal = store::journal_path(path);
+        if journal.exists() {
+            let _ = std::fs::rename(&journal, store::journal_path(&aside));
         }
         match std::fs::copy(&snap, path) {
             Ok(_) => {
@@ -393,6 +394,8 @@ impl Engine {
             ));
             self._lock = None;
         }
+        // A journal at the destination belongs to the file being replaced.
+        let _ = std::fs::remove_file(store::journal_path(&new_path));
         std::fs::rename(&tmp, &new_path)
             .with_context(|| format!("writing {}", new_path.display()))?;
         if let Some(dir) = new_path.parent() {

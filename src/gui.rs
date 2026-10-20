@@ -745,6 +745,11 @@ fn import_pending(pending: &std::path::Path, dest: &std::path::Path) -> anyhow::
             .unwrap_or_default();
         let backup = keep.join(format!("{stem}-{}.uapp", crate::store::now_ms()));
         std::fs::rename(dest, &backup)?;
+        // A journal left by a crash belongs to the copy being replaced.
+        let _ = std::fs::rename(
+            crate::store::journal_path(dest),
+            crate::store::journal_path(&backup),
+        );
         // Rolling retention, per document name (now_ms sorts lexically).
         let prefix = format!("{stem}-");
         let mut old: Vec<_> = std::fs::read_dir(&keep)?
@@ -763,6 +768,7 @@ fn import_pending(pending: &std::path::Path, dest: &std::path::Path) -> anyhow::
             let _ = std::fs::remove_file(old.remove(0));
         }
     }
+    let _ = std::fs::remove_file(crate::store::journal_path(dest));
     if std::fs::rename(pending, dest).is_err() {
         // Different filesystem: copy beside the destination, then rename, so
         // a cut-off copy never sits at the working path.

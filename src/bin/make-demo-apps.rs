@@ -94,9 +94,14 @@ fn build_launcher(outdir: &str, samples: &[Sample], html: &str) -> std::io::Resu
     .unwrap();
     conn.execute(
         "INSERT INTO uapp_meta(key,value) VALUES(?,?)",
-        params!["format_version", "1"],
+        params!["format_version", uapp::store::FORMAT_VERSION.to_string()],
     )
     .unwrap();
+    // The header stamp a .uapp carries (see the format notes in store.rs).
+    conn.pragma_update(None, "application_id", uapp::store::APPLICATION_ID)
+        .unwrap();
+    conn.pragma_update(None, "user_version", uapp::store::FORMAT_VERSION)
+        .unwrap();
     conn.execute(
         "INSERT INTO uapp_meta(key,value) VALUES(?,?)",
         params!["created", &STABLE_MS.to_string()],

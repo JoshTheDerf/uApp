@@ -36,7 +36,39 @@ pub struct Op {
     pub payload: Value,
 }
 
+// ---- the file format ---------------------------------------------------------
+//
+// A .uapp is a SQLite database (optionally SQLCipher-encrypted) holding:
+//
+//   sqlar              the app's files (app/ code, data/ user content), in the
+//                      standard sqlar layout (zlib-compressed when smaller)
+//   uapp_meta          app_id, name, created, format_version, template info
+//   uapp_config        settings (AI provider, toolbar, MCP servers, ...)
+//   uapp_chat          assistant chat messages, per session
+//   uapp_sessions      chat sessions and agent conversations
+//   uapp_file_history  earlier versions of files, for revert
+//   anything else      the app's own tables
+//
+// The SQLite header says which format the file is in:
+//
+//   application_id = APPLICATION_ID ("uApp" in ASCII), so other tools can
+//                    tell a .uapp from any other SQLite file;
+//   user_version   = FORMAT_VERSION, the layout above.
+//
+// `format_version` in uapp_meta repeats the number for readers that only look
+// there. A file with a higher number than FORMAT_VERSION was made by a newer
+// uApp and is refused rather than half-understood. Files from before the
+// header was stamped (application_id 0) are read as format 0 and upgraded on
+// open. A layout change bumps FORMAT_VERSION and adds a step to MIGRATIONS.
+//
+// Format history:
+//   0  unstamped files from before format versioning (any earlier layout)
+//   1  app/ + data/ archive roots, uapp_chat.session, uapp_file_history.sz,
+//      no uapp_applied table
+
 pub const FORMAT_VERSION: i64 = 1;
+/// The SQLite header's application_id for a .uapp: "uApp" in ASCII.
+pub const APPLICATION_ID: i32 = 0x7541_7070;
 
 pub const DEFAULT_INDEX_HTML: &str = include_str!("shell/default_app.html");
 /// Seeded into new apps so agents working on the .uapp from OUTSIDE the
@@ -67,17 +99,90 @@ CREATE TABLE IF NOT EXISTS uapp_file_history(
 );
 "#;
 
-/// Create/complete the schema in a possibly-empty .uapp file. Handles the
-/// "file manager created a 0-byte file from a template" case. With a master
-/// password the file is (or becomes) SQLCipher-encrypted.
+/// Upgrade steps, in order: `MIGRATIONS[n]` takes a file from format n to
+/// n + 1. They run inside the bootstrap transaction, so a file is upgraded
+/// completely or not at all.
+const MIGRATIONS: &[fn(&Connection) -> Result<()>] = &[to_v1];
+
+/// 0 → 1. Format 0 covers every file from before the header was stamped, so
+/// each change here checks before it acts.
+fn to_v1(conn: &Connection) -> Result<()> {
+    // sz on uapp_file_history (added when history snapshots became
+    // sqlar-compressed). Old rows keep sz NULL = uncompressed.
+    if !has_column(conn, "uapp_file_history", "sz")? {
+        conn.execute_batch("ALTER TABLE uapp_file_history ADD COLUMN sz INT")?;
+    }
+    // session on uapp_chat (multi-chat). NULL == 'main' everywhere.
+    if !has_column(conn, "uapp_chat", "session")? {
+        conn.execute_batch("ALTER TABLE uapp_chat ADD COLUMN session TEXT")?;
+    }
+    // The old sync engine's per-device watermark table, gone with it.
+    conn.execute_batch("DROP TABLE IF EXISTS uapp_applied")?;
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        rusqlite::params![table, column],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// The format a file is in, read from its header (0 for an unstamped file),
+/// or an error when it isn't one this build can open: another program's
+/// SQLite file, or a .uapp from a newer uApp.
+pub fn check_format(conn: &Connection) -> Result<i64> {
+    let app_id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let has_meta: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='uapp_meta'",
+        [],
+        |r| r.get(0),
+    )?;
+    let meta_version = if has_meta > 0 {
+        meta_get(conn, "format_version")?
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let version = match app_id {
+        APPLICATION_ID => user_version.max(meta_version),
+        // Unstamped: user_version, if set at all, was set by the app itself
+        // back when app SQL could, so only uapp_meta speaks for the format.
+        0 => meta_version,
+        other => bail!(
+            "this is a SQLite database belonging to another program (application id \
+             {other:#x}), not a .uapp"
+        ),
+    };
+    if version > FORMAT_VERSION {
+        bail!(
+            "this file was made by a newer uApp (file format {version}; this version reads up \
+             to {FORMAT_VERSION}). Update uApp to open it."
+        );
+    }
+    Ok(if app_id == APPLICATION_ID {
+        user_version
+    } else {
+        0
+    })
+}
+
+/// Open a .uapp file read-write (creating it when absent, encrypted when a
+/// master password is given), check it, and bring it up to date: the one way
+/// the live connection is made. Rollback-journal mode with full syncs (see
+/// `engine` for the durability contract). Integrity is checked before
+/// anything is written, so a damaged file is never migrated.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn bootstrap(path: &Path, app_name: &str, key: Option<&str>) -> Result<()> {
+pub fn open_file(path: &Path, app_name: &str, key: Option<&str>) -> Result<Connection> {
     // The WHOLE body is retried on a transient sharing/lock violation: on
     // Windows, creating/writing the file trips real-time AV (Defender), which
     // briefly locks it — and SQLite's busy_timeout does NOT cover an OS-level
     // lock (it's not SQLite's own locking protocol), so a mid-write statement
-    // can fail with ERROR_LOCK_VIOLATION. Every statement here is idempotent
-    // (CREATE IF NOT EXISTS / INSERT OR REPLACE / guarded inserts), so simply
+    // can fail with ERROR_LOCK_VIOLATION. Bootstrap is one transaction, so
     // re-running the whole thing is safe.
     with_open_retry(|| {
         let conn = match key {
@@ -86,16 +191,56 @@ pub fn bootstrap(path: &Path, app_name: &str, key: Option<&str>) -> Result<()> {
         };
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "DELETE")?;
-        bootstrap_conn(&conn, app_name)
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        let verdict: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        if verdict != "ok" {
+            bail!("{} failed its integrity check: {verdict}", path.display());
+        }
+        bootstrap_conn(&conn, app_name)?;
+        Ok(conn)
     })
-    .with_context(|| format!("bootstrapping {}", path.display()))
+    .with_context(|| format!("opening {}", path.display()))
 }
 
-/// The platform-independent part of bootstrap: create/complete the schema and
-/// seed a brand-new app, on an already-open connection. Idempotent.
+/// Create/complete the schema in a possibly-empty .uapp file. Handles the
+/// "file manager created a 0-byte file from a template" case. With a master
+/// password the file is (or becomes) SQLCipher-encrypted.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn bootstrap(path: &Path, app_name: &str, key: Option<&str>) -> Result<()> {
+    open_file(path, app_name, key).map(drop)
+}
+
+/// The platform-independent part of opening a .uapp, on an already-open (and
+/// integrity-checked) connection: refuse a file this build can't read, then
+/// in one transaction create what's missing, run the migrations the file
+/// needs, seed a brand-new app and stamp the header. Idempotent.
 pub fn bootstrap_conn(conn: &Connection, app_name: &str) -> Result<()> {
+    let from = check_format(conn)?;
+    // Deferred, so opening an up-to-date file takes no write lock and writes
+    // nothing.
+    conn.execute_batch("BEGIN")?;
+    match bootstrap_tx(conn, app_name, from) {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
+    }
+    // Durable before anyone opens it.
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    Ok(())
+}
+
+fn bootstrap_tx(conn: &Connection, app_name: &str, from: i64) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
-    migrate(conn);
+    for (n, step) in MIGRATIONS.iter().enumerate().skip(from as usize) {
+        step(conn).with_context(|| format!("upgrading the file to format {}", n + 1))?;
+    }
+    // Not a versioned step: names written into the archive by something
+    // other than uApp (a person or tool editing the file directly) are
+    // folded back into app/ and data/ on every open. Cheap when there is
+    // nothing to do.
+    migrate_paths(conn).context("moving archive paths into app/ and data/")?;
     let has_meta: i64 = conn.query_row(
         "SELECT count(*) FROM uapp_meta WHERE key='app_id'",
         [],
@@ -105,16 +250,11 @@ pub fn bootstrap_conn(conn: &Connection, app_name: &str) -> Result<()> {
         let app_id: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
         conn.execute(
             "INSERT OR REPLACE INTO uapp_meta(key,value) VALUES
-             ('app_id',?1),('name',?2),('format_version',?3),('created',?4)",
-            rusqlite::params![
-                app_id,
-                app_name,
-                FORMAT_VERSION.to_string(),
-                now_ms().to_string()
-            ],
+             ('app_id',?1),('name',?2),('created',?3)",
+            rusqlite::params![app_id, app_name, now_ms().to_string()],
         )?;
     }
-    // migrate() above has already moved any pre-split `index.html` here.
+    // migrate_paths() above has already moved any pre-split `index.html` here.
     let has_index: i64 = conn.query_row(
         "SELECT count(*) FROM sqlar WHERE name='app/index.html'",
         [],
@@ -136,28 +276,49 @@ pub fn bootstrap_conn(conn: &Connection, app_name: &str) -> Result<()> {
             DEFAULT_AGENTS_MD.as_bytes(),
         )?;
     }
-    // Durable before anyone opens it.
-    conn.pragma_update(None, "synchronous", "FULL")?;
+    stamp_format(conn)
+}
+
+/// Write the current format into the header and uapp_meta, touching only
+/// what differs (so an up-to-date file isn't written to on every open).
+fn stamp_format(conn: &Connection) -> Result<()> {
+    let app_id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if app_id != APPLICATION_ID {
+        if app_id == 0 && user_version != 0 {
+            // The app used user_version for itself. It belongs to uApp from
+            // here on, so keep the app's number where it can still be found.
+            conn.execute(
+                "INSERT OR IGNORE INTO uapp_meta(key,value) VALUES('app_user_version',?1)",
+                rusqlite::params![user_version.to_string()],
+            )?;
+        }
+        conn.pragma_update(None, "application_id", APPLICATION_ID)?;
+    }
+    if user_version != FORMAT_VERSION || app_id != APPLICATION_ID {
+        conn.pragma_update(None, "user_version", FORMAT_VERSION)?;
+    }
+    if meta_get(conn, "format_version")?.as_deref() != Some(&FORMAT_VERSION.to_string()) {
+        conn.execute(
+            "INSERT OR REPLACE INTO uapp_meta(key,value) VALUES('format_version',?1)",
+            rusqlite::params![FORMAT_VERSION.to_string()],
+        )?;
+    }
     Ok(())
 }
 
-/// Columns added to existing tables after the fact. Every statement is a
-/// best-effort `ALTER TABLE` — it fails harmlessly when the column is already
-/// there (new files get it from SCHEMA), so this runs on every open of a
-/// checkpoint AND on every materialized snapshot (SCHEMA's
-/// `CREATE TABLE IF NOT EXISTS` can't add columns to a table that exists).
-fn migrate(conn: &Connection) {
-    // sz on uapp_file_history (added when history snapshots became
-    // sqlar-compressed). Old rows keep sz NULL = uncompressed.
-    let _ = conn.execute("ALTER TABLE uapp_file_history ADD COLUMN sz INT", []);
-    // session on uapp_chat (multi-chat). NULL == 'main' everywhere.
-    let _ = conn.execute("ALTER TABLE uapp_chat ADD COLUMN session TEXT", []);
-    // The old sync engine's per-device watermark table — gone with it.
-    let _ = conn.execute("DROP TABLE IF EXISTS uapp_applied", []);
-    // app/ + data/ split: fold pre-split archive names into the two roots.
-    if let Err(e) = migrate_paths(conn) {
-        eprintln!("uapp: could not migrate archive paths: {e:#}");
-    }
+/// The rollback journal SQLite keeps next to a database while a write is
+/// being committed (`<file>-journal`). After a crash it is "hot": the next
+/// open uses it to undo the half-written transaction. So it belongs to that
+/// exact file. Whatever moves a .uapp aside must move the journal with it,
+/// and whatever puts different bytes at a path must first remove a journal
+/// left there, or SQLite would "roll back" the new file with the old one's
+/// pages.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn journal_path(path: &Path) -> std::path::PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push("-journal");
+    p.into()
 }
 
 /// The archive has exactly two top-level directories, and a file's location
@@ -235,12 +396,10 @@ pub fn resolve_name(conn: &Connection, name: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
-/// One-time move of an archive written before the app/data split: legacy names
-/// go to their canonical home, honouring (and then dropping) the old
-/// `file_roles` overrides so a seed dataset someone had marked "app" stays app
-/// code. Deterministic and idempotent — it runs on every device at open, and
-/// op replay re-normalizes anything that arrives later (see `apply_op`), so
-/// every replica converges on the same layout.
+/// Move archive names from before the app/data split (or written by a tool
+/// that doesn't know the layout) to their canonical home, honouring (and then
+/// dropping) the old `file_roles` overrides so a seed dataset someone had
+/// marked "app" stays app code. Idempotent; runs on every open.
 fn migrate_paths(conn: &Connection) -> Result<()> {
     let roles = config_get(conn, "file_roles")?;
     let stray: i64 = conn.query_row(
@@ -319,15 +478,10 @@ fn populate_export(
     out.execute_batch(SCHEMA)?;
     let app_id: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
     out.execute(
-        "INSERT INTO uapp_meta(key,value) VALUES
-         ('app_id',?1),('name',?2),('format_version',?3),('created',?4)",
-        rusqlite::params![
-            app_id,
-            app_name,
-            FORMAT_VERSION.to_string(),
-            now_ms().to_string()
-        ],
+        "INSERT INTO uapp_meta(key,value) VALUES ('app_id',?1),('name',?2),('created',?3)",
+        rusqlite::params![app_id, app_name, now_ms().to_string()],
     )?;
+    stamp_format(out)?;
     // Files: stored form copied verbatim (compression preserved). `data/` only
     // when the caller opted in; app files always.
     {
@@ -1846,6 +2000,130 @@ mod tests {
         assert_eq!(r["rows"][0][0], json!(42));
         // FTS5's own tables are off limits to plain SQL (DEFENSIVE).
         assert!(write(&c, "sql", "DELETE FROM docs_data").is_err());
+    }
+
+    fn header_of(c: &Connection) -> (i32, i64) {
+        (
+            c.query_row("PRAGMA application_id", [], |r| r.get(0))
+                .unwrap(),
+            c.query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn new_files_are_stamped() {
+        let c = app();
+        assert_eq!(header_of(&c), (APPLICATION_ID, FORMAT_VERSION));
+        assert_eq!(
+            meta_get(&c, "format_version").unwrap(),
+            Some(FORMAT_VERSION.to_string())
+        );
+        // Opening again changes nothing.
+        let changes = c.total_changes();
+        bootstrap_conn(&c, "t").unwrap();
+        assert_eq!(
+            c.total_changes(),
+            changes,
+            "an up-to-date file isn't written"
+        );
+    }
+
+    #[test]
+    fn unstamped_files_are_upgraded() {
+        // A file from before format versioning: no sz/session columns, the
+        // old sync table, a pre-split file name, and a user_version the app
+        // set for itself.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE sqlar(name TEXT PRIMARY KEY, mode INT, mtime INT, sz INT, data BLOB);
+             CREATE TABLE uapp_meta(key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE uapp_config(key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE uapp_chat(id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT UNIQUE,
+               ts INTEGER, ctr INTEGER, device TEXT, user TEXT, role TEXT, content TEXT);
+             CREATE TABLE uapp_file_history(id INTEGER PRIMARY KEY AUTOINCREMENT,
+               name TEXT, ts INTEGER, device TEXT, user TEXT, action TEXT, data BLOB);
+             CREATE TABLE uapp_applied(dev TEXT);
+             INSERT INTO uapp_meta VALUES ('app_id','old'),('name','Old'),('format_version','1');
+             INSERT INTO sqlar VALUES ('index.html', 420, 0, 2, X'6869');
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+        bootstrap_conn(&c, "Old").unwrap();
+        assert_eq!(header_of(&c), (APPLICATION_ID, FORMAT_VERSION));
+        assert!(has_column(&c, "uapp_chat", "session").unwrap());
+        assert!(has_column(&c, "uapp_file_history", "sz").unwrap());
+        let applied: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='uapp_applied'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 0);
+        assert_eq!(
+            sqlar_read(&c, "app/index.html").unwrap().as_deref(),
+            Some(&b"hi"[..])
+        );
+        assert_eq!(meta_get(&c, "app_id").unwrap().as_deref(), Some("old"));
+        assert_eq!(
+            meta_get(&c, "app_user_version").unwrap().as_deref(),
+            Some("7"),
+            "the app's own user_version is kept"
+        );
+    }
+
+    #[test]
+    fn newer_and_foreign_files_are_refused() {
+        // Stamped by a newer uApp.
+        let c = app();
+        c.pragma_update(None, "user_version", FORMAT_VERSION + 1)
+            .unwrap();
+        let e = err_of(bootstrap_conn(&c, "t"));
+        assert!(e.contains("newer uApp") && e.contains("Update uApp"), "{e}");
+        // Unstamped, but uapp_meta says so.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE uapp_meta(key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO uapp_meta VALUES ('format_version','99');",
+        )
+        .unwrap();
+        assert!(err_of(bootstrap_conn(&c, "t")).contains("newer uApp"));
+        let tables: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1, "nothing was created in the refused file");
+        // Some other program's SQLite file.
+        let c = Connection::open_in_memory().unwrap();
+        c.pragma_update(None, "application_id", 0x4750_4b47)
+            .unwrap();
+        assert!(err_of(bootstrap_conn(&c, "t")).contains("another program"));
+    }
+
+    #[test]
+    fn a_failed_migration_changes_nothing() {
+        // uapp_chat as a view: adding its session column has to fail.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE uapp_meta(key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO uapp_meta VALUES ('app_id','x');
+             CREATE VIEW uapp_chat AS SELECT 1 AS id;",
+        )
+        .unwrap();
+        assert!(err_of(bootstrap_conn(&c, "t")).contains("upgrading the file to format 1"));
+        let tables: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name IN ('sqlar','uapp_config')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0, "the half-done upgrade was rolled back");
+        assert_eq!(header_of(&c), (0, 0));
     }
 
     #[test]

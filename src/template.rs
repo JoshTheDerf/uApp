@@ -152,15 +152,7 @@ fn validate(conn: &Connection) -> Result<()> {
     if tables < 2 {
         bail!("that file is a database, but not a .uapp (no sqlar/uapp_meta tables)");
     }
-    if let Some(v) = store::meta_get(conn, "format_version")? {
-        if v.trim().parse::<i64>().unwrap_or(0) > store::FORMAT_VERSION {
-            bail!(
-                "that template was written by a newer uapp (format {v}; this build \
-                 understands {}) — update uapp first",
-                store::FORMAT_VERSION
-            );
-        }
-    }
+    store::check_format(conn)?;
     Ok(())
 }
 
