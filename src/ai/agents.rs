@@ -9,9 +9,36 @@ use crate::rpc;
 use crate::store;
 
 use super::compact::clip;
-use super::history::build_messages;
+use super::history::{load_messages, Msg};
 use super::run::run_loop;
-use super::{current_ctx, RunCtx, AUTO_COMPACT_BYTES, FORK_DIGEST_BYTES};
+use super::{current_ctx, RunCtx, FORK_DIGEST_BYTES};
+
+/// A `fork` sub-agent's copy of the parent conversation: the newest `cap`
+/// bytes of it as JSON. The end matters most (it holds the task at hand),
+/// and images and reasoning are left out, since base64 and signatures would
+/// crowd out everything else.
+pub(crate) fn fork_digest(mut msgs: Vec<Msg>, cap: usize) -> String {
+    for (_, blocks) in msgs.iter_mut() {
+        blocks.retain(|b| b["type"] != "thinking" && b["type"] != "redacted_thinking");
+        for b in blocks.iter_mut() {
+            if b["type"] == "image" {
+                *b = json!({"type": "text", "text": format!("[image {}]", b["name"].as_str().unwrap_or(""))});
+            }
+            if let Some(o) = b.as_object_mut() {
+                o.remove("origin");
+            }
+        }
+    }
+    let full = json!(msgs).to_string();
+    if full.len() <= cap {
+        return full;
+    }
+    let mut start = full.len() - cap;
+    while !full.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…(earlier part omitted){}", &full[start..])
+}
 
 /// Delegate a self-contained task to a sub-agent: its own chat session, the
 /// same tools (minus the agent tools), the same approval gate, run
@@ -48,10 +75,9 @@ pub fn agent_run(app: &Arc<App>, input: &Value) -> Result<Value> {
         }),
     )?;
     let seed = if mode == "fork" {
-        let digest = match build_messages(app, &ctx.session, AUTO_COMPACT_BYTES) {
-            Ok(msgs) => clip(&json!(msgs).to_string(), FORK_DIGEST_BYTES),
-            Err(_) => String::new(),
-        };
+        let digest = load_messages(app, &ctx.session)
+            .map(|msgs| fork_digest(msgs, FORK_DIGEST_BYTES))
+            .unwrap_or_default();
         format!("Context from the conversation you are helping with (JSON digest):\n{digest}\n\nYour task:\n{prompt}")
     } else {
         prompt.to_string()
@@ -126,4 +152,37 @@ pub(crate) fn agent_loop(
         out.report
     };
     Ok(json!({"session": session, "steps": out.steps, "report": report}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn digest_keeps_the_end_without_images_or_thinking() {
+        let msgs = vec![
+            (
+                "user".to_string(),
+                vec![
+                    json!({"type": "image", "name": "data/p.jpg", "b64": "A".repeat(50_000)}),
+                    json!({"type": "text", "text": "start", "origin": "user"}),
+                ],
+            ),
+            (
+                "assistant".to_string(),
+                vec![
+                    json!({"type": "thinking", "thinking": "hmm", "signature": "S".repeat(9000)}),
+                    json!({"type": "text", "text": "x".repeat(40_000)}),
+                ],
+            ),
+            (
+                "user".to_string(),
+                vec![json!({"type": "text", "text": "the newest request"})],
+            ),
+        ];
+        let d = fork_digest(msgs, 4000);
+        assert!(d.len() < 4100);
+        assert!(d.contains("the newest request"));
+        assert!(!d.contains("AAAA") && !d.contains("SSSS"));
+    }
 }

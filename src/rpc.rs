@@ -1027,6 +1027,25 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
                 MAX_UPLOAD_BYTES / 1024 / 1024
             );
         }
+        // An image goes to the model as an image, and one the provider
+        // refuses would fail every later turn of the chat: say so now.
+        if crate::ai::is_image(&path) {
+            let problem = if b64.len() / 4 * 3 > crate::ai::MAX_IMAGE_BYTES + 3 {
+                crate::ai::image_too_big(b64.len() / 4 * 3)
+            } else {
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .ok()
+                    .and_then(|bytes| crate::ai::image_problem(&bytes))
+            };
+            if let Some(why) = problem {
+                bail!(
+                    "{} can't go to the assistant: {why}. Shrink it and attach it again, \
+                     or upload it in the file browser and mention its name",
+                    safe.trim()
+                );
+            }
+        }
         local_op(app, "file_put", json!({"name": path, "data": b64}))?;
         stored.push(json!({"name": path, "bytes": b64.len() * 3 / 4}));
     }

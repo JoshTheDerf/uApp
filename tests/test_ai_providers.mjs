@@ -251,6 +251,35 @@ console.log("\n[9] Responses API: incomplete with no output retries with more ro
   ok((await rowsOf(s)).some((r) => r[4] === "assistant" && r[5].includes("responses ok")), "answer stored");
 }
 
+console.log("\n[10] images: oversize refused up front, only recent turns resend theirs");
+{
+  await A.rpc("config.set", { key: "ai", value: anth("shape") });
+  const { id: s } = await A.rpc("sessions.create", { title: "img" });
+  const png = (w, h, pad = 0) => {
+    const b = Buffer.alloc(33 + pad);
+    Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").copy(b, 0);
+    b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20);
+    return b.toString("base64");
+  };
+  let err = "";
+  await A.rpc("chat.send", { session: s, text: "huge", attachments: [{ name: "wide.png", b64: png(9000, 10) }] }).catch((e) => (err = e.message));
+  ok(/wide\.png can't go to the assistant: it is 9000x10 pixels/.test(err), `too many pixels refused: ${err}`);
+  err = "";
+  await A.rpc("chat.send", { session: s, text: "heavy", attachments: [{ name: "big.jpg", b64: Buffer.alloc(4_000_000).toString("base64") }] }).catch((e) => (err = e.message));
+  ok(/big\.jpg can't go to the assistant: it is 4\.0MB/.test(err), `too many bytes refused: ${err}`);
+  const before = calls.shape.length;
+  for (let i = 0; i < 4; i++) {
+    const done = A.aiEvents.length;
+    await A.rpc("chat.send", { session: s, text: `photo ${i}`, attachments: [{ name: `p${i}.png`, b64: png(10, 10) }] });
+    await waitFor(() => A.aiEvents.slice(done).some((e) => e.session === s && e.state === "idle"));
+  }
+  ok(calls.shape.length === before + 4, "four turns answered");
+  const last = calls.shape.at(-1).body.messages.flatMap((m) => m.content);
+  const images = last.filter((b) => b.type === "image");
+  ok(images.length === 3, `three newest turns resend images (${images.length})`);
+  ok(last.some((b) => b.type === "text" && /image data\/p0\.png was attached here/.test(b.text)), "the oldest became a note");
+}
+
 await A.stop();
 mock.close();
 console.log(`\n==== ${passed} passed, ${failed} failed ====`);

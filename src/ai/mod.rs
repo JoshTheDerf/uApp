@@ -15,6 +15,7 @@ mod toolset;
 pub use agents::{agent_run, agent_send};
 pub use approval::{app_approval_gate, ask_user};
 pub use compact::{compact_session, COMPACT_PROMPT};
+pub use history::{image_problem, image_too_big, is_image, MAX_IMAGE_BYTES};
 pub use run::{run, unanswered};
 pub use toolset::run_tool;
 

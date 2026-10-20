@@ -10,7 +10,7 @@ use crate::store;
 
 use super::approval::approval_gate;
 use super::compact::auto_compact;
-use super::history::build_messages;
+use super::history::{build_messages, Budget};
 use super::prompt::system_prompt;
 use super::providers::{call_provider_retrying, is_stopped, Request, Usage};
 use super::toolset::{app_action_tools, builtin_tools, mcp_tools, run_tool};
@@ -66,7 +66,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         // Captured BEFORE building: any user row landing after this id was not
         // part of this turn's context and still needs an answer.
         let seen_id = last_chat_id(app, &ctx.session);
-        let msgs = build_messages(app, &ctx.session, cap)?;
+        let msgs = build_messages(app, &ctx.session, Budget::for_cap(cap))?;
         if msgs.is_empty() {
             break;
         }
