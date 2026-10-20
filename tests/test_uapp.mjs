@@ -3,7 +3,7 @@
 // the no-sibling-files rule, durability (graceful + kill -9), double-open
 // reuse via the servers registry, and rolling snapshots.
 import { spawn, execSync } from "node:child_process";
-import { writeFileSync, mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync, existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
@@ -225,9 +225,12 @@ console.log("\n[9] graceful close: file self-contained, registry addr removed");
 
 console.log("\n[10] rolling snapshots exist locally");
 {
-  const appId = sq("SELECT value FROM uapp_meta WHERE key='app_id'");
-  const snapdir = `${process.env.HOME}/.local/share/uapp/${appId}/snapshots`;
-  const snaps = existsSync(snapdir) ? readdirSync(snapdir) : [];
+  // One dir per .uapp path; its `source` file names the path.
+  const root = `${process.env.HOME}/.local/share/uapp/snapshots`;
+  const mine = (existsSync(root) ? readdirSync(root) : [])
+    .map((d) => `${root}/${d}`)
+    .find((d) => existsSync(`${d}/source`) && readFileSync(`${d}/source`, "utf8") === realpathSync(FILE));
+  const snaps = mine ? readdirSync(mine).filter((n) => n.endsWith(".uapp")) : [];
   ok(snaps.length >= 1, `rolling snapshots kept (${snaps.length})`);
 }
 

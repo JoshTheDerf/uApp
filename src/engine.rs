@@ -1,24 +1,33 @@
 //! The per-app engine: one direct SQLite connection on the .uapp file.
 //!
-//! Single-user model — one process owns the file (exclusive lock in the
+//! Single-user model: one process owns the file (exclusive lock in the
 //! per-user servers registry, see `registry`), and every write is one SQLite
-//! transaction committed straight into the file. No sibling files ever appear
-//! next to the .uapp: the rollback journal is kept in memory
-//! (`journal_mode=MEMORY`, `synchronous=FULL`).
+//! transaction committed straight into the file in rollback-journal mode
+//! (`journal_mode=DELETE`, `synchronous=FULL`). While a commit is in progress
+//! SQLite keeps `<name>.uapp-journal` next to the file and deletes it when
+//! the commit is done, so between writes the .uapp stands alone. If the
+//! process dies mid-commit (a crash, an Android process kill), the journal
+//! stays behind and SQLite uses it to roll the half-written transaction back
+//! the next time the file is opened. That only works while the journal sits
+//! next to the file it belongs to, so code that moves or replaces a .uapp
+//! deals with its journal too (see `store::journal_path`).
 //!
 //! Durability contract:
 //!   * a write is acknowledged only after its transaction has committed
-//!     (synchronous=FULL — the pages are fsync'd);
-//!   * the in-memory journal means a crash in the middle of a commit can tear
-//!     the file. The rescue net is the rolling snapshot directory in app-
-//!     private state (`<data_local>/uapp/<app_id>/snapshots/`): a snapshot is
-//!     taken on every open, periodically while writes happen, and before
-//!     risky whole-file transforms (encryption changes). `open` detects an
-//!     unreadable file, moves it aside, and restores the newest snapshot.
+//!     (synchronous=FULL: journal and pages are fsync'd);
+//!   * a crash at any point leaves the file holding either the old state or
+//!     the new one;
+//!   * for damage from outside (a truncated copy, a sync tool writing half a
+//!     file) there are rolling snapshots in app-private state, one directory
+//!     per .uapp path (`registry::snapshot_dir`). A snapshot is taken on
+//!     open when the file changed since the newest one, periodically while
+//!     writes happen, and before risky whole-file transforms (encryption
+//!     changes). `open` detects an unreadable file, moves it aside, and
+//!     restores the newest snapshot of that same path.
 
 use anyhow::Result;
 #[cfg(not(target_arch = "wasm32"))]
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use rusqlite::Connection;
 use serde_json::Value;
 #[cfg(not(target_arch = "wasm32"))]
@@ -32,6 +41,13 @@ use crate::registry;
 use crate::store::{self, now_ms, Op};
 
 pub const SNAPSHOT_KEEP: usize = 10;
+/// In a snapshot dir: the canonical path of the file the snapshots are of.
+#[cfg(not(target_arch = "wasm32"))]
+const SNAPSHOT_SOURCE: &str = "source";
+/// In a snapshot dir: `file_state` of the file when the newest snapshot was
+/// taken.
+#[cfg(not(target_arch = "wasm32"))]
+const SNAPSHOT_STATE: &str = "state";
 /// While writes keep happening, refresh the rolling snapshot this often
 /// (driven by the server's background timer calling `maybe_snapshot`).
 pub const SNAPSHOT_INTERVAL_MS: u64 = 10 * 60 * 1000;
@@ -52,7 +68,7 @@ impl ChangeSet {
             "chat" | "chat_clear" | "chat_compact" | "session_meta" | "session_del" => {
                 self.chat = true
             }
-            "config_set" => self.config = true,
+            "config_set" | "app_rename" => self.config = true,
             // A template update rewrites app files, reconciles the schema and
             // can fill in config keys — everything but the chat.
             "template_update" => {
@@ -72,17 +88,13 @@ impl ChangeSet {
     pub fn any(&self) -> bool {
         self.data || self.files || self.chat || self.config
     }
-    pub fn merge(&mut self, o: ChangeSet) {
-        self.data |= o.data;
-        self.files |= o.files;
-        self.chat |= o.chat;
-        self.config |= o.config;
-    }
 }
 
 pub struct Engine {
-    pub path: PathBuf,      // the .uapp file — the live database
-    pub local_dir: PathBuf, // per-app private state (snapshots)
+    pub path: PathBuf, // the .uapp file — the live database
+    /// This path's rolling snapshots (`registry::snapshot_dir`).
+    #[cfg(not(target_arch = "wasm32"))]
+    snapshot_dir: PathBuf,
     pub device: String,
     pub user: String,
     pub db: Connection,
@@ -92,9 +104,10 @@ pub struct Engine {
     pub crypt: Option<crate::cipher::Key>,
     /// Registry lock — held for the engine's lifetime so a second instance
     /// fails fast (and the caller falls back to reusing the running server).
-    /// Option so `reencrypt` can release it before re-opening the same path.
+    /// `reencrypt` hands a duplicate of it to the re-opened engine, so the
+    /// path is never unlocked in between.
     #[cfg(not(target_arch = "wasm32"))]
-    _lock: Option<File>,
+    lock: File,
     dirty: bool,
     /// Committed local ops so far. Cheap change detection for caches built
     /// from the database (the public `/site.uapp`): every write is one op.
@@ -116,6 +129,17 @@ impl Engine {
         passphrase: Option<String>,
     ) -> Result<Engine> {
         let lock = registry::lock_exclusive(&path)?;
+        Self::open_locked(path, device, user, passphrase, lock)
+    }
+
+    /// `open_with_passphrase` with the path's registry lock already held.
+    fn open_locked(
+        path: PathBuf,
+        device: String,
+        user: String,
+        passphrase: Option<String>,
+        lock: File,
+    ) -> Result<Engine> {
         // A file we have served before that is now zero bytes was emptied by
         // something outside us (an interrupted copy or sync, a provider
         // write-back cut short). Opening it would quietly start a blank app,
@@ -133,9 +157,8 @@ impl Engine {
         let db = match Self::open_db(&path, passphrase.as_deref()) {
             Ok(db) => db,
             Err(first_err) => {
-                // Crash rescue: a crash mid-commit (in-memory journal) can
-                // tear the file. If the failure looks like damage — never a
-                // missing/wrong password — move the file aside, restore the
+                // Damage rescue: if the failure looks like damage (never a
+                // missing/wrong password), move the file aside, restore the
                 // newest snapshot, and retry once (rolled back on failure).
                 if !Self::damage_shaped(&first_err, &path) {
                     return Err(first_err);
@@ -153,32 +176,38 @@ impl Engine {
             }
         };
         let crypt = passphrase.map(|passphrase| crate::cipher::Key { passphrase });
-        let app_id = store::meta_get(&db, "app_id")?.unwrap_or_else(|| "unknown".into());
-        let local_dir = registry::local_root().join(&app_id);
-        std::fs::create_dir_all(local_dir.join("snapshots"))?;
+        // The file says what its app_id is; only a well-formed one is used.
+        let app_id = store::meta_get(&db, "app_id")?
+            .filter(|id| registry::valid_app_id(id))
+            .unwrap_or_else(|| "unknown".into());
         registry::write_app_map(&path, &app_id, crypt.is_some());
 
         let mut eng = Engine {
+            snapshot_dir: registry::snapshot_dir(&path),
             path,
-            local_dir,
             device,
             user,
             db,
             app_id,
             crypt,
-            _lock: Some(lock),
+            lock,
             dirty: false,
             writes: 0,
             last_snapshot_ms: 0,
         };
-        // The open-time rescue point (also what a corrupt future open restores).
-        if let Err(e) = eng.snapshot() {
-            eprintln!("uapp: snapshot on open failed: {e:#}");
+        // The open-time rescue point (also what a corrupt future open
+        // restores), unless the newest snapshot already holds this exact file:
+        // opening an unchanged app ten times shouldn't churn all ten slots.
+        if !eng.snapshot_is_current() {
+            if let Err(e) = eng.snapshot() {
+                eprintln!("uapp: snapshot on open failed: {e:#}");
+            }
         }
         Ok(eng)
     }
 
-    /// Bootstrap (idempotent schema/meta) and open the live connection.
+    /// Open the live connection: checked, migrated and hardened (see
+    /// `store::open_file` and `store::harden`).
     fn open_db(path: &Path, passphrase: Option<&str>) -> Result<Connection> {
         let app_name = path
             .file_stem()
@@ -186,20 +215,16 @@ impl Engine {
             .unwrap_or_else(|| "app".into());
         let is_sqlite = store::looks_like_sqlite(path);
         let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        if !is_sqlite && len > 0 {
+        if !is_sqlite && len > 0 && passphrase.is_none() {
             // Not a plain SQLite file. Either an encrypted .uapp (openable
             // with the master password) or a foreign/damaged file.
-            let Some(pw) = passphrase else {
-                return Err(anyhow!(
-                    "{} exists but is not a plain .uapp/SQLite file — it may be \
-                     password-encrypted; pass --password or set UAPP_PASSWORD",
-                    path.display()
-                ));
-            };
-            // bootstrap verifies the key (clear "wrong password" error) and
-            // fills in any missing schema inside the encrypted file.
-            store::bootstrap(path, &app_name, Some(pw))?;
-        } else if is_sqlite {
+            return Err(anyhow!(
+                "{} exists but is not a plain .uapp/SQLite file — it may be \
+                 password-encrypted; pass --password or set UAPP_PASSWORD",
+                path.display()
+            ));
+        }
+        if is_sqlite {
             if let Some(pw) = passphrase {
                 // A plaintext file opened WITH a password: encrypt it in place
                 // so the password takes effect immediately.
@@ -208,32 +233,12 @@ impl Engine {
                     "uapp: {} was not encrypted — encrypted in place with the provided password",
                     path.display()
                 );
-                store::bootstrap(path, &app_name, Some(pw))?;
-            } else {
-                store::bootstrap(path, &app_name, None)?; // idempotent: fills in missing tables
             }
-        } else {
-            // Empty/missing: create (encrypted if a password was given).
-            store::bootstrap(path, &app_name, passphrase)?;
         }
-
-        let conn = store::with_open_retry(|| match passphrase {
-            Some(p) => crate::cipher::open_file(path, p),
-            None => Ok(Connection::open(path)?),
-        })
-        .with_context(|| format!("opening {}", path.display()))?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        // The no-sibling-files rule: rollback journal in memory. A crash mid-
-        // commit can tear the file — that's what the snapshots are for.
-        conn.pragma_update(None, "journal_mode", "MEMORY")?;
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        let verdict: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
-        if verdict != "ok" {
-            return Err(anyhow!(
-                "{} failed its integrity check: {verdict}",
-                path.display()
-            ));
-        }
+        // An encrypted file is keyed (and the key verified, with a clear
+        // "wrong password" error) before anything else reads it.
+        let conn = store::open_file(path, &app_name, passphrase)?;
+        store::harden(&conn)?;
         Ok(conn)
     }
 
@@ -250,8 +255,24 @@ impl Engine {
         }
         // Unreadable header/pages on a file we remember serving as PLAINTEXT:
         // damage. If we remember it encrypted (or never served it), a bad
-        // open is a password problem or a foreign file — leave it alone.
-        registry::known_encrypted(path) == Some(false)
+        // open is a password problem or a foreign file — leave it alone. So
+        // is anything that isn't SQLite saying the bytes are bad (a lock, a
+        // permission problem, a file from a newer uApp).
+        let unreadable = err.chain().any(|e| {
+            e.downcast_ref::<rusqlite::Error>()
+                .and_then(|e| e.sqlite_error_code())
+                .is_some_and(|c| {
+                    matches!(
+                        c,
+                        rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+                    )
+                })
+        });
+        // A plaintext file whose SQLite header is gone is refused before
+        // SQLite ever sees it (it might be encrypted), so check that here.
+        let header_gone =
+            !store::looks_like_sqlite(path) && std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
+        (unreadable || header_gone) && registry::known_encrypted(path) == Some(false)
     }
 
     /// Move an unreadable .uapp aside and put the newest rolling snapshot in
@@ -259,11 +280,16 @@ impl Engine {
     /// snapshots for this path. (Snapshots are written atomically, so the
     /// newest one is always whole.)
     fn restore_newest_snapshot(path: &Path) -> Option<PathBuf> {
-        let local_dir = registry::known_local_dir(path)?;
-        let snap = newest_snapshot(&local_dir.join("snapshots"))?;
+        let snap = Self::snapshot_for(path)?;
         let aside = path.with_extension(format!("uapp.corrupt-{}", now_ms()));
         if path.exists() && std::fs::rename(path, &aside).is_err() {
             return None;
+        }
+        // A journal left by a crash belongs to the damaged file: keep it with
+        // that file, so it can't be "rolled back" into the restored one.
+        let journal = store::journal_path(path);
+        if journal.exists() {
+            let _ = std::fs::rename(&journal, store::journal_path(&aside));
         }
         match std::fs::copy(&snap, path) {
             Ok(_) => {
@@ -282,6 +308,32 @@ impl Engine {
                 None
             }
         }
+    }
+
+    /// The newest snapshot taken of this path. Its own snapshot dir must say
+    /// it holds this path (a different file can't end up restored here). A
+    /// file last opened by an older uApp has no such dir yet; for that one
+    /// the old per-app_id dir is used.
+    fn snapshot_for(path: &Path) -> Option<PathBuf> {
+        let dir = registry::snapshot_dir(path);
+        match std::fs::read_to_string(dir.join(SNAPSHOT_SOURCE)) {
+            Ok(source) if source == registry::canonical(path).to_string_lossy() => {
+                newest_snapshot(&dir)
+            }
+            Ok(_) => None,
+            Err(_) => registry::legacy_snapshot_dir(path).and_then(|d| newest_snapshot(&d)),
+        }
+    }
+
+    /// Does the newest snapshot already hold the file as it is now? Compared
+    /// by size, modification time and the first bytes of the file (SQLite
+    /// bumps a change counter in the header on every commit; an encrypted
+    /// header is re-encrypted), as recorded when that snapshot was taken.
+    fn snapshot_is_current(&self) -> bool {
+        let recorded = std::fs::read_to_string(self.snapshot_dir.join(SNAPSHOT_STATE)).ok();
+        recorded.is_some()
+            && recorded == file_state(&self.path)
+            && Self::snapshot_for(&self.path).is_some()
     }
 
     /// The master password, when this app is encrypted at rest.
@@ -321,11 +373,17 @@ impl Engine {
         }
     }
 
-    /// Write one rolling snapshot into the app-private snapshot dir (via the
+    /// Write one rolling snapshot into this path's snapshot dir (via the
     /// backup API — a raw byte copy of the live db could capture a torn
     /// mid-transaction state) and rotate old ones out.
     pub fn snapshot(&mut self) -> Result<()> {
-        let snapdir = self.local_dir.join("snapshots");
+        // After a failed Save As or encryption change that couldn't re-open
+        // the file, `db` is an empty stand-in: never let it replace a real
+        // snapshot.
+        if self.db.path().is_none_or(str::is_empty) {
+            bail!("the app's file isn't open, so there is nothing to snapshot");
+        }
+        let snapdir = self.snapshot_dir.clone();
         std::fs::create_dir_all(&snapdir)?;
         let tmp = snapdir.join(format!("snapshot-{}.tmp", fastrand::u32(..)));
         let write = (|| -> Result<()> {
@@ -342,13 +400,35 @@ impl Engine {
             let f = File::open(&tmp)?;
             f.sync_all()?;
         }
+        // Which file these snapshots are of: checked before any restore.
+        let source = registry::canonical(&self.path)
+            .to_string_lossy()
+            .to_string();
+        if std::fs::read_to_string(snapdir.join(SNAPSHOT_SOURCE))
+            .ok()
+            .as_ref()
+            != Some(&source)
+        {
+            std::fs::write(snapdir.join(SNAPSHOT_SOURCE), &source)?;
+        }
         std::fs::rename(&tmp, snapdir.join(format!("{}.uapp", now_ms())))?;
-        // Rolling retention.
-        let mut snaps: Vec<PathBuf> = std::fs::read_dir(&snapdir)?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "uapp").unwrap_or(false))
-            .collect();
+        if let Some(state) = file_state(&self.path) {
+            let _ = std::fs::write(snapdir.join(SNAPSHOT_STATE), state);
+        }
+        // Rolling retention, plus any temp file a crash left behind (only
+        // this process writes here: the dir belongs to the locked path).
+        let mut snaps: Vec<PathBuf> = Vec::new();
+        for p in std::fs::read_dir(&snapdir)?.flatten().map(|e| e.path()) {
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string());
+            let name = name.as_deref().unwrap_or("");
+            if p.extension().is_some_and(|e| e == "uapp") {
+                snaps.push(p);
+            } else if name.starts_with("snapshot-")
+                && (name.ends_with(".tmp") || name.ends_with(".tmp-journal"))
+            {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
         snaps.sort();
         while snaps.len() > SNAPSHOT_KEEP {
             let old = snaps.remove(0);
@@ -363,54 +443,45 @@ impl Engine {
     /// current state into `new_path` (atomic temp + fsync + rename, encrypted
     /// to match this app), then re-home the running engine there. The server
     /// keeps the same port/token/WebSocket — only the backing file changes, so
-    /// the open window switches over with no reload.
+    /// the open window switches over with no reload. If anything fails, the
+    /// engine stays on the file it had.
     pub fn save_as(&mut self, new_path: PathBuf) -> Result<()> {
-        let tmp =
-            new_path.with_extension(format!("uapp.tmp-{}-{}", self.device, fastrand::u32(..)));
+        if registry::key(&new_path) == registry::key(&self.path) {
+            // Every write is already committed to this very file.
+            return Ok(());
+        }
+        // Claim the destination first: another window may have it open, and
+        // replacing a file under a live connection would break that window.
+        let lock = registry::lock_exclusive(&new_path)?;
+        let tmp = new_path.with_extension(format!("uapp.tmp-{}", fastrand::u32(..)));
         let write = (|| -> Result<()> {
             let mut dst = self.open_writer(&tmp)?;
             let backup = rusqlite::backup::Backup::new(&self.db, &mut dst)?;
             backup.run_to_completion(512, std::time::Duration::from_millis(0), None)?;
+            drop(backup);
+            drop(dst);
+            File::open(&tmp)?.sync_all()?;
+            // A journal at the destination belongs to the file being replaced.
+            let _ = std::fs::remove_file(store::journal_path(&new_path));
+            std::fs::rename(&tmp, &new_path)
+                .with_context(|| format!("writing {}", new_path.display()))?;
             Ok(())
         })();
         if let Err(e) = write {
             let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(store::journal_path(&tmp));
             return Err(e);
         }
-        {
-            let f = File::open(&tmp)?;
-            f.sync_all()?;
-        }
-        // "Save As" onto the file we're already serving: release our own
-        // connection and registry lock first — the rename below would fail on
-        // Windows over an open db, and the re-open would deadlock on our lock.
-        let same_file = registry::key(&new_path) == registry::key(&self.path);
-        if same_file {
-            drop(std::mem::replace(
-                &mut self.db,
-                Connection::open_in_memory()?,
-            ));
-            self._lock = None;
-        }
-        std::fs::rename(&tmp, &new_path)
-            .with_context(|| format!("writing {}", new_path.display()))?;
-        if let Some(dir) = new_path.parent() {
-            if let Ok(d) = File::open(dir) {
-                let _ = d.sync_all();
-            }
-        }
-        // Re-open at the new location with the same passphrase (new registry
-        // lock; the old lock and connection are released when self is replaced).
-        let passphrase = self.passphrase().map(|s| s.to_string());
-        let reopened = Engine::open_with_passphrase(
+        fsync_parent(&new_path);
+        let reopened = Engine::open_locked(
             new_path,
             self.device.clone(),
             self.user.clone(),
-            passphrase,
-        )?;
-        if !same_file {
-            registry::remove_addr(&self.path); // the old path is no longer served
-        }
+            self.passphrase().map(|s| s.to_string()),
+            lock,
+        )
+        .context("opening the saved copy")?;
+        registry::remove_addr(&self.path); // the old path is no longer served
         let writes = self.writes + 1;
         *self = reopened;
         self.writes = writes;
@@ -422,7 +493,8 @@ impl Engine {
     /// encrypt a plaintext app or re-key an already-encrypted one. The file is
     /// transformed in place (atomic temp + rename) and the engine re-opens
     /// with the new key — same path, so the server/port and open window are
-    /// unaffected.
+    /// unaffected. Copies under the old key or in plaintext (older snapshots,
+    /// damaged files kept aside) are removed once the change has landed.
     pub fn reencrypt(&mut self, new_passphrase: Option<String>) -> Result<()> {
         let currently_encrypted = self.crypt.is_some();
         if !currently_encrypted && new_passphrase.is_none() {
@@ -433,6 +505,9 @@ impl Engine {
         if let Err(e) = self.snapshot() {
             eprintln!("uapp: snapshot before encryption change failed: {e:#}");
         }
+        let old_snapshots = snapshot_files(&self.snapshot_dir);
+        // The re-opened engine shares our lock, so the path stays locked.
+        let lock = self.lock.try_clone()?;
         // Close our live connection first: the transform replaces the file by
         // rename, which Windows refuses while SQLite holds the old file open.
         drop(std::mem::replace(
@@ -456,29 +531,85 @@ impl Engine {
             (false, None) => unreachable!(),
         };
         // Re-open at the same path — with the new key on success, the old key
-        // on failure (so a failed change leaves a working engine). Release our
-        // registry lock first; re-opening the same path re-takes it.
-        self._lock = None;
+        // on failure (so a failed change leaves a working engine).
         let reopen_with = match &transform {
-            Ok(()) => new_passphrase,
+            Ok(()) => new_passphrase.clone(),
             Err(_) => old_pw,
         };
-        let reopened = Engine::open_with_passphrase(
+        let reopened = Engine::open_locked(
             self.path.clone(),
             self.device.clone(),
             self.user.clone(),
             reopen_with,
+            lock,
         )
         .context("re-opening after the encryption change")?;
         let writes = self.writes + 1;
         *self = reopened;
         self.writes = writes;
-        transform
+        transform?;
+        self.forget_old_copies(&old_snapshots, new_passphrase.is_some());
+        Ok(())
+    }
+
+    /// After an encryption change: delete the snapshots taken before it (in
+    /// plaintext or under the old key; the re-open took a fresh one), and
+    /// when the file is now encrypted, the damaged copies kept beside it.
+    fn forget_old_copies(&mut self, old_snapshots: &[PathBuf], encrypted: bool) {
+        for p in old_snapshots {
+            let _ = std::fs::remove_file(p);
+        }
+        // Snapshots an older build kept per app_id.
+        if let Some(dir) = registry::legacy_snapshot_dir(&self.path) {
+            for p in snapshot_files(&dir) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        if encrypted {
+            let prefix = format!(
+                "{}.corrupt-",
+                self.path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            );
+            let dir = self.path.parent().unwrap_or(Path::new("."));
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                if e.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        if snapshot_files(&self.snapshot_dir).is_empty() {
+            if let Err(e) = self.snapshot() {
+                eprintln!("uapp: snapshot after encryption change failed: {e:#}");
+            }
+        }
     }
 }
 
 // Shared by native and wasm builds.
 impl Engine {
+    /// Reclaim the space deleted rows and files left behind (Settings →
+    /// Maintenance), then refresh the rescue snapshot.
+    pub fn compact(&mut self) -> Result<()> {
+        use rusqlite::limits::Limit;
+        // VACUUM rebuilds the file through a temporary attached database, so
+        // the live connection's no-ATTACH limit is lifted just for it.
+        let prev = self.db.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 1)?;
+        let done = self.db.execute_batch("VACUUM");
+        self.db.set_limit(Limit::SQLITE_LIMIT_ATTACHED, prev)?;
+        done?;
+        // Same content, new bytes: anything cached from the file (the public
+        // /site.uapp) has to be rebuilt.
+        self.dirty = true;
+        self.writes += 1;
+        if let Err(e) = self.snapshot() {
+            eprintln!("uapp: snapshot after compacting failed: {e:#}");
+        }
+        Ok(())
+    }
+
     /// Execute one local operation as one committed transaction against the
     /// file. On any failure the database is left untouched.
     pub fn local_op(&mut self, kind: &str, payload: Value) -> Result<(Value, Op)> {
@@ -526,10 +657,10 @@ impl Engine {
             None => Connection::open_in_memory()?,
         };
         store::bootstrap_conn(&db, name)?; // idempotent: fills in missing schema
+        store::harden(&db)?;
         let app_id = store::meta_get(&db, "app_id")?.unwrap_or_else(|| "unknown".into());
         Ok(Engine {
             path: PathBuf::from(format!("{name}.uapp")),
-            local_dir: PathBuf::new(),
             device,
             user,
             db,
@@ -577,12 +708,51 @@ impl Engine {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Size, modification time and a hash of the first KiB of a file: enough to
+/// tell whether it changed since it was last looked at.
+fn file_state(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let mut head = vec![0u8; 1024];
+    let n = File::open(path).ok()?.read(&mut head).ok()?;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in &head[..n] {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Some(format!("{} {mtime} {h:016x}", meta.len()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Every `<ms>.uapp` in a snapshot dir.
+fn snapshot_files(snapdir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(snapdir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "uapp"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fsync_parent(path: &Path) {
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 /// Newest `<ms>.uapp` in a snapshot dir, if any.
 fn newest_snapshot(snapdir: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(snapdir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "uapp").unwrap_or(false))
-        .max()
+    snapshot_files(snapdir).into_iter().max()
 }

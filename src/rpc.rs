@@ -488,14 +488,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             if name.is_empty() || name.len() > 80 {
                 bail!("app name must be 1-80 characters");
             }
-            local_op(
-                app,
-                "sql",
-                json!({
-                    "sql": "INSERT OR REPLACE INTO uapp_meta(key,value) VALUES('name',?1)",
-                    "params": [name]
-                }),
-            )?;
+            local_op(app, "app_rename", json!({ "name": name }))?;
             app.notify("renamed", json!({"name": name}));
             Ok(json!({"ok": true, "name": name}))
         }
@@ -521,8 +514,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         // until a VACUUM) and refresh the rescue snapshot.
         "app.compact" => {
             let mut eng = app.engine.lock().unwrap();
-            eng.db.execute_batch("VACUUM")?;
-            let _ = eng.snapshot();
+            eng.compact()?;
             let size = file_size(&eng);
             Ok(json!({"ok": true, "fileSize": size}))
         }
@@ -833,14 +825,7 @@ fn app_save(app: &Arc<App>) -> Result<Value> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     if was_unsaved && !stem.is_empty() {
-        let _ = local_op(
-            app,
-            "sql",
-            json!({
-                "sql": "INSERT OR REPLACE INTO uapp_meta(key,value) VALUES('name',?1)",
-                "params": [stem]
-            }),
-        );
+        let _ = local_op(app, "app_rename", json!({ "name": stem }));
         app.notify("renamed", json!({"name": stem}));
     }
     Ok(json!({"saved": true, "path": path.to_string_lossy(), "name": stem}))
