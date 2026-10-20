@@ -420,6 +420,11 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             }
             Ok(json!({"ok": true}))
         }
+        // Token usage recorded on assistant rows: {session?} (see ai/usage.rs).
+        "ai.usage" => match p["session"].as_str() {
+            Some(s) => crate::ai::usage_report(app, Some(&session_id(s)?)),
+            None => crate::ai::usage_report(app, None),
+        },
         "ai.pending" => Ok(app.pending_list()),
         "ai.questions" => Ok(app.questions_list()),
         // Answer an ask_user prompt: {"id", "answers": [{choices:[..], other:".."}]},

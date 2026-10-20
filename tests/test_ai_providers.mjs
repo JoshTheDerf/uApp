@@ -99,6 +99,16 @@ const mock = createServer(async (req, res) => {
       : { content: "long run done" };
     return res.end(JSON.stringify({ choices: [{ message: msg, finish_reason: "stop" }] }));
   }
+  if (scen === "forever" || scen === "agentcap") {
+    const n = log(scen, req, body);
+    const sys = typeof body.system === "string" ? body.system : (body.system || []).map((b) => b.text).join("");
+    const json = (content, stop) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ stop_reason: stop, content })); };
+    const tool = (name, input) => json([{ type: "tool_use", id: `f${n}`, name, input }], "tool_use");
+    if (scen === "forever" || sys.includes("autonomous sub-agent")) return tool("list_files", {});
+    const hasResult = body.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === "tool_result"));
+    if (!hasResult) return tool("agent_run", { description: "loop", prompt: "keep listing", max_steps: 2 });
+    return json([{ type: "text", text: "parent done" }], "end_turn");
+  }
   if (scen === "ri") {
     const n = log(scen, req, body);
     res.writeHead(200, { "content-type": "application/json" });
@@ -157,9 +167,11 @@ const send = async (provider, text) => {
 };
 const anth = (scen, extra = {}) => ({ provider: "anthropic", api_key: "k", model: "claude-sonnet-5-5", base_url: `${MOCK}/${scen}`, ...extra });
 
+let firstSession;
 console.log("\n[1] a stream that ends without message_stop is retried, not saved");
 {
   const s = await send(anth("trunc"), "hi");
+  firstSession = s;
   await idle(s);
   const rows = await rowsOf(s);
   const texts = rows.filter((r) => r[4] === "assistant").map((r) => r[5]);
@@ -317,6 +329,28 @@ console.log("\n[11] one long run compacts more than once and keeps the request")
   const fails = (calls["longfail-sum"] || []).length;
   ok((await rowsOf(s2)).some((r) => r[5].includes("long run done")), "run still finished without a summarizer");
   ok(fails >= 1 && fails <= 4, `failed summarizer not retried every step (${fails} tries over ${calls.longfail.length} steps)`);
+}
+
+console.log("\n[12] ai.usage sums recorded usage");
+{
+  const one = await A.rpc("ai.usage", { session: firstSession });
+  ok(one.steps.length === 1 && one.total.input_tokens === 11 && one.total.output_tokens === 9
+     && one.total.cache_read_tokens === 700, `per-session usage ${JSON.stringify(one.total)}`);
+  const all = await A.rpc("ai.usage");
+  ok(all.sessions[firstSession] && all.total.steps >= 5, "all sessions totalled");
+}
+
+console.log("\n[13] the step limit is reported, to the chat and to a parent agent");
+{
+  const s = await send({ provider: "zai", api_key: "k", model: "glm-5.3", base_url: `${MOCK}/forever` }, "never stop");
+  await waitFor(() => A.aiEvents.some((e) => e.session === s && e.state === "idle"), 60000);
+  const rows = await rowsOf(s);
+  ok(calls.forever.length === 40, `ran 40 steps (${calls.forever.length})`);
+  ok(rows.at(-1)[4] === "system" && rows.at(-1)[5].includes("Stopped after 40 steps"), "a visible note says it stopped");
+  const s2 = await send({ provider: "zai", api_key: "k", model: "glm-5.3", base_url: `${MOCK}/agentcap` }, "delegate");
+  await idle(s2);
+  const result = (await rowsOf(s2)).filter((r) => r[4] === "tool").map((r) => r[5]).join("");
+  ok(result.includes('\\"completed\\":false') && result.includes("ran out of steps"), "the parent learns the sub-agent didn't finish");
 }
 
 await A.stop();

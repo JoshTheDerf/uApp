@@ -151,7 +151,15 @@ pub(crate) fn agent_loop(
     } else {
         out.report
     };
-    Ok(json!({"session": session, "steps": out.steps, "report": report}))
+    let mut out_json = json!({"session": session, "steps": out.steps,
+                              "completed": out.completed, "report": report});
+    if !out.completed {
+        out_json["note"] = json!(format!(
+            "the sub-agent ran out of steps ({max_steps}) before finishing; agent_send \
+             can tell it to carry on"
+        ));
+    }
+    Ok(out_json)
 }
 
 #[cfg(test)]

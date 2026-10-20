@@ -23,6 +23,8 @@ use super::{
 pub(crate) struct Outcome {
     pub(crate) steps: usize,
     pub(crate) report: String,
+    /// False when the step limit cut the loop off mid-task.
+    pub(crate) completed: bool,
 }
 
 pub fn run(app: &Arc<App>, ctx: &RunCtx) -> Result<()> {
@@ -95,8 +97,11 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
     let mut steps = 0usize;
     let mut report = String::new();
 
+    // False only when the loop ran out of steps with work still going.
+    let mut ended = false;
     for _ in 0..max_iters {
         if ctx.stopped() {
+            ended = true;
             break;
         }
         // Every iteration, not just at run start: a long tool-using run grows
@@ -110,6 +115,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         let seen_id = last_chat_id(app, &ctx.session);
         let msgs = build_messages(app, &ctx.session, Budget::for_cap(cap))?;
         if msgs.is_empty() {
+            ended = true;
             break;
         }
         let stop = || ctx.stopped();
@@ -123,12 +129,16 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         let reply = match call_provider_retrying(app, ctx, &cfg, &req) {
             Ok(r) => r,
             // Stop is not an error: the user asked for it.
-            Err(e) if is_stopped(&e) => break,
+            Err(e) if is_stopped(&e) => {
+                ended = true;
+                break;
+            }
             Err(e) => return Err(e),
         };
         // Stopped while the reply came in: drop it. Writing it now would
         // also re-create rows in a chat that sessions.delete just removed.
         if ctx.stopped() {
+            ended = true;
             break;
         }
         steps += 1;
@@ -161,6 +171,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
             if has_user_after(app, &ctx.session, seen_id) {
                 continue;
             }
+            ended = true;
             break;
         }
         let mut results = Vec::new();
@@ -181,6 +192,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         // The results say what ran, so they are kept after a Stop too, unless
         // the chat itself is gone (sessions.delete stops the run first).
         if ctx.stopped() && !row_exists(app, &mid) {
+            ended = true;
             break;
         }
         let tmid = format!("t-{}-{}", crate::store::now_ms(), fastrand::u32(..));
@@ -191,7 +203,24 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
                    "content": {"results": results}}),
         )?;
     }
-    Ok(Outcome { steps, report })
+    if !ended && !ctx.stopped() {
+        // Out of steps mid-task. Say so in the chat; ending as a plain
+        // "idle" looked exactly like a finished answer.
+        rpc::local_op(
+            app,
+            "chat",
+            json!({"mid": format!("cap-{}-{}", crate::store::now_ms(), fastrand::u32(..)),
+                   "role": "system", "session": ctx.session,
+                   "content": {"text": format!(
+                       "Stopped after {max_iters} steps without finishing. Send a message \
+                        (\"continue\" is enough) to let the assistant keep going.")}}),
+        )?;
+    }
+    Ok(Outcome {
+        steps,
+        report,
+        completed: ended,
+    })
 }
 
 /// Does this chat row still exist?
