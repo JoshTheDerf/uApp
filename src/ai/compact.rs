@@ -8,7 +8,7 @@ use crate::app::App;
 use crate::rpc;
 use crate::store;
 
-use super::providers::call_provider;
+use super::providers::{call_provider, Request};
 use super::{load_config, RunCtx};
 
 pub const COMPACT_PROMPT: &str = "You are a summarizer. Produce a concise but complete summary of the conversation so far: key decisions, changes made to the app and its data, current state, and open TODOs. This summary will REPLACE the prior messages as context, so preserve everything needed to continue the work.";
@@ -141,15 +141,21 @@ pub fn compact_session(app: &Arc<App>, session: &str) -> Result<Value> {
     )];
     // Sentinel session: the summarizer's streamed deltas must not render as a
     // live draft bubble in the chat being compacted (no client shows this id).
-    let blocks = call_provider(
+    let live_session = format!("compact:{session}");
+    let never = || false;
+    let reply = call_provider(
         app,
-        &format!("compact:{session}"),
         &cfg,
-        COMPACT_PROMPT,
-        &msgs,
-        &[],
+        &Request {
+            session: &live_session,
+            system: COMPACT_PROMPT,
+            msgs: &msgs,
+            tools: &[],
+            stop: &never,
+        },
     )?;
-    let summary: String = blocks
+    let summary: String = reply
+        .blocks
         .iter()
         .filter_map(|b| b["text"].as_str().map(|t| t.to_string()))
         .collect::<Vec<_>>()

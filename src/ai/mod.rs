@@ -135,8 +135,17 @@ pub struct AiConfig {
     /// Ask the provider to stream. None = per-provider default: OFF for z.ai
     /// (its Anthropic-compatible endpoint drops tool-call blocks from streamed
     /// responses, so streamed GLM turns look like endless thinking and never
-    /// act), ON for real Anthropic. Override via config `ai.stream`.
+    /// act), ON for real Anthropic, OpenAI and custom servers. Override via
+    /// config `ai.stream`.
     pub stream: Option<bool>,
+    /// How hard a current Claude model thinks: `output_config.effort`
+    /// ("low" … "max"). None = "medium", the recommended start for agentic
+    /// work. Config `ai.effort`.
+    pub effort: Option<String>,
+    /// The model's context window in tokens, for a server whose window we
+    /// can't know (local, OpenAI-compatible). Sizes the history budget.
+    /// Config `ai.context_tokens`.
+    pub context_tokens: Option<u64>,
 }
 
 /// GLM-5.3 via z.ai's Anthropic-compatible endpoint treats a present
@@ -145,27 +154,36 @@ pub struct AiConfig {
 /// are ignored by that layer). Omitting max_tokens entirely — what every
 /// other working GLM client does — gets z.ai's own sane default and normal
 /// behavior. So zai sends no cap unless the user sets `ai.max_tokens`.
-/// Claude doesn't think unless explicitly enabled, so its cap is pure output.
-pub(crate) fn default_max_tokens(provider: &str) -> u32 {
-    match provider {
-        "anthropic" => 32768,
+///
+/// Current Claude models always think, and the thinking counts against
+/// max_tokens, so a streamed Claude turn gets room for both (64K is what
+/// long agentic turns need). A non-streamed request keeps a smaller cap, so
+/// the blocking request finishes inside its timeout.
+pub(crate) fn default_max_tokens(cfg: &AiConfig, stream: bool) -> u32 {
+    match cfg.provider.as_str() {
+        "anthropic" if stream => 64_000,
         // A local server is usually a quantized model on consumer hardware
         // emitting a few tokens/sec, where 16384 tokens is over an hour of
         // generation for a single turn - and a thinking model will happily
         // spend all of it reasoning. Keep the cap low enough that a turn
         // actually finishes; raise it with `ai.max_tokens` in Settings.
         "local" => 2048,
+        "openai-compatible" => 8192,
         _ => 16384,
     }
 }
 
 /// Serialized-history budget for this provider: compaction trigger and the
-/// outgoing hard-trim ceiling.
+/// outgoing hard-trim ceiling. A configured context size wins, at roughly
+/// 3 bytes per token after setting aside room for the reply.
 pub(crate) fn compact_bytes(cfg: &AiConfig) -> usize {
-    if cfg.provider == "local" {
-        LOCAL_COMPACT_BYTES
-    } else {
-        AUTO_COMPACT_BYTES
+    if let Some(tokens) = cfg.context_tokens {
+        let reply = cfg.max_tokens.unwrap_or(default_max_tokens(cfg, true)) as u64;
+        return (tokens.saturating_sub(reply) as usize * 3).max(16 * 1024);
+    }
+    match cfg.provider.as_str() {
+        "local" | "openai-compatible" => LOCAL_COMPACT_BYTES,
+        _ => AUTO_COMPACT_BYTES,
     }
 }
 
@@ -187,6 +205,8 @@ pub(crate) fn load_config(app: &Arc<App>) -> Result<AiConfig> {
         base_url: cfg["base_url"].as_str().map(|s| s.to_string()),
         max_tokens,
         stream: cfg["stream"].as_bool(),
+        effort: cfg["effort"].as_str().map(String::from),
+        context_tokens: cfg["context_tokens"].as_u64().filter(|t| *t > 0),
     })
 }
 

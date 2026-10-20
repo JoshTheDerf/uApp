@@ -12,7 +12,7 @@ use super::approval::approval_gate;
 use super::compact::auto_compact;
 use super::history::build_messages;
 use super::prompt::system_prompt;
-use super::providers::call_provider_retrying;
+use super::providers::{call_provider_retrying, is_stopped, Request, Usage};
 use super::toolset::{app_action_tools, builtin_tools, mcp_tools, run_tool};
 use super::{
     compact_bytes, load_config, plan_mode, CtxGuard, RunCtx, MAX_ITERATIONS, TOOL_RESULT_LIMIT,
@@ -70,8 +70,27 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         if msgs.is_empty() {
             break;
         }
-        let blocks = call_provider_retrying(app, ctx, &cfg, &system, &msgs, &tools)?;
+        let stop = || ctx.stopped();
+        let req = Request {
+            session: &ctx.session,
+            system: &system,
+            msgs: &msgs,
+            tools: &tools,
+            stop: &stop,
+        };
+        let reply = match call_provider_retrying(app, ctx, &cfg, &req) {
+            Ok(r) => r,
+            // Stop is not an error: the user asked for it.
+            Err(e) if is_stopped(&e) => break,
+            Err(e) => return Err(e),
+        };
+        // Stopped while the reply came in: drop it. Writing it now would
+        // also re-create rows in a chat that sessions.delete just removed.
+        if ctx.stopped() {
+            break;
+        }
         steps += 1;
+        let blocks = reply.blocks;
         let tool_uses: Vec<Value> = blocks
             .iter()
             .filter(|b| b["type"] == "tool_use")
@@ -91,7 +110,7 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
             app,
             "chat",
             json!({"mid": mid, "role": "assistant", "session": ctx.session,
-                   "content": {"blocks": blocks}}),
+                   "content": assistant_content(&blocks, &reply.model, reply.usage)}),
         )?;
         if tool_uses.is_empty() {
             // A message sent while this turn was in flight (this device or
@@ -192,6 +211,19 @@ pub(crate) fn run_loop(app: &Arc<App>, ctx: &RunCtx, max_iters: usize) -> Result
         )?;
     }
     Ok(Outcome { steps, report })
+}
+
+/// An assistant row's content: the blocks, plus which model answered and
+/// what the call cost in tokens (read back by `ai.usage`).
+pub(crate) fn assistant_content(blocks: &[Value], model: &str, usage: Usage) -> Value {
+    let mut c = json!({"blocks": blocks});
+    if !model.is_empty() {
+        c["model"] = json!(model);
+    }
+    if !usage.is_empty() {
+        c["usage"] = usage.to_json();
+    }
+    c
 }
 
 /// Newest chat row id in a session — the watermark for "seen by this turn".

@@ -6,30 +6,76 @@ use std::sync::Arc;
 
 use crate::app::App;
 
-use super::{provider_error, tool_input};
+use super::{
+    open_stream, post, read_sse, retryable, tool_input, transient_kind, Live, Reply, Request, Usage,
+};
 use crate::ai::{default_max_tokens, AiConfig};
 
-/// Anthropic `system` as cacheable blocks: the big stable prompt (instructions
-/// + tool docs) is one cached block, the volatile tail (current files/schema,
-/// which change as work proceeds) a second uncached one — so the cached prefix
-/// stays valid across a turn's many iterations. `cache=false` (z.ai) returns
-/// the plain string unchanged.
+pub(crate) const DEFAULT_MODEL: &str = "claude-opus-5-5";
+const ZAI_MODEL: &str = "glm-5.3";
+
+/// Opt-in that lets a request say what to do with a thinking block whose
+/// conversation changed since it was produced (see [`thinking_config`]).
+const BETA_THINKING_BINDING: &str = "thinking-binding-controls-2026-08-01";
+/// Server-side retry on another model when a safety classifier declines.
+const BETA_FALLBACK: &str = "server-side-fallback-2026-07-01";
+
+/// Models that take adaptive thinking and `output_config.effort`: Claude 4.6
+/// and later. Older ones (4.5, Haiku 4.5, 3.x) reject that config, and an
+/// unrecognized name (a proxy's alias) gets no thinking config at all.
+pub(crate) fn adaptive_model(model: &str) -> bool {
+    let Some(rest) = model.strip_prefix("claude-") else {
+        return false;
+    };
+    let mut parts = rest.split('-');
+    let family = parts.next().unwrap_or("");
+    if !matches!(family, "opus" | "sonnet" | "haiku" | "fable" | "mythos") {
+        return false;
+    }
+    let major: u32 = match parts.next().and_then(|p| p.parse().ok()) {
+        Some(m) => m,
+        None => return false,
+    };
+    // A dated snapshot id ("claude-sonnet-4-20250514") has no minor.
+    let minor: u32 = parts
+        .next()
+        .filter(|p| p.len() <= 2)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    major >= 5 || (major == 4 && minor >= 6)
+}
+
+/// Models whose refusals the API can retry on another model by itself
+/// (`fallbacks: "default"`, Claude API only).
+fn takes_default_fallback(model: &str) -> bool {
+    matches!(
+        model,
+        "claude-opus-5-5" | "claude-opus-5" | "claude-fable-5-1" | "claude-sonnet-5-5"
+    )
+}
+
+/// Thinking settings for a current Claude model. Thinking is always on for
+/// them; `summarized` returns readable reasoning (and Opus 5.5's progress
+/// notes between tool calls) instead of empty blocks, so the chat can show it.
+///
+/// `drop_block`: a thinking block is bound to the exact conversation before
+/// it. History trimming, compaction and the hard ceiling all edit that
+/// prefix at times, and without this the API would reject the replayed
+/// block with a 400. With it the API drops the stale blocks and answers.
+fn thinking_config() -> Value {
+    json!({"type": "adaptive", "display": "summarized",
+           "block_binding": {"prefix_mismatch_behavior": "drop_block"}})
+}
+
+/// Anthropic `system` as one cached block. The prompt is frozen for a run
+/// (the changing app snapshot travels in the messages), so the cached prefix
+/// stays valid across the run's steps. `cache=false` (z.ai) returns the
+/// plain string unchanged.
 pub(crate) fn system_blocks(system: &str, cache: bool) -> Value {
     if !cache {
         return json!(system);
     }
-    let split = system
-        .find("\n\nCURRENT APP FILES:")
-        .unwrap_or(system.len());
-    let (stable, volatile) = system.split_at(split);
-    let mut blocks = vec![json!({
-        "type": "text", "text": stable,
-        "cache_control": {"type": "ephemeral"},
-    })];
-    if !volatile.is_empty() {
-        blocks.push(json!({"type": "text", "text": volatile}));
-    }
-    json!(blocks)
+    json!([{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}])
 }
 
 /// Mark the last tool with `cache_control`, so the whole (stable) tools array
@@ -61,75 +107,168 @@ pub(crate) fn cache_last_message(messages: &[Value], cache: bool) -> Value {
     json!(out)
 }
 
-/// Extract neutral blocks from a complete (non-streamed) Anthropic message.
-/// Lenient — returns an empty vec when there is nothing usable (e.g. the whole
-/// budget went to reasoning); the caller decides whether that's worth a
-/// budget-bump retry or an error.
-pub(crate) fn parse_anthropic_message(resp: &Value) -> Vec<Value> {
-    let mut out = Vec::new();
-    for b in resp["content"].as_array().cloned().unwrap_or_default() {
-        match b["type"].as_str().unwrap_or("") {
-            "text" => out.push(json!({"type": "text", "text": b["text"]})),
-            "tool_use" => out.push(json!({"type": "tool_use", "id": b["id"],
-                "name": b["name"], "input": b["input"]})),
-            "thinking" => out.push(json!({"type": "thinking",
-                "thinking": b["thinking"], "signature": b["signature"]})),
-            _ => {}
+/// Neutral messages in Anthropic's shape.
+///
+/// Claude gets every thinking block back exactly as it came: Claude reads
+/// earlier turns' reasoning, and stripping blocks that were sent on the
+/// previous step would change the cached prefix every step. z.ai only gets
+/// the final assistant turn's thinking (the one whose tool results follow,
+/// so the model can resume mid-reasoning): replaying a whole run's reasoning
+/// makes GLM re-read and extend every prior thought, so thinking snowballs
+/// each iteration until it eats the entire budget.
+pub(crate) fn to_messages(msgs: &[(String, Vec<Value>)], replay_all_thinking: bool) -> Vec<Value> {
+    let last_assistant = msgs.iter().rposition(|(r, _)| r == "assistant");
+    msgs.iter()
+        .enumerate()
+        .map(|(i, (role, blocks))| {
+            let keep_thinking = replay_all_thinking || Some(i) == last_assistant;
+            let content: Vec<Value> = blocks
+                .iter()
+                .filter_map(|b| match b["type"].as_str().unwrap_or("") {
+                    "text" => Some(json!({"type": "text", "text": b["text"]})),
+                    "image" => Some(json!({"type": "image", "source": {"type": "base64",
+                        "media_type": b["media"], "data": b["b64"]}})),
+                    "tool_use" => Some(json!({"type": "tool_use", "id": b["id"],
+                        "name": b["name"], "input": b["input"]})),
+                    "tool_result" => Some(json!({"type": "tool_result", "tool_use_id": b["id"],
+                        "content": b["content"], "is_error": b["is_error"]})),
+                    "thinking" if keep_thinking => Some(json!({"type": "thinking",
+                        "thinking": b["thinking"], "signature": b["signature"]})),
+                    "redacted_thinking" if keep_thinking => {
+                        Some(json!({"type": "redacted_thinking", "data": b["data"]}))
+                    }
+                    _ => None,
+                })
+                .collect();
+            json!({"role": role, "content": content})
+        })
+        .collect()
+}
+
+/// A response as read off the wire, before deciding whether it's usable.
+#[derive(Default)]
+pub(crate) struct Parsed {
+    pub blocks: Vec<Value>,
+    pub stop_reason: String,
+    pub refusal_category: Option<String>,
+    pub usage: Usage,
+    pub model: String,
+}
+
+fn read_usage(u: &Value, usage: &mut Usage) {
+    let set = |k: &str, slot: &mut u64| {
+        if let Some(n) = u[k].as_u64() {
+            *slot = n;
         }
+    };
+    set("input_tokens", &mut usage.input);
+    set("output_tokens", &mut usage.output);
+    set("cache_read_input_tokens", &mut usage.cache_read);
+    set("cache_creation_input_tokens", &mut usage.cache_write);
+}
+
+/// Keep the blocks we can store and replay. After a server-side fallback
+/// mid-answer, the declined model's thinking and tool calls before the last
+/// `fallback` marker must not be echoed back (its text may).
+fn keep_blocks(raw: Vec<Value>) -> Vec<Value> {
+    let boundary = raw.iter().rposition(|b| b["type"] == "fallback");
+    raw.into_iter()
+        .enumerate()
+        .filter(|(i, b)| {
+            let t = b["type"].as_str().unwrap_or("");
+            let before_fallback = boundary.is_some_and(|f| *i < f);
+            match t {
+                "text" => b["text"].as_str().is_some_and(|s| !s.is_empty()),
+                "thinking" | "redacted_thinking" | "tool_use" => !before_fallback,
+                _ => false,
+            }
+        })
+        .map(|(_, b)| b)
+        .collect()
+}
+
+/// One content block from a complete message, in neutral form.
+fn neutral_block(b: &Value) -> Value {
+    match b["type"].as_str().unwrap_or("") {
+        "text" => json!({"type": "text", "text": b["text"]}),
+        "tool_use" => json!({"type": "tool_use", "id": b["id"], "name": b["name"],
+                             "input": if b["input"].is_object() { b["input"].clone() } else { json!({}) }}),
+        "thinking" => json!({"type": "thinking", "thinking": b["thinking"],
+                             "signature": b["signature"]}),
+        "redacted_thinking" => json!({"type": "redacted_thinking", "data": b["data"]}),
+        other => json!({"type": other}),
     }
-    if !out
-        .iter()
-        .any(|b| b["type"] == "text" || b["type"] == "tool_use")
-    {
-        out.clear();
-    }
-    out
+}
+
+/// A complete (non-streamed) Anthropic message.
+pub(crate) fn parse_message(v: &Value) -> Parsed {
+    let mut p = Parsed {
+        stop_reason: v["stop_reason"].as_str().unwrap_or("").to_string(),
+        refusal_category: v["stop_details"]["category"].as_str().map(String::from),
+        model: v["model"].as_str().unwrap_or("").to_string(),
+        ..Default::default()
+    };
+    read_usage(&v["usage"], &mut p.usage);
+    let raw: Vec<Value> = v["content"]
+        .as_array()
+        .map(|a| a.iter().map(neutral_block).collect())
+        .unwrap_or_default();
+    p.blocks = keep_blocks(raw);
+    p
 }
 
 /// Read an Anthropic SSE stream: assemble content blocks from deltas, pushing
 /// partial text and thinking heartbeats to the shell as they arrive.
-/// Returns (blocks, stop_reason, thinking_chars).
-pub(crate) fn read_anthropic_sse(
-    app: &Arc<App>,
-    session: &str,
-    reader: Box<dyn std::io::BufRead>,
-) -> Result<(Vec<Value>, String, usize)> {
+pub(crate) fn read_stream(
+    reader: &mut dyn std::io::BufRead,
+    stop: &dyn Fn() -> bool,
+    live: &mut Live,
+) -> Result<Parsed> {
     #[derive(Default)]
     struct Blk {
         typ: String,
         text: String,
         sig: String,
+        data: String,
         id: String,
         name: String,
         json: String,
         start_input: Value,
     }
     let mut blks: std::collections::BTreeMap<u64, Blk> = Default::default();
-    let mut live_text = String::new();
-    let mut think_chars: usize = 0;
-    let mut stop_reason = String::new();
-    let mut last_push: u64 = 0;
-    use std::io::BufRead as _;
-    for line in reader.lines() {
-        let line = line.map_err(|e| anyhow!("stream read failed: {e}"))?;
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let Ok(ev) = serde_json::from_str::<Value>(data.trim()) else {
-            continue;
+    let mut p = Parsed::default();
+    let mut thinking_open = false;
+    read_sse(reader, stop, |data| {
+        let Ok(ev) = serde_json::from_str::<Value>(data) else {
+            return Ok(false);
         };
         match ev["type"].as_str().unwrap_or("") {
+            "message_start" => {
+                read_usage(&ev["message"]["usage"], &mut p.usage);
+                p.model = ev["message"]["model"].as_str().unwrap_or("").to_string();
+            }
             "content_block_start" => {
                 let idx = ev["index"].as_u64().unwrap_or(0);
                 let cb = &ev["content_block"];
+                let typ = cb["type"].as_str().unwrap_or("").to_string();
+                thinking_open = typ == "thinking" || typ == "redacted_thinking";
+                if thinking_open {
+                    live.thinking(0, true);
+                }
                 blks.insert(
                     idx,
                     Blk {
-                        typ: cb["type"].as_str().unwrap_or("").to_string(),
-                        text: cb["text"].as_str().unwrap_or("").to_string(),
+                        text: cb["text"]
+                            .as_str()
+                            .or(cb["thinking"].as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        sig: cb["signature"].as_str().unwrap_or("").to_string(),
+                        data: cb["data"].as_str().unwrap_or("").to_string(),
                         id: cb["id"].as_str().unwrap_or("").to_string(),
                         name: cb["name"].as_str().unwrap_or("").to_string(),
                         start_input: cb["input"].clone(),
+                        typ,
                         ..Default::default()
                     },
                 );
@@ -142,64 +281,58 @@ pub(crate) fn read_anthropic_sse(
                     "text_delta" => {
                         let t = d["text"].as_str().unwrap_or("");
                         blk.text.push_str(t);
-                        live_text.push_str(t);
-                        if crate::store::now_ms().saturating_sub(last_push) > 250 {
-                            app.notify(
-                                "ai",
-                                json!({"state": "streaming", "text": live_text,
-                                                    "session": session}),
-                            );
-                            last_push = crate::store::now_ms();
-                        }
+                        live.text(t);
                     }
                     "thinking_delta" => {
                         let t = d["thinking"].as_str().unwrap_or("");
                         blk.text.push_str(t);
-                        think_chars += t.len();
-                        // Heartbeat so long reasoning doesn't look stalled.
-                        if crate::store::now_ms().saturating_sub(last_push) > 900 {
-                            app.notify(
-                                "ai",
-                                json!({"state": "thinking", "chars": think_chars,
-                                                    "session": session}),
-                            );
-                            last_push = crate::store::now_ms();
-                        }
+                        live.thinking(t.len(), false);
                     }
-                    "signature_delta" => blk.sig.push_str(d["signature"].as_str().unwrap_or("")),
+                    "signature_delta" => {
+                        blk.sig.push_str(d["signature"].as_str().unwrap_or(""));
+                        live.thinking(0, false);
+                    }
                     "input_json_delta" => {
                         blk.json.push_str(d["partial_json"].as_str().unwrap_or(""))
                     }
                     _ => {}
                 }
             }
+            "content_block_stop" => thinking_open = false,
+            "ping" if thinking_open => live.thinking(0, false),
             "message_delta" => {
                 if let Some(sr) = ev["delta"]["stop_reason"].as_str() {
-                    stop_reason = sr.to_string();
+                    p.stop_reason = sr.to_string();
                 }
+                if let Some(c) = ev["delta"]["stop_details"]["category"].as_str() {
+                    p.refusal_category = Some(c.to_string());
+                }
+                read_usage(&ev["usage"], &mut p.usage);
             }
-            "error" => bail!(
-                "provider stream error: {}",
-                ev["error"]["message"].as_str().unwrap_or("unknown")
-            ),
-            "message_stop" => break,
+            "error" => {
+                let kind = ev["error"]["type"].as_str().unwrap_or("");
+                let msg = format!(
+                    "provider stream error: {}",
+                    ev["error"]["message"].as_str().unwrap_or("unknown")
+                );
+                if transient_kind(kind) {
+                    return Err(retryable(msg));
+                }
+                bail!(msg);
+            }
+            "message_stop" => return Ok(true),
             _ => {}
         }
-    }
-    if !live_text.is_empty() {
-        app.notify(
-            "ai",
-            json!({"state": "streaming", "text": live_text, "session": session}),
-        );
-    }
+        Ok(false)
+    })?;
+    live.flush();
 
-    let mut out = Vec::new();
+    let mut raw = Vec::new();
     for (_, b) in blks {
-        match b.typ.as_str() {
-            "text" if !b.text.is_empty() => out.push(json!({"type": "text", "text": b.text})),
-            "thinking" => {
-                out.push(json!({"type": "thinking", "thinking": b.text, "signature": b.sig}))
-            }
+        raw.push(match b.typ.as_str() {
+            "text" => json!({"type": "text", "text": b.text}),
+            "thinking" => json!({"type": "thinking", "thinking": b.text, "signature": b.sig}),
+            "redacted_thinking" => json!({"type": "redacted_thinking", "data": b.data}),
             "tool_use" => {
                 let input = if b.json.trim().is_empty() {
                     if b.start_input.is_object() {
@@ -210,105 +343,73 @@ pub(crate) fn read_anthropic_sse(
                 } else {
                     tool_input(&b.json)
                 };
-                out.push(json!({"type": "tool_use", "id": b.id, "name": b.name, "input": input}));
+                json!({"type": "tool_use", "id": b.id, "name": b.name, "input": input})
             }
-            _ => {}
-        }
+            other => json!({"type": other}),
+        });
     }
-    Ok((out, stop_reason, think_chars))
+    p.blocks = keep_blocks(raw);
+    Ok(p)
 }
 
-pub(crate) fn call_anthropic(
-    app: &Arc<App>,
-    session: &str,
-    cfg: &AiConfig,
-    system: &str,
-    msgs: &[(String, Vec<Value>)],
-    tools: &[Value],
-) -> Result<Vec<Value>> {
-    let base = cfg
-        .base_url
-        .clone()
-        .unwrap_or_else(|| match cfg.provider.as_str() {
-            "zai" => "https://api.z.ai/api/anthropic".into(),
-            _ => "https://api.anthropic.com".into(),
-        });
-    let default_model = match cfg.provider.as_str() {
-        "zai" => "glm-5.3",
-        _ => "claude-sonnet-5",
-    };
-    // Replay thinking blocks ONLY for the final assistant turn (the one whose
-    // tool results follow) so the model can resume mid-reasoning — that's the
-    // Anthropic tool-use rule. Older turns' thinking is stripped: replaying a
-    // whole run's reasoning makes GLM re-read and extend every prior thought,
-    // so thinking snowballs each iteration until it eats the entire budget.
-    let last_assistant = msgs.iter().rposition(|(r, _)| r == "assistant");
-    let messages: Vec<Value> = msgs
-        .iter()
-        .enumerate()
-        .map(|(i, (role, blocks))| {
-            let content: Vec<Value> = blocks
-                .iter()
-                .filter_map(|b| match b["type"].as_str().unwrap_or("") {
-                    "text" => Some(json!({"type": "text", "text": b["text"]})),
-                    "image" => Some(json!({"type": "image", "source": {"type": "base64",
-                        "media_type": b["media"], "data": b["b64"]}})),
-                    "tool_use" => Some(json!({"type": "tool_use", "id": b["id"],
-                        "name": b["name"], "input": b["input"]})),
-                    "tool_result" => Some(json!({"type": "tool_result", "tool_use_id": b["id"],
-                        "content": b["content"], "is_error": b["is_error"]})),
-                    // Extended-thinking blocks must be replayed verbatim
-                    // (GLM-5.3 and Claude both emit them with tool use) —
-                    // but only for the final assistant turn, see above.
-                    "thinking" if Some(i) == last_assistant => Some(json!({"type": "thinking",
-                        "thinking": b["thinking"], "signature": b["signature"]})),
-                    _ => None,
-                })
-                .collect();
-            json!({"role": role, "content": content})
-        })
-        .collect();
-    // z.ai's Anthropic-compatible endpoint mis-streams GLM: tool-call blocks
-    // never arrive as deltas, so a streamed turn looks like endless thinking
-    // that eats the whole budget without ever acting (the ../chat app hit the
-    // same thing and drives z.ai non-streaming for exactly this reason).
-    // Non-streaming returns tool calls reliably, so zai defaults to it; real
-    // Anthropic streams. Override per instance with config `ai.stream`.
-    let stream = cfg.stream.unwrap_or(cfg.provider != "zai");
+/// Anthropic Messages API client.
+pub(crate) struct Anthropic;
 
-    // Thinking models can exhaust an explicit token budget before emitting
-    // any text or tool call. When that happens, retry once with a doubled
-    // budget before giving up. zai defaults to NO cap (see AiConfig) — the
-    // mere presence of max_tokens makes z.ai hand the whole budget to
-    // thinking — so the retry only applies when a cap was requested.
-    let mut budget = match cfg.provider.as_str() {
-        "zai" => cfg.max_tokens, // None = omit the field entirely
-        _ => Some(
-            cfg.max_tokens
-                .unwrap_or_else(|| default_max_tokens(&cfg.provider)),
-        ),
-    };
-    // Prompt caching pays off across a long tool loop, but only real
-    // Anthropic is guaranteed to honour `cache_control`; z.ai's compatible
-    // endpoint is left alone.
-    let cache = cfg.provider == "anthropic";
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let mut body = json!({
-            "model": if cfg.model.is_empty() { default_model } else { &cfg.model },
-            "system": system_blocks(system, cache),
-            "messages": cache_last_message(&messages, cache),
-            "tools": cache_last_tool(tools, cache),
-        });
-        if let Some(b) = budget {
-            body["max_tokens"] = json!(b);
+impl super::Provider for Anthropic {
+    fn call(&self, app: &Arc<App>, cfg: &AiConfig, req: &Request) -> Result<Reply> {
+        let official = cfg.provider == "anthropic";
+        let base = cfg
+            .base_url
+            .clone()
+            .unwrap_or_else(|| match cfg.provider.as_str() {
+                "zai" => "https://api.z.ai/api/anthropic".into(),
+                _ => "https://api.anthropic.com".into(),
+            });
+        let model = if !cfg.model.is_empty() {
+            cfg.model.clone()
+        } else if official {
+            DEFAULT_MODEL.to_string()
+        } else {
+            ZAI_MODEL.to_string()
+        };
+        let messages = to_messages(req.msgs, official);
+        // z.ai's Anthropic-compatible endpoint mis-streams GLM: tool-call blocks
+        // never arrive as deltas, so a streamed turn looks like endless thinking
+        // that eats the whole budget without ever acting (the ../chat app hit the
+        // same thing and drives z.ai non-streaming for exactly this reason).
+        // Non-streaming returns tool calls reliably, so zai defaults to it; real
+        // Anthropic streams. Override per instance with config `ai.stream`.
+        let stream = cfg.stream.unwrap_or(official);
+        let adaptive = official && adaptive_model(&model);
+        // Thinking models can exhaust an explicit token budget before emitting
+        // any text or tool call. When that happens, retry once with a doubled
+        // budget before giving up. zai defaults to NO cap (see AiConfig) — the
+        // mere presence of max_tokens makes z.ai hand the whole budget to
+        // thinking — so the retry only applies when a cap was requested.
+        let mut budget = match cfg.provider.as_str() {
+            "zai" => cfg.max_tokens, // None = omit the field entirely
+            _ => Some(
+                cfg.max_tokens
+                    .unwrap_or_else(|| default_max_tokens(cfg, stream)),
+            ),
+        };
+        // Prompt caching pays off across a long tool loop, but only real
+        // Anthropic is guaranteed to honour `cache_control`; z.ai's compatible
+        // endpoint is left alone.
+        let cache = official;
+        let mut betas: Vec<&str> = Vec::new();
+        if adaptive {
+            betas.push(BETA_THINKING_BINDING);
         }
-        if stream {
-            body["stream"] = json!(true);
+        // Server-side fallback is a Claude API feature; a proxy at another
+        // base URL may not know the parameter.
+        let fallback = official && cfg.base_url.is_none() && takes_default_fallback(&model);
+        if fallback {
+            betas.push(BETA_FALLBACK);
         }
-        // z.ai accepts either header; real Anthropic uses x-api-key. Send both.
+        let betas = betas.join(",");
         let auth = format!("Bearer {}", cfg.api_key);
+        // z.ai accepts either header; real Anthropic uses x-api-key. Send both.
         let mut headers: Vec<(&str, &str)> = vec![
             ("x-api-key", &cfg.api_key),
             ("Authorization", &auth),
@@ -323,87 +424,317 @@ pub(crate) fn call_anthropic(
                 },
             ),
         ];
+        if !betas.is_empty() {
+            headers.push(("anthropic-beta", &betas));
+        }
         // Browser build: Anthropic requires this opt-in header before it
         // answers cross-origin requests from a page.
         if cfg!(target_arch = "wasm32") {
             headers.push(("anthropic-dangerous-direct-browser-access", "true"));
         }
-        // Streaming: no overall timeout (long thinking runs are legitimate),
-        // but a 180s idle-read timeout so a dead connection can't hang.
-        // Non-streaming: nothing arrives until the model is done, so the read
-        // timeout must cover a full long-thinking generation.
-        let resp = crate::net::request(
-            "POST",
-            &format!("{base}/v1/messages"),
-            &headers,
-            Some(&body.to_string()),
-            20,
-            if stream { 180 } else { 900 },
-        )
-        .map_err(|e| anyhow!("provider request failed: {e}"))?;
-        if resp.status >= 400 {
-            return Err(provider_error(resp));
-        }
-        let (out, stop_reason, think_chars) = if resp.content_type.contains("event-stream") {
-            read_anthropic_sse(app, session, resp.reader)?
-        } else {
-            // One JSON message: we asked non-streaming (the zai default) or
-            // the provider ignored the stream flag.
-            let v: Value = serde_json::from_str(&resp.into_string()?)?;
-            if v.get("error").is_some() {
+        let url = format!("{base}/v1/messages");
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let mut body = json!({
+                "model": model,
+                "system": system_blocks(req.system, cache),
+                "messages": cache_last_message(&messages, cache),
+                "tools": cache_last_tool(req.tools, cache),
+            });
+            if let Some(b) = budget {
+                body["max_tokens"] = json!(b);
+            }
+            if stream {
+                body["stream"] = json!(true);
+            }
+            if adaptive {
+                body["thinking"] = thinking_config();
+                body["output_config"] =
+                    json!({"effort": cfg.effort.as_deref().unwrap_or("medium")});
+            }
+            if fallback {
+                body["fallbacks"] = json!("default");
+            }
+            let mut notify = |v: Value| app.notify("ai", v);
+            let mut live = Live::new(req.session, &mut notify);
+            // Streaming: no overall timeout (long thinking runs are legitimate),
+            // but a 180s idle-read timeout so a dead connection can't hang.
+            // Non-streaming: nothing arrives until the model is done, so the read
+            // timeout must cover a full long-thinking generation.
+            let p = if stream {
+                let resp = open_stream(&url, &headers, &body, 180)?;
+                if resp.content_type.contains("event-stream") {
+                    let mut reader = resp.reader;
+                    read_stream(&mut *reader, req.stop, &mut live)?
+                } else {
+                    // The provider ignored the stream flag.
+                    let text = resp
+                        .into_string()
+                        .map_err(|e| retryable(format!("provider request failed: {e}")))?;
+                    let v: Value = serde_json::from_str(&text)
+                        .map_err(|e| anyhow!("provider sent unreadable JSON: {e}"))?;
+                    message_or_error(&v)?
+                }
+            } else {
+                let (ctype, text) = post(&url, &headers, &body, 900, req.stop)?;
+                if ctype.contains("event-stream") {
+                    // Asked not to stream, streamed anyway.
+                    let mut reader = std::io::Cursor::new(text.into_bytes());
+                    read_stream(&mut reader, req.stop, &mut live)?
+                } else {
+                    let v: Value = serde_json::from_str(&text)
+                        .map_err(|e| anyhow!("provider sent unreadable JSON: {e}"))?;
+                    message_or_error(&v)?
+                }
+            };
+            if p.stop_reason == "refusal" {
                 bail!(
-                    "provider error: {}",
-                    v["error"]["message"].as_str().unwrap_or("unknown")
+                    "the model declined this request{}. Rephrasing it may help, or pick \
+                     another model in Settings",
+                    p.refusal_category
+                        .as_deref()
+                        .map(|c| format!(" ({c})"))
+                        .unwrap_or_default()
                 );
             }
-            let stop = v["stop_reason"].as_str().unwrap_or("").to_string();
-            (parse_anthropic_message(&v), stop, 0)
-        };
-        if out
-            .iter()
-            .any(|b| b["type"] == "text" || b["type"] == "tool_use")
-        {
-            return Ok(out);
-        }
-        // Nothing usable. Thinking-only + max_tokens = an explicit budget was
-        // exhausted by reasoning; give it one more shot with double the room.
-        if stop_reason == "max_tokens" && attempt == 1 && budget.is_some() {
-            let old = budget.unwrap();
-            budget = Some(old.saturating_mul(2).min(131_072));
-            eprintln!(
-                "uapp: model spent the whole {}-token budget thinking ({} chars); retrying with {}",
-                old,
-                think_chars,
-                budget.unwrap()
-            );
-            app.notify("ai", json!({"state": "running", "session": session,
-                "note": format!("model needed more room to think — retrying with {} tokens", budget.unwrap())}));
-            continue;
-        }
-        if stop_reason == "max_tokens" && budget.is_some() {
+            if p.blocks
+                .iter()
+                .any(|b| b["type"] == "text" || b["type"] == "tool_use")
+            {
+                return Ok(Reply {
+                    blocks: p.blocks,
+                    usage: p.usage,
+                    model: if p.model.is_empty() { model } else { p.model },
+                });
+            }
+            // Nothing usable. Thinking-only + max_tokens = an explicit budget was
+            // exhausted by reasoning; give it one more shot with double the room.
+            if let (Some(old), "max_tokens", 1) = (budget, p.stop_reason.as_str(), attempt) {
+                let new = old.saturating_mul(2).min(128_000);
+                budget = Some(new);
+                eprintln!(
+                    "uapp: model spent the whole {old}-token budget thinking ({} chars); \
+                     retrying with {new}",
+                    live.think_chars
+                );
+                app.notify("ai", json!({"state": "running", "session": req.session,
+                    "note": format!("model needed more room to think — retrying with {new} tokens")}));
+                continue;
+            }
+            if let (Some(b), "max_tokens") = (budget, p.stop_reason.as_str()) {
+                bail!(
+                    "the model used the entire {b}-token budget on internal reasoning without \
+                     producing an answer — raise max_tokens in Settings or simplify the request"
+                );
+            }
             bail!(
-                "the model used the entire {}-token budget on internal reasoning without \
-                 producing an answer — raise max_tokens in Settings or simplify the request",
-                budget.unwrap()
+                "empty response from provider (stop_reason: {})",
+                p.stop_reason
             );
         }
-        bail!("empty response from provider (stop_reason: {stop_reason})");
     }
 }
 
-/// Anthropic Messages API client.
-pub(crate) struct Anthropic;
+/// A complete message, or the error object some endpoints return with 200.
+fn message_or_error(v: &Value) -> Result<Parsed> {
+    if v.get("error").is_some() {
+        let msg = format!(
+            "provider error: {}",
+            v["error"]["message"].as_str().unwrap_or("unknown")
+        );
+        if transient_kind(v["error"]["type"].as_str().unwrap_or("")) {
+            return Err(retryable(msg));
+        }
+        bail!(msg);
+    }
+    Ok(parse_message(v))
+}
 
-impl super::Provider for Anthropic {
-    fn call(
-        &self,
-        app: &Arc<App>,
-        session: &str,
-        cfg: &AiConfig,
-        system: &str,
-        msgs: &[(String, Vec<Value>)],
-        tools: &[Value],
-    ) -> Result<Vec<Value>> {
-        call_anthropic(app, session, cfg, system, msgs, tools)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::providers::CallError;
+
+    fn sse(events: &[Value]) -> std::io::Cursor<Vec<u8>> {
+        let mut s = String::new();
+        for e in events {
+            s.push_str(&format!(
+                "event: {}\ndata: {}\n\n",
+                e["type"].as_str().unwrap(),
+                e
+            ));
+        }
+        std::io::Cursor::new(s.into_bytes())
+    }
+
+    fn full_stream() -> Vec<Value> {
+        vec![
+            json!({"type": "message_start", "message": {"model": "claude-opus-5-5",
+                "usage": {"input_tokens": 10, "cache_read_input_tokens": 900,
+                          "cache_creation_input_tokens": 50, "output_tokens": 1}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Hi"}}),
+            json!({"type": "content_block_start", "index": 2, "content_block": {"type": "tool_use", "id": "t1", "name": "get_schema", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": "{\"a\":"}}),
+            json!({"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": "1}"}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 42}}),
+            json!({"type": "message_stop"}),
+        ]
+    }
+
+    #[test]
+    fn stream_assembles_blocks_usage_and_heartbeats() {
+        let mut events = Vec::new();
+        let mut notify = |v: Value| events.push(v);
+        let mut live = Live::new("s", &mut notify);
+        let p = read_stream(&mut sse(&full_stream()), &|| false, &mut live).unwrap();
+        assert_eq!(p.stop_reason, "tool_use");
+        assert_eq!(p.model, "claude-opus-5-5");
+        assert_eq!(
+            p.usage,
+            Usage {
+                input: 10,
+                output: 42,
+                cache_read: 900,
+                cache_write: 50
+            }
+        );
+        let types: Vec<&str> = p
+            .blocks
+            .iter()
+            .map(|b| b["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(types, ["thinking", "text", "tool_use"]);
+        assert_eq!(p.blocks[0]["signature"], "sig");
+        assert_eq!(p.blocks[2]["input"], json!({"a": 1}));
+        // Hidden thinking still produced a heartbeat.
+        assert!(events.iter().any(|e| e["state"] == "thinking"));
+        assert!(events
+            .iter()
+            .any(|e| e["state"] == "streaming" && e["text"] == "Hi"));
+    }
+
+    #[test]
+    fn truncated_stream_is_retryable() {
+        let mut ev = full_stream();
+        ev.truncate(7);
+        let mut notify = |_v: Value| {};
+        let mut live = Live::new("s", &mut notify);
+        let e = read_stream(&mut sse(&ev), &|| false, &mut live)
+            .err()
+            .unwrap();
+        assert!(matches!(
+            e.downcast_ref::<CallError>(),
+            Some(CallError::Retryable { .. })
+        ));
+    }
+
+    #[test]
+    fn overload_mid_stream_is_retryable_but_invalid_request_is_not() {
+        let mut notify = |_v: Value| {};
+        let mut live = Live::new("s", &mut notify);
+        let over = vec![
+            json!({"type": "message_start", "message": {}}),
+            json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}),
+        ];
+        let e = read_stream(&mut sse(&over), &|| false, &mut live)
+            .err()
+            .unwrap();
+        assert!(e.downcast_ref::<CallError>().is_some());
+        let bad = vec![
+            json!({"type": "error", "error": {"type": "invalid_request_error", "message": "no"}}),
+        ];
+        let e = read_stream(&mut sse(&bad), &|| false, &mut live)
+            .err()
+            .unwrap();
+        assert!(e.downcast_ref::<CallError>().is_none());
+    }
+
+    #[test]
+    fn fallback_boundary_drops_the_declined_models_tool_calls() {
+        let v = json!({"stop_reason": "end_turn", "content": [
+            {"type": "thinking", "thinking": "a", "signature": "s"},
+            {"type": "text", "text": "partial"},
+            {"type": "tool_use", "id": "x", "name": "n", "input": {}},
+            {"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}},
+            {"type": "text", "text": "rest"}
+        ]});
+        let p = parse_message(&v);
+        let texts: Vec<&str> = p
+            .blocks
+            .iter()
+            .map(|b| b["text"].as_str().unwrap_or("-"))
+            .collect();
+        assert_eq!(texts, ["partial", "rest"]);
+    }
+
+    #[test]
+    fn adaptive_models() {
+        for m in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+            "claude-opus-4-6",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+        ] {
+            assert!(adaptive_model(m), "{m}");
+        }
+        for m in [
+            "claude-haiku-4-5",
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-20250514",
+            "claude-3-7-sonnet-latest",
+            "glm-5.3",
+            "my-proxy-alias",
+        ] {
+            assert!(!adaptive_model(m), "{m}");
+        }
+    }
+
+    #[test]
+    fn thinking_replay_depends_on_provider() {
+        let msgs = vec![
+            (
+                "user".to_string(),
+                vec![json!({"type": "text", "text": "hi"})],
+            ),
+            (
+                "assistant".to_string(),
+                vec![
+                    json!({"type": "thinking", "thinking": "a", "signature": "1"}),
+                    json!({"type": "tool_use", "id": "t", "name": "x", "input": {}}),
+                ],
+            ),
+            (
+                "user".to_string(),
+                vec![json!({"type": "tool_result", "id": "t", "content": "r"})],
+            ),
+            (
+                "assistant".to_string(),
+                vec![
+                    json!({"type": "redacted_thinking", "data": "zz"}),
+                    json!({"type": "tool_use", "id": "u", "name": "x", "input": {}}),
+                ],
+            ),
+            (
+                "user".to_string(),
+                vec![json!({"type": "tool_result", "id": "u", "content": "r"})],
+            ),
+        ];
+        let count = |m: &[Value]| {
+            m.iter()
+                .flat_map(|m| m["content"].as_array().unwrap())
+                .filter(|b| b["type"] == "thinking" || b["type"] == "redacted_thinking")
+                .count()
+        };
+        assert_eq!(count(&to_messages(&msgs, true)), 2);
+        assert_eq!(count(&to_messages(&msgs, false)), 1);
     }
 }
