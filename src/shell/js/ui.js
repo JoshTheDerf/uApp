@@ -646,7 +646,9 @@ export const panelOpen = (id) => !!$(id)?.classList.contains("open");
 /// opts.focus: the user opened it (button, shortcut), so focus follows.
 /// Opens asked for by the app or the assistant leave focus where it is.
 export function openPanel(id, opts = {}) {
-  for (const other in panels) if (other !== id) closePanel(other, { handoff: true });
+  // Focus in a panel being swapped out goes to the new one when it takes
+  // focus, and back where it came from otherwise.
+  for (const other in panels) if (other !== id) closePanel(other, { handoff: !!opts.focus });
   if (panelOpen(id)) { if (opts.focus) focusInto($(id)); return; }
   const active = document.activeElement;
   if (active && active !== document.body && !active.closest?.(".overlay-panel")) returnFocus = active;

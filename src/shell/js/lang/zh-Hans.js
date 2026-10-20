@@ -119,6 +119,11 @@ export const S = {
     archivedLabel: (title) => `${title}（已归档）`,
     diffMore: (n) => `…还有 ${n} 行`,
     aiError: (msg) => `AI 错误：${msg}`,
+    emptyTitleBlank: "这个应用要做什么？",
+    emptyHintBlank: "描述一下，助手就会在这里构建它。之后可以随时修改。",
+    suggestTasks: "做一个简单的任务跟踪器",
+    suggestContacts: "做一个带搜索的联系人列表",
+    suggestSheet: "把电子表格变成一个应用",
   },
 
   settings: {

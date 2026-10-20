@@ -119,6 +119,11 @@ export const S = {
     archivedLabel: (title) => `${title} (archiviert)`,
     diffMore: (n) => `…${n} weitere`,
     aiError: (msg) => `KI-Fehler: ${msg}`,
+    emptyTitleBlank: "Was soll diese App können?",
+    emptyHintBlank: "Beschreiben Sie es, und der Assistent baut es hier. Sie können später alles ändern.",
+    suggestTasks: "Baue eine einfache Aufgabenliste",
+    suggestContacts: "Erstelle eine Kontaktliste mit Suche",
+    suggestSheet: "Mach aus einer Tabelle eine App",
   },
 
   settings: {

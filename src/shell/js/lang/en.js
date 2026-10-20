@@ -119,6 +119,11 @@ export const S = {
     archivedLabel: (title) => `${title} (archived)`,
     diffMore: (n) => `…${n} more`,
     aiError: (msg) => `AI error: ${msg}`,
+    emptyTitleBlank: "What should this app do?",
+    emptyHintBlank: "Describe it and the assistant builds it here. You can change anything later.",
+    suggestTasks: "Build a simple task tracker",
+    suggestContacts: "Make a contact list with search",
+    suggestSheet: "Turn a spreadsheet into an app",
   },
 
   settings: {

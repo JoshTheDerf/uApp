@@ -119,6 +119,11 @@ export const S = {
     archivedLabel: (title) => `${title} (archivé)`,
     diffMore: (n) => `…${n} de plus`,
     aiError: (msg) => `Erreur IA : ${msg}`,
+    emptyTitleBlank: "Que doit faire cette appli ?",
+    emptyHintBlank: "Décrivez-la et l'assistant la construit ici. Vous pourrez tout modifier ensuite.",
+    suggestTasks: "Crée un suivi de tâches simple",
+    suggestContacts: "Fais une liste de contacts avec recherche",
+    suggestSheet: "Transforme un tableur en appli",
   },
 
   settings: {

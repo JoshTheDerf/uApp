@@ -9,4 +9,5 @@ export const cs = {
   questions: [],     // open ask_user prompts on this device
   aiBusy: false,     // this session has a live run
   draftText: "",     // the assistant's reply as it streams in
+  blank: false,      // the app is still empty (app.info.blank)
 };

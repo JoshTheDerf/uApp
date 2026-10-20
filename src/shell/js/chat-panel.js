@@ -498,6 +498,7 @@ function onInfo(info) {
   const savedSession = state.appId && localStorage.getItem(`uapp.session.${state.appId}`);
   if (savedSession && savedSession !== cs.session) { showSession(savedSession); refreshChat(); }
   cs.busySessions = info.aiSessions || [];
+  if (!!info.blank !== cs.blank) { cs.blank = !!info.blank; renderChatSoon(); }
   // Busy is per session: only this conversation's run drives the UI.
   setBusy(cs.busySessions.includes(cs.session));
   renderSwitcher();
@@ -506,7 +507,8 @@ function onInfo(info) {
   // so we only need to open it. After this the user's toggle is respected.
   if (!sidebarInit) {
     sidebarInit = true;
-    if (info.blank) openPanel("sidebar");
+    // A blank app has nothing else to look at: the chat takes focus too.
+    if (info.blank) openPanel("sidebar", { focus: true });
   }
 }
 
@@ -552,7 +554,7 @@ function wire(host) {
   $("ai-setup-msg").innerHTML =
     I("circle-alert", 13) + " " + S.chat.setupMsg;
   $("btn-ai-setup").innerHTML = I("settings", 12) + " " + S.chat.setupBtn;
-  $("btn-ai-setup").onclick = () => openPanel("settingspanel");
+  $("btn-ai-setup").onclick = () => openPanel("settingspanel", { focus: true });
   on("info", (info) => $("ai-setup").classList.toggle("hidden", info.aiConfigured !== false));
 
   $("chat-close").onclick = () => closePanel("sidebar");

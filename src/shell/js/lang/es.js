@@ -119,6 +119,11 @@ export const S = {
     archivedLabel: (title) => `${title} (archivado)`,
     diffMore: (n) => `…${n} más`,
     aiError: (msg) => `Error de IA: ${msg}`,
+    emptyTitleBlank: "¿Qué debe hacer esta app?",
+    emptyHintBlank: "Descríbelo y el asistente lo construye aquí. Puedes cambiar cualquier cosa después.",
+    suggestTasks: "Crea un gestor de tareas sencillo",
+    suggestContacts: "Haz una lista de contactos con búsqueda",
+    suggestSheet: "Convierte una hoja de cálculo en una app",
   },
 
   settings: {

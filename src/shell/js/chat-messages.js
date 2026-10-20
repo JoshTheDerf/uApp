@@ -275,7 +275,7 @@ function buildItems(rows) {
     if (cs.draftText) items.push({ key: "draft", sig: "draft", make: draftRow });
     else items.push({ key: "dots", sig: "dots", make: dotsRow });
   }
-  if (!items.length) items.push({ key: "empty", sig: "empty", make: emptyRow });
+  if (!items.length) items.push({ key: "empty", sig: cs.blank ? "blank" : "empty", make: emptyRow });
   return items;
 }
 
@@ -328,11 +328,17 @@ function draftRow() {
   d.innerHTML = `<div class="who">${S.chat.whoAssistant}</div><div class="bubble" id="chat-draft" aria-busy="true">${mdRender(cs.draftText)}</div>`;
   return d;
 }
+/// An empty chat says what the assistant is for and offers three ways in:
+/// building something when the app is still blank, working on it otherwise.
 function emptyRow() {
   const d = div("chat-empty");
   d.innerHTML = `<span class="ce-icon">${I("sparkles", 22)}</span>` +
-    `<h3>${esc(S.chat.emptyTitle)}</h3><p>${esc(S.chat.emptyHint)}</p><div class="ce-chips"></div>`;
-  for (const [icon, text] of [["lightbulb", S.chat.suggestExplain], ["plus", S.chat.suggestFeature], ["chart-column", S.chat.suggestData]]) {
+    `<h3>${esc(cs.blank ? S.chat.emptyTitleBlank : S.chat.emptyTitle)}</h3>` +
+    `<p>${esc(cs.blank ? S.chat.emptyHintBlank : S.chat.emptyHint)}</p><div class="ce-chips"></div>`;
+  const chips = cs.blank
+    ? [["list", S.chat.suggestTasks], ["book-open", S.chat.suggestContacts], ["table-2", S.chat.suggestSheet]]
+    : [["lightbulb", S.chat.suggestExplain], ["plus", S.chat.suggestFeature], ["chart-column", S.chat.suggestData]];
+  for (const [icon, text] of chips) {
     const b = document.createElement("button");
     b.className = "chip-btn";
     b.innerHTML = `<span class="ticon">${I(icon, 14)}</span>${esc(text)}`;
