@@ -9,12 +9,19 @@
 //!                                           reusing the running server)
 //!   <data_local>/uapp/servers/<key>.addr  — {port, token, pid} of the server,
 //!                                           owner-readable only
-//!   <data_local>/uapp/servers/<key>.app   — the file's app_id, so the rolling
-//!                                           snapshots can be located even when
-//!                                           the .uapp itself is unreadable
+//!   <data_local>/uapp/servers/<key>.app   — the file's app_id and whether it
+//!                                           was encrypted, so a failed open
+//!                                           can tell damage from a password
+//!                                           problem
+//!   <data_local>/uapp/snapshots/<key>/    — the file's rolling snapshots, with
+//!                                           a `source` file naming the path
+//!                                           they were taken from
 //!
 //! `<key>` is a hash of the canonicalized path — computable before the file is
 //! opened (and for encrypted files), which is what server discovery needs.
+//! Snapshots are keyed by it too, never by the app_id inside the file: copies
+//! of an app share their app_id (and the file decides what it says), so an
+//! app_id-keyed directory let one copy's snapshot be restored over another.
 
 use anyhow::{anyhow, Result};
 use fs2::FileExt;
@@ -38,19 +45,23 @@ fn dir() -> PathBuf {
     local_root().join("servers")
 }
 
-/// Stable key for a path: FNV-1a 64 over the canonicalized path string. The
-/// file may not exist yet (fresh scratch), so fall back to canonicalizing the
-/// parent and re-joining the file name.
-pub fn key(path: &Path) -> String {
-    let canon = path
-        .canonicalize()
+/// The canonical form of a path. The file may not exist yet (fresh
+/// scratch), so fall back to canonicalizing the parent and re-joining the
+/// file name.
+pub fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize()
         .unwrap_or_else(|_| match (path.parent(), path.file_name()) {
             (Some(p), Some(f)) => p
                 .canonicalize()
                 .map(|p| p.join(f))
                 .unwrap_or_else(|_| path.to_path_buf()),
             _ => path.to_path_buf(),
-        });
+        })
+}
+
+/// Stable key for a path: FNV-1a 64 over the canonicalized path string.
+pub fn key(path: &Path) -> String {
+    let canon = canonical(path);
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in canon.to_string_lossy().as_bytes() {
         h ^= u64::from(*b);
@@ -112,10 +123,23 @@ pub fn forget(path: &Path) {
     }
 }
 
+/// An app_id as uApp writes them (16 letters and digits), or close enough to
+/// be safe in a file name. Anything else in a file is treated as unknown.
+pub fn valid_app_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Where this path's rolling snapshots live.
+pub fn snapshot_dir(path: &Path) -> PathBuf {
+    local_root().join("snapshots").join(key(path))
+}
+
 /// Remember which app_id lives at this path (and whether it was encrypted),
-/// so a later open can find the app's snapshots — and tell file damage apart
-/// from a missing/wrong password — even when the .uapp itself has become
-/// unreadable.
+/// so a later open can tell file damage apart from a missing/wrong password
+/// even when the .uapp itself has become unreadable.
 pub fn write_app_map(path: &Path, app_id: &str, encrypted: bool) {
     let _ = std::fs::create_dir_all(dir());
     let kind = if encrypted { "enc" } else { "plain" };
@@ -126,7 +150,7 @@ fn read_app_map(path: &Path) -> Option<(String, bool)> {
     let body = std::fs::read_to_string(entry(path, "app")).ok()?;
     let mut it = body.split_whitespace();
     let app_id = it.next()?.to_string();
-    if app_id.is_empty() || app_id.contains(['/', '\\']) {
+    if !valid_app_id(&app_id) {
         return None;
     }
     Some((app_id, it.next() == Some("enc")))
@@ -138,10 +162,11 @@ pub fn known_encrypted(path: &Path) -> Option<bool> {
     read_app_map(path).map(|(_, enc)| enc)
 }
 
-/// The per-app local state dir (`<data_local>/uapp/<app_id>`) recorded for this
-/// path, when we've served it before and the dir still exists.
-pub fn known_local_dir(path: &Path) -> Option<PathBuf> {
+/// Where older builds kept this path's snapshots
+/// (`<data_local>/uapp/<app_id>/snapshots`), for a file last opened by one of
+/// them. Shared by every copy of the app, so it is only a fallback.
+pub fn legacy_snapshot_dir(path: &Path) -> Option<PathBuf> {
     let (app_id, _) = read_app_map(path)?;
-    let d = local_root().join(app_id);
+    let d = local_root().join(app_id).join("snapshots");
     d.is_dir().then_some(d)
 }

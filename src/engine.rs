@@ -18,11 +18,12 @@
 //!   * a crash at any point leaves the file holding either the old state or
 //!     the new one;
 //!   * for damage from outside (a truncated copy, a sync tool writing half a
-//!     file) there are rolling snapshots in app-private state
-//!     (`<data_local>/uapp/<app_id>/snapshots/`). A snapshot is taken on
-//!     every open, periodically while writes happen, and before risky
-//!     whole-file transforms (encryption changes). `open` detects an
-//!     unreadable file, moves it aside, and restores the newest snapshot.
+//!     file) there are rolling snapshots in app-private state, one directory
+//!     per .uapp path (`registry::snapshot_dir`). A snapshot is taken on
+//!     open when the file changed since the newest one, periodically while
+//!     writes happen, and before risky whole-file transforms (encryption
+//!     changes). `open` detects an unreadable file, moves it aside, and
+//!     restores the newest snapshot of that same path.
 
 use anyhow::Result;
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,6 +41,13 @@ use crate::registry;
 use crate::store::{self, now_ms, Op};
 
 pub const SNAPSHOT_KEEP: usize = 10;
+/// In a snapshot dir: the canonical path of the file the snapshots are of.
+#[cfg(not(target_arch = "wasm32"))]
+const SNAPSHOT_SOURCE: &str = "source";
+/// In a snapshot dir: `file_state` of the file when the newest snapshot was
+/// taken.
+#[cfg(not(target_arch = "wasm32"))]
+const SNAPSHOT_STATE: &str = "state";
 /// While writes keep happening, refresh the rolling snapshot this often
 /// (driven by the server's background timer calling `maybe_snapshot`).
 pub const SNAPSHOT_INTERVAL_MS: u64 = 10 * 60 * 1000;
@@ -89,8 +97,10 @@ impl ChangeSet {
 }
 
 pub struct Engine {
-    pub path: PathBuf,      // the .uapp file — the live database
-    pub local_dir: PathBuf, // per-app private state (snapshots)
+    pub path: PathBuf, // the .uapp file — the live database
+    /// This path's rolling snapshots (`registry::snapshot_dir`).
+    #[cfg(not(target_arch = "wasm32"))]
+    snapshot_dir: PathBuf,
     pub device: String,
     pub user: String,
     pub db: Connection,
@@ -160,14 +170,15 @@ impl Engine {
             }
         };
         let crypt = passphrase.map(|passphrase| crate::cipher::Key { passphrase });
-        let app_id = store::meta_get(&db, "app_id")?.unwrap_or_else(|| "unknown".into());
-        let local_dir = registry::local_root().join(&app_id);
-        std::fs::create_dir_all(local_dir.join("snapshots"))?;
+        // The file says what its app_id is; only a well-formed one is used.
+        let app_id = store::meta_get(&db, "app_id")?
+            .filter(|id| registry::valid_app_id(id))
+            .unwrap_or_else(|| "unknown".into());
         registry::write_app_map(&path, &app_id, crypt.is_some());
 
         let mut eng = Engine {
+            snapshot_dir: registry::snapshot_dir(&path),
             path,
-            local_dir,
             device,
             user,
             db,
@@ -178,9 +189,13 @@ impl Engine {
             writes: 0,
             last_snapshot_ms: 0,
         };
-        // The open-time rescue point (also what a corrupt future open restores).
-        if let Err(e) = eng.snapshot() {
-            eprintln!("uapp: snapshot on open failed: {e:#}");
+        // The open-time rescue point (also what a corrupt future open
+        // restores), unless the newest snapshot already holds this exact file:
+        // opening an unchanged app ten times shouldn't churn all ten slots.
+        if !eng.snapshot_is_current() {
+            if let Err(e) = eng.snapshot() {
+                eprintln!("uapp: snapshot on open failed: {e:#}");
+            }
         }
         Ok(eng)
     }
@@ -247,7 +262,11 @@ impl Engine {
                     )
                 })
         });
-        unreadable && registry::known_encrypted(path) == Some(false)
+        // A plaintext file whose SQLite header is gone is refused before
+        // SQLite ever sees it (it might be encrypted), so check that here.
+        let header_gone =
+            !store::looks_like_sqlite(path) && std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
+        (unreadable || header_gone) && registry::known_encrypted(path) == Some(false)
     }
 
     /// Move an unreadable .uapp aside and put the newest rolling snapshot in
@@ -255,8 +274,7 @@ impl Engine {
     /// snapshots for this path. (Snapshots are written atomically, so the
     /// newest one is always whole.)
     fn restore_newest_snapshot(path: &Path) -> Option<PathBuf> {
-        let local_dir = registry::known_local_dir(path)?;
-        let snap = newest_snapshot(&local_dir.join("snapshots"))?;
+        let snap = Self::snapshot_for(path)?;
         let aside = path.with_extension(format!("uapp.corrupt-{}", now_ms()));
         if path.exists() && std::fs::rename(path, &aside).is_err() {
             return None;
@@ -284,6 +302,32 @@ impl Engine {
                 None
             }
         }
+    }
+
+    /// The newest snapshot taken of this path. Its own snapshot dir must say
+    /// it holds this path (a different file can't end up restored here). A
+    /// file last opened by an older uApp has no such dir yet; for that one
+    /// the old per-app_id dir is used.
+    fn snapshot_for(path: &Path) -> Option<PathBuf> {
+        let dir = registry::snapshot_dir(path);
+        match std::fs::read_to_string(dir.join(SNAPSHOT_SOURCE)) {
+            Ok(source) if source == registry::canonical(path).to_string_lossy() => {
+                newest_snapshot(&dir)
+            }
+            Ok(_) => None,
+            Err(_) => registry::legacy_snapshot_dir(path).and_then(|d| newest_snapshot(&d)),
+        }
+    }
+
+    /// Does the newest snapshot already hold the file as it is now? Compared
+    /// by size, modification time and the first bytes of the file (SQLite
+    /// bumps a change counter in the header on every commit; an encrypted
+    /// header is re-encrypted), as recorded when that snapshot was taken.
+    fn snapshot_is_current(&self) -> bool {
+        let recorded = std::fs::read_to_string(self.snapshot_dir.join(SNAPSHOT_STATE)).ok();
+        recorded.is_some()
+            && recorded == file_state(&self.path)
+            && Self::snapshot_for(&self.path).is_some()
     }
 
     /// The master password, when this app is encrypted at rest.
@@ -323,11 +367,11 @@ impl Engine {
         }
     }
 
-    /// Write one rolling snapshot into the app-private snapshot dir (via the
+    /// Write one rolling snapshot into this path's snapshot dir (via the
     /// backup API — a raw byte copy of the live db could capture a torn
     /// mid-transaction state) and rotate old ones out.
     pub fn snapshot(&mut self) -> Result<()> {
-        let snapdir = self.local_dir.join("snapshots");
+        let snapdir = self.snapshot_dir.clone();
         std::fs::create_dir_all(&snapdir)?;
         let tmp = snapdir.join(format!("snapshot-{}.tmp", fastrand::u32(..)));
         let write = (|| -> Result<()> {
@@ -344,13 +388,35 @@ impl Engine {
             let f = File::open(&tmp)?;
             f.sync_all()?;
         }
+        // Which file these snapshots are of: checked before any restore.
+        let source = registry::canonical(&self.path)
+            .to_string_lossy()
+            .to_string();
+        if std::fs::read_to_string(snapdir.join(SNAPSHOT_SOURCE))
+            .ok()
+            .as_ref()
+            != Some(&source)
+        {
+            std::fs::write(snapdir.join(SNAPSHOT_SOURCE), &source)?;
+        }
         std::fs::rename(&tmp, snapdir.join(format!("{}.uapp", now_ms())))?;
-        // Rolling retention.
-        let mut snaps: Vec<PathBuf> = std::fs::read_dir(&snapdir)?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "uapp").unwrap_or(false))
-            .collect();
+        if let Some(state) = file_state(&self.path) {
+            let _ = std::fs::write(snapdir.join(SNAPSHOT_STATE), state);
+        }
+        // Rolling retention, plus any temp file a crash left behind (only
+        // this process writes here: the dir belongs to the locked path).
+        let mut snaps: Vec<PathBuf> = Vec::new();
+        for p in std::fs::read_dir(&snapdir)?.flatten().map(|e| e.path()) {
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string());
+            let name = name.as_deref().unwrap_or("");
+            if p.extension().is_some_and(|e| e == "uapp") {
+                snaps.push(p);
+            } else if name.starts_with("snapshot-")
+                && (name.ends_with(".tmp") || name.ends_with(".tmp-journal"))
+            {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
         snaps.sort();
         while snaps.len() > SNAPSHOT_KEEP {
             let old = snaps.remove(0);
@@ -554,7 +620,6 @@ impl Engine {
         let app_id = store::meta_get(&db, "app_id")?.unwrap_or_else(|| "unknown".into());
         Ok(Engine {
             path: PathBuf::from(format!("{name}.uapp")),
-            local_dir: PathBuf::new(),
             device,
             user,
             db,
@@ -599,6 +664,28 @@ impl Engine {
     pub fn reencrypt(&mut self, _new_passphrase: Option<String>) -> Result<()> {
         anyhow::bail!("encryption is not available in the browser demo")
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Size, modification time and a hash of the first KiB of a file: enough to
+/// tell whether it changed since it was last looked at.
+fn file_state(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let mut head = vec![0u8; 1024];
+    let n = File::open(path).ok()?.read(&mut head).ok()?;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in &head[..n] {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Some(format!("{} {mtime} {h:016x}", meta.len()))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
