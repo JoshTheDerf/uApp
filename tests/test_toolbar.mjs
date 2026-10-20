@@ -15,7 +15,7 @@ import { spawn } from "node:child_process";
 import { rmSync, mkdirSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const BIN = process.env.UAPP_BIN || "/home/sysadmin/Experiments/uapp/target/debug/uapp";
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-toolbar";
 const FILE = `${DIR}/t.uapp`;
 let passed = 0, failed = 0;

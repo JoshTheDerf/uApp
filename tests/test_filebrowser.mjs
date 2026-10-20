@@ -6,7 +6,7 @@ import { rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { randomBytes } from "node:crypto";
 
-const BIN = process.env.UAPP_BIN || "/home/sysadmin/Experiments/uapp/target/debug/uapp";
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-filebrowser";
 const FILE = `${DIR}/fb.uapp`;
 

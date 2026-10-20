@@ -7,7 +7,7 @@
 import { spawn } from "node:child_process";
 import { rmSync, mkdirSync } from "node:fs";
 
-const BIN = process.env.UAPP_BIN || "/home/sysadmin/Experiments/uapp/target/debug/uapp";
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-console";
 let passed = 0, failed = 0;
 const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (failed++, console.log(`  ✗ FAIL: ${n} ${x}`)); };

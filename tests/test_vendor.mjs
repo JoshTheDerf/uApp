@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { rmSync, mkdirSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const BIN = process.env.UAPP_BIN || "/home/sysadmin/Experiments/uapp/target/debug/uapp";
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-vendor";
 let passed = 0, failed = 0;
 const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (failed++, console.log(`  ✗ FAIL: ${n} ${x}`)); };

@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { rmSync, mkdirSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp`;
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-planmode";
 const FILE = `${DIR}/plan.uapp`;
 let passed = 0, failed = 0;
