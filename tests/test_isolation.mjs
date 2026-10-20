@@ -158,8 +158,11 @@ try {
 
   console.log("\n[7] events");
   owner.events.length = 0; app.events.length = 0;
+  await app.rpc("notify.show", { title: "Done", body: "All synced" });
   await app.rpc("toolbar.set", { visible: true });
   await sleep(300);
+  ok(owner.events.some((e) => e.type === "notification" && e.title === "Done" && e.body === "All synced"), "notify.show reaches the shell");
+  ok(!app.events.some((e) => e.type === "notification"), "...and not the app");
   ok(app.events.some((e) => e.type === "toolbar"), "the app gets toolbar events");
 
   console.log("\n[8] an app's tool prompt is answered by the owner only");

@@ -58,7 +58,7 @@ document.addEventListener("click", (e) => {
     openExternalUrl(url);
   }
 }, true); // Capture phase to intercept before other handlers
-import { $, esc, div, openPanel, panelOpen, dlgAlert } from "./ui.js";
+import { $, esc, div, openPanel, panelOpen, dlgAlert, toast } from "./ui.js";
 import { S } from "./strings.js";
 import "./topbar.js";
 import "./chat-panel.js";
@@ -206,6 +206,24 @@ function leaveFor(href) {
   // Let a pending local-copy save land first (browser build).
   Promise.resolve(window.__uappFlushSave && window.__uappFlushSave()).then(() => { window.top.location.href = href; });
 }
+
+// ---------- notifications ----------
+// App pages can't be given the notification permission (a cross-origin frame
+// never is), so uapp.notify() asks the core, and the shell shows it.
+on("notification", async (p) => {
+  const title = String(p.title || "");
+  if (!title) return;
+  try {
+    if ("Notification" in window) {
+      if (Notification.permission === "default") await Notification.requestPermission();
+      if (Notification.permission === "granted") {
+        new Notification(title, { body: String(p.body || ""), icon: "./icon-256.png" });
+        return;
+      }
+    }
+  } catch {}
+  toast(p.body ? `${title}: ${p.body}` : title, { duration: 6000 });
+});
 
 // ---------- scratch iframe ----------
 // The AI's run_js scratchpad context. Loaded on demand rather than with the

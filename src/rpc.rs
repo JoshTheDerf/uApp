@@ -93,6 +93,7 @@ pub fn app_may_call(method: &str) -> bool {
             | "panel.set"
             | "config.get"
             | "config.set"
+            | "notify.show"
             | "ping"
     )
 }
@@ -833,6 +834,23 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 json!({"b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
                       "bytes": bytes.len(), "name": name}),
             )
+        }
+        // A system notification, shown by the shell. App pages are on their
+        // own origin and a cross-origin frame can't be given the browser's
+        // notification permission, so they ask through here.
+        "notify.show" => {
+            let title: String = need_str(&p, "title")?.trim().chars().take(200).collect();
+            if title.is_empty() {
+                bail!("a notification needs a title");
+            }
+            let body: String = p["body"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(1000)
+                .collect();
+            app.notify("notification", json!({"title": title, "body": body}));
+            Ok(json!({"ok": true}))
         }
         // Liveness probe for the shell/app clients (background/resume recovery).
         "ping" => Ok(json!({ "ok": true })),

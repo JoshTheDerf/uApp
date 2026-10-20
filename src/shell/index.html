@@ -27,8 +27,8 @@
        shares this origin. allow= is the Permissions-Policy delegation, not a
        grant: it only lets the app's navigator.* call reach the webview, which
        then goes through the native Allow/Deny prompt (see permissions.rs).
-       Notifications have no Permissions-Policy token, so they are gated
-       solely by the native prompt. -->
+       Notifications have no Permissions-Policy token, so apps ask for them
+       with uapp.notify() and this page shows them. -->
   <iframe id="appframe" src="{{APP_SRC}}"
           allow="camera; microphone; display-capture; geolocation; clipboard-read; storage-access"></iframe>
   <!-- Hidden eval context for the AI's run_js tool: uapp.js only, no app code.

@@ -257,6 +257,12 @@ mod native_serve {
         {
             let id_app = app.clone();
             permissions::install_app_id(Box::new(move || id_app.eng().app_id.clone()));
+            let o_app = app.clone();
+            permissions::install_origins(Box::new(move || {
+                let mut v = vec![o_app.shell_origin()];
+                v.extend(o_app.app_origin());
+                v
+            }));
         }
 
         rt.block_on(async move {

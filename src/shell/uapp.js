@@ -723,6 +723,9 @@
     /// MCP tools (mcp__server__tool), or app actions (app__name).
     tool: (name, input = {}) => rpc("tools.call", { name, input }),
     tools: () => rpc("tools.list"),
+    /// Show a system notification, through the uApp window (an app page
+    /// can't be given the browser's notification permission itself).
+    notify: (title, opts = {}) => rpc("notify.show", { title, body: (opts && opts.body) || "" }),
     /// Every on* subscription returns a function that unsubscribes it.
     onChange: subscribe(changeCbs),
     /// Run `cb` just before this page goes away (an edit reloads it). Dispose
