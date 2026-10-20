@@ -27,7 +27,7 @@
 
 use anyhow::Result;
 #[cfg(not(target_arch = "wasm32"))]
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use rusqlite::Connection;
 use serde_json::Value;
 #[cfg(not(target_arch = "wasm32"))]
@@ -110,9 +110,10 @@ pub struct Engine {
     pub crypt: Option<crate::cipher::Key>,
     /// Registry lock — held for the engine's lifetime so a second instance
     /// fails fast (and the caller falls back to reusing the running server).
-    /// Option so `reencrypt` can release it before re-opening the same path.
+    /// `reencrypt` hands a duplicate of it to the re-opened engine, so the
+    /// path is never unlocked in between.
     #[cfg(not(target_arch = "wasm32"))]
-    _lock: Option<File>,
+    lock: File,
     dirty: bool,
     /// Committed local ops so far. Cheap change detection for caches built
     /// from the database (the public `/site.uapp`): every write is one op.
@@ -134,6 +135,17 @@ impl Engine {
         passphrase: Option<String>,
     ) -> Result<Engine> {
         let lock = registry::lock_exclusive(&path)?;
+        Self::open_locked(path, device, user, passphrase, lock)
+    }
+
+    /// `open_with_passphrase` with the path's registry lock already held.
+    fn open_locked(
+        path: PathBuf,
+        device: String,
+        user: String,
+        passphrase: Option<String>,
+        lock: File,
+    ) -> Result<Engine> {
         // A file we have served before that is now zero bytes was emptied by
         // something outside us (an interrupted copy or sync, a provider
         // write-back cut short). Opening it would quietly start a blank app,
@@ -184,7 +196,7 @@ impl Engine {
             db,
             app_id,
             crypt,
-            _lock: Some(lock),
+            lock,
             dirty: false,
             writes: 0,
             last_snapshot_ms: 0,
@@ -371,6 +383,12 @@ impl Engine {
     /// backup API — a raw byte copy of the live db could capture a torn
     /// mid-transaction state) and rotate old ones out.
     pub fn snapshot(&mut self) -> Result<()> {
+        // After a failed Save As or encryption change that couldn't re-open
+        // the file, `db` is an empty stand-in: never let it replace a real
+        // snapshot.
+        if self.db.path().is_none_or(str::is_empty) {
+            bail!("the app's file isn't open, so there is nothing to snapshot");
+        }
         let snapdir = self.snapshot_dir.clone();
         std::fs::create_dir_all(&snapdir)?;
         let tmp = snapdir.join(format!("snapshot-{}.tmp", fastrand::u32(..)));
@@ -431,56 +449,45 @@ impl Engine {
     /// current state into `new_path` (atomic temp + fsync + rename, encrypted
     /// to match this app), then re-home the running engine there. The server
     /// keeps the same port/token/WebSocket — only the backing file changes, so
-    /// the open window switches over with no reload.
+    /// the open window switches over with no reload. If anything fails, the
+    /// engine stays on the file it had.
     pub fn save_as(&mut self, new_path: PathBuf) -> Result<()> {
-        let tmp =
-            new_path.with_extension(format!("uapp.tmp-{}-{}", self.device, fastrand::u32(..)));
+        if registry::key(&new_path) == registry::key(&self.path) {
+            // Every write is already committed to this very file.
+            return Ok(());
+        }
+        // Claim the destination first: another window may have it open, and
+        // replacing a file under a live connection would break that window.
+        let lock = registry::lock_exclusive(&new_path)?;
+        let tmp = new_path.with_extension(format!("uapp.tmp-{}", fastrand::u32(..)));
         let write = (|| -> Result<()> {
             let mut dst = self.open_writer(&tmp)?;
             let backup = rusqlite::backup::Backup::new(&self.db, &mut dst)?;
             backup.run_to_completion(512, std::time::Duration::from_millis(0), None)?;
+            drop(backup);
+            drop(dst);
+            File::open(&tmp)?.sync_all()?;
+            // A journal at the destination belongs to the file being replaced.
+            let _ = std::fs::remove_file(store::journal_path(&new_path));
+            std::fs::rename(&tmp, &new_path)
+                .with_context(|| format!("writing {}", new_path.display()))?;
             Ok(())
         })();
         if let Err(e) = write {
             let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(store::journal_path(&tmp));
             return Err(e);
         }
-        {
-            let f = File::open(&tmp)?;
-            f.sync_all()?;
-        }
-        // "Save As" onto the file we're already serving: release our own
-        // connection and registry lock first — the rename below would fail on
-        // Windows over an open db, and the re-open would deadlock on our lock.
-        let same_file = registry::key(&new_path) == registry::key(&self.path);
-        if same_file {
-            drop(std::mem::replace(
-                &mut self.db,
-                Connection::open_in_memory()?,
-            ));
-            self._lock = None;
-        }
-        // A journal at the destination belongs to the file being replaced.
-        let _ = std::fs::remove_file(store::journal_path(&new_path));
-        std::fs::rename(&tmp, &new_path)
-            .with_context(|| format!("writing {}", new_path.display()))?;
-        if let Some(dir) = new_path.parent() {
-            if let Ok(d) = File::open(dir) {
-                let _ = d.sync_all();
-            }
-        }
-        // Re-open at the new location with the same passphrase (new registry
-        // lock; the old lock and connection are released when self is replaced).
-        let passphrase = self.passphrase().map(|s| s.to_string());
-        let reopened = Engine::open_with_passphrase(
+        fsync_parent(&new_path);
+        let reopened = Engine::open_locked(
             new_path,
             self.device.clone(),
             self.user.clone(),
-            passphrase,
-        )?;
-        if !same_file {
-            registry::remove_addr(&self.path); // the old path is no longer served
-        }
+            self.passphrase().map(|s| s.to_string()),
+            lock,
+        )
+        .context("opening the saved copy")?;
+        registry::remove_addr(&self.path); // the old path is no longer served
         let writes = self.writes + 1;
         *self = reopened;
         self.writes = writes;
@@ -492,7 +499,8 @@ impl Engine {
     /// encrypt a plaintext app or re-key an already-encrypted one. The file is
     /// transformed in place (atomic temp + rename) and the engine re-opens
     /// with the new key — same path, so the server/port and open window are
-    /// unaffected.
+    /// unaffected. Copies under the old key or in plaintext (older snapshots,
+    /// damaged files kept aside) are removed once the change has landed.
     pub fn reencrypt(&mut self, new_passphrase: Option<String>) -> Result<()> {
         let currently_encrypted = self.crypt.is_some();
         if !currently_encrypted && new_passphrase.is_none() {
@@ -503,6 +511,9 @@ impl Engine {
         if let Err(e) = self.snapshot() {
             eprintln!("uapp: snapshot before encryption change failed: {e:#}");
         }
+        let old_snapshots = snapshot_files(&self.snapshot_dir);
+        // The re-opened engine shares our lock, so the path stays locked.
+        let lock = self.lock.try_clone()?;
         // Close our live connection first: the transform replaces the file by
         // rename, which Windows refuses while SQLite holds the old file open.
         drop(std::mem::replace(
@@ -526,24 +537,60 @@ impl Engine {
             (false, None) => unreachable!(),
         };
         // Re-open at the same path — with the new key on success, the old key
-        // on failure (so a failed change leaves a working engine). Release our
-        // registry lock first; re-opening the same path re-takes it.
-        self._lock = None;
+        // on failure (so a failed change leaves a working engine).
         let reopen_with = match &transform {
-            Ok(()) => new_passphrase,
+            Ok(()) => new_passphrase.clone(),
             Err(_) => old_pw,
         };
-        let reopened = Engine::open_with_passphrase(
+        let reopened = Engine::open_locked(
             self.path.clone(),
             self.device.clone(),
             self.user.clone(),
             reopen_with,
+            lock,
         )
         .context("re-opening after the encryption change")?;
         let writes = self.writes + 1;
         *self = reopened;
         self.writes = writes;
-        transform
+        transform?;
+        self.forget_old_copies(&old_snapshots, new_passphrase.is_some());
+        Ok(())
+    }
+
+    /// After an encryption change: delete the snapshots taken before it (in
+    /// plaintext or under the old key; the re-open took a fresh one), and
+    /// when the file is now encrypted, the damaged copies kept beside it.
+    fn forget_old_copies(&mut self, old_snapshots: &[PathBuf], encrypted: bool) {
+        for p in old_snapshots {
+            let _ = std::fs::remove_file(p);
+        }
+        // Snapshots an older build kept per app_id.
+        if let Some(dir) = registry::legacy_snapshot_dir(&self.path) {
+            for p in snapshot_files(&dir) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        if encrypted {
+            let prefix = format!(
+                "{}.corrupt-",
+                self.path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            );
+            let dir = self.path.parent().unwrap_or(Path::new("."));
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                if e.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        if snapshot_files(&self.snapshot_dir).is_empty() {
+            if let Err(e) = self.snapshot() {
+                eprintln!("uapp: snapshot after encryption change failed: {e:#}");
+            }
+        }
     }
 }
 
@@ -689,12 +736,29 @@ fn file_state(path: &Path) -> Option<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Every `<ms>.uapp` in a snapshot dir.
+fn snapshot_files(snapdir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(snapdir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "uapp"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fsync_parent(path: &Path) {
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 /// Newest `<ms>.uapp` in a snapshot dir, if any.
 fn newest_snapshot(snapdir: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(snapdir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "uapp").unwrap_or(false))
-        .max()
+    snapshot_files(snapdir).into_iter().max()
 }

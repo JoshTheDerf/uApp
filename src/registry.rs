@@ -113,11 +113,13 @@ pub fn remove_addr(path: &Path) {
     let _ = std::fs::remove_file(entry(path, "addr"));
 }
 
-/// Drop every registry record for a path (addr, app map, lock file). For
-/// paths whose FILE is being deleted (a scratch consumed by Save As) — a
-/// stale app map there could otherwise point a future corrupt-restore at the
-/// wrong app's snapshots. Only call with the path's lock released.
+/// Drop every record for a path (addr, app map, lock file, snapshots). For
+/// paths whose FILE is being deleted (a scratch consumed by Save As): its
+/// content lives on in the saved file, and a new file at the same path must
+/// not inherit the old one's snapshots. Only call with the path's lock
+/// released.
 pub fn forget(path: &Path) {
+    let _ = std::fs::remove_dir_all(snapshot_dir(path));
     for ext in ["addr", "app", "lock"] {
         let _ = std::fs::remove_file(entry(path, ext));
     }
