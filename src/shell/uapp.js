@@ -650,6 +650,18 @@
         // The shell may not have been listening yet when we first said hello.
         if (!heard) { heard = true; nav(); }
       }
+      // The app's localStorage from before it had an origin of its own,
+      // handed over once by the shell. Reload so the app starts with it.
+      if (d.__uappStorage && typeof d.__uappStorage === "object" && context === "app") {
+        const keys = [];
+        try {
+          for (const [k, v] of Object.entries(d.__uappStorage)) {
+            if (typeof v === "string") { localStorage.setItem(k, v); keys.push(k); }
+          }
+        } catch {}
+        toShell({ __uappStorageDone: keys });
+        if (keys.length) location.reload();
+      }
     });
     nav();
     window.addEventListener("hashchange", nav);

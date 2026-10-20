@@ -70,7 +70,7 @@ import "./tools-panel.js";
 import "./mirror.js";
 import "./toolbar-visibility.js";
 import "./keepalive.js";
-import { appPageUrl, isolated, onFrame, setFrameConfig } from "./frame.js";
+import { appPageUrl, isolated, onFrame, setFrameConfig, toFrame } from "./frame.js";
 import { addRefs } from "./chat-panel.js";
 import { fbCwd, loadFiles, pickDest } from "./files-panel.js";
 import { isUappFile, updateFromDrop, updateFromFile } from "./template-update.js";
@@ -150,6 +150,7 @@ onFrame("__uappNav", (href, e) => {
   let u;
   try { u = new URL(href); } catch { return; }
   frameMoved(u);
+  handOverStorage(e.source);
 });
 // A hosted site's frame can also land on one of the server's own pages (a
 // root-absolute link outside the archive's pages), which has no uapp.js to
@@ -206,6 +207,31 @@ function leaveFor(href) {
   // Let a pending local-copy save land first (browser build).
   Promise.resolve(window.__uappFlushSave && window.__uappFlushSave()).then(() => { window.top.location.href = href; });
 }
+
+// ---------- the app's old localStorage ----------
+// Before the app had its own origin, whatever it kept in localStorage landed
+// in this page's storage, next to the shell's own "uapp.*" keys. Hand those
+// entries to the app's origin once, then drop them here. (IndexedDB isn't
+// moved.)
+let handedOver = false;
+function handOverStorage(win) {
+  if (handedOver || !isolated()) return;
+  handedOver = true;
+  const entries = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && !k.startsWith("uapp.")) entries[k] = localStorage.getItem(k);
+    }
+  } catch { return; }
+  if (Object.keys(entries).length) toFrame(win, { __uappStorage: entries });
+}
+onFrame("__uappStorageDone", (keys) => {
+  if (!Array.isArray(keys)) return;
+  for (const k of keys) {
+    if (typeof k === "string" && !k.startsWith("uapp.")) { try { localStorage.removeItem(k); } catch {} }
+  }
+});
 
 // ---------- notifications ----------
 // App pages can't be given the notification permission (a cross-origin frame
