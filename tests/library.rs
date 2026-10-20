@@ -1,4 +1,4 @@
-//! Integration test for `uapp-library` (`src/library.rs`): a directory of
+//! Integration test for `uapp library` (`src/library.rs`): a directory of
 //! .uapp files over HTTP. Reads are anonymous; PUT and DELETE need the token;
 //! what gets STORED is the sanitized archive — never the uploader's config
 //! (API keys), chat or history — and a publish over a moved-on copy is a 409.

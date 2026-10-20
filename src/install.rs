@@ -1,15 +1,37 @@
 //! Desktop integration (Linux/XDG): MIME type for .uapp, a .desktop entry so
 //! double-click opens the launcher, and a file in ~/Templates so the file
 //! manager's right-click "New Document" menu can create a blank .uapp.
+//! Everything points at the running `uapp` binary.
 
-use anyhow::{Context, Result};
-use std::path::PathBuf;
+use anyhow::{bail, Context, Result};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn install() -> Result<()> {
-    let exe = std::env::current_exe().context("resolve current executable")?;
+/// The Windows installer and the macOS app bundle register .uapp themselves.
+fn ensure_xdg() -> Result<()> {
+    if cfg!(any(target_os = "windows", target_os = "macos")) {
+        bail!(
+            "`uapp install` sets up Linux desktops; on this system the UApp installer \
+             registers .uapp files"
+        );
+    }
+    Ok(())
+}
+
+/// The per-user XDG data dir (`~/.local/share`) and home.
+fn dirs_xdg() -> Result<(PathBuf, PathBuf)> {
     let home = dirs::home_dir().context("no home dir")?;
     let data = dirs::data_dir().unwrap_or_else(|| home.join(".local/share"));
+    Ok((home, data))
+}
+
+/// Icon sizes written as PNG fallbacks beside the SVGs.
+const ICON_SIZES: [&str; 5] = ["16x16", "32x32", "48x48", "128x128", "256x256"];
+
+pub fn install() -> Result<()> {
+    ensure_xdg()?;
+    let exe = std::env::current_exe().context("resolve current executable")?;
+    let (home, data) = dirs_xdg()?;
 
     // 1. Icons (embedded in the binary): launcher icon "uapp" + file-type
     //    icon "application-x-uapp", as scalable SVG plus PNG fallbacks.
@@ -95,17 +117,16 @@ pub fn install() -> Result<()> {
         ),
     )?;
     // 3b. The bare "UApp" launcher: an applications-menu entry that opens the
-    //     native desktop app with no file (the per-user default document).
-    //     Installed when a uapp binary can be found — same lookup
-    //     order as the CLI's --window delegation (main.rs).
-    let desktop_bin = find_desktop_bin(&exe);
-    if let Some(bin) = &desktop_bin {
+    //     native window with no file (the per-user default document). Only
+    //     the window build has one to open.
+    let launcher = cfg!(feature = "gui");
+    if launcher {
         std::fs::write(
             apps_dir.join("UApp.desktop"),
             format!(
                 "[Desktop Entry]\nType=Application\nName=UApp\nComment=Single-file shareable apps\n\
                  Exec={}\nTerminal=false\nIcon=uapp\nCategories=Office;Utility;\n",
-                bin.display()
+                exe.display()
             ),
         )?;
     }
@@ -137,13 +158,11 @@ pub fn install() -> Result<()> {
         "  Desktop entry: {} (double-click .uapp files now opens uapp)",
         apps_dir.join("uapp.desktop").display()
     );
-    match &desktop_bin {
-        Some(bin) => println!(
-            "  Launcher: {} (bare UApp window → {})",
-            apps_dir.join("UApp.desktop").display(),
-            bin.display()
-        ),
-        None => println!("  (no uapp binary found — bare UApp launcher not installed)"),
+    if launcher {
+        println!(
+            "  Launcher: {} (opens the UApp window)",
+            apps_dir.join("UApp.desktop").display()
+        );
     }
     println!(
         "  File-manager template: {} (right-click → New Document → New App)",
@@ -152,57 +171,67 @@ pub fn install() -> Result<()> {
     Ok(())
 }
 
-/// Locate the native UApp (Tauri) binary: $UAPP_DESKTOP_BIN, then next to
-/// this executable, then the PATH — the same order the CLI's --window
-/// delegation uses (main.rs).
-fn find_desktop_bin(exe: &std::path::Path) -> Option<PathBuf> {
-    desktop_bin_candidates(exe).into_iter().next()
+/// Undo [`install`]: remove the icons, MIME type, desktop entries and the
+/// file-manager template (the template only while it's still blank).
+pub fn uninstall() -> Result<()> {
+    ensure_xdg()?;
+    let (home, data) = dirs_xdg()?;
+    let mut removed: Vec<PathBuf> = Vec::new();
+    let mut remove = |p: PathBuf| {
+        if std::fs::remove_file(&p).is_ok() {
+            removed.push(p);
+        }
+    };
+    let icon_root = data.join("icons/hicolor");
+    remove(icon_root.join("scalable/apps/uapp.svg"));
+    remove(icon_root.join("scalable/mimetypes/application-x-uapp.svg"));
+    for size in ICON_SIZES {
+        remove(icon_root.join(size).join("apps/uapp.png"));
+        remove(
+            icon_root
+                .join(size)
+                .join("mimetypes/application-x-uapp.png"),
+        );
+    }
+    remove(data.join("mime/packages/uapp.xml"));
+    let apps_dir = data.join("applications");
+    remove(apps_dir.join("uapp.desktop"));
+    remove(apps_dir.join("UApp.desktop"));
+    let tpl = home.join("Templates").join("New App.uapp");
+    let kept_template = tpl.exists() && !is_blank(&tpl);
+    if !kept_template {
+        remove(tpl.clone());
+    }
+
+    let _ = Command::new("gtk-update-icon-cache")
+        .args(["-f", "-t"])
+        .arg(&icon_root)
+        .status();
+    let _ = Command::new("update-mime-database")
+        .arg(data.join("mime"))
+        .status();
+    let _ = Command::new("update-desktop-database")
+        .arg(&apps_dir)
+        .status();
+
+    if removed.is_empty() {
+        println!("Nothing to remove (uapp install hasn't been run for this user).");
+    } else {
+        println!("Removed:");
+        for p in &removed {
+            println!("  {}", p.display());
+        }
+    }
+    if kept_template {
+        println!("Kept {} (it has been edited)", tpl.display());
+    }
+    Ok(())
 }
 
-/// Names the native window goes by: `uapp` in release bundles, and
-/// `uapp-desktop` beside a dev-installed CLI (scripts/install-local.sh puts
-/// the CLI at `uapp`). The window names come first so a sibling CLI never
-/// shadows them.
-const DESKTOP_NAMES: [&str; 6] = [
-    "uapp-desktop",
-    "uapp-desktop.exe",
-    "uapp",
-    "uapp.exe",
-    "UApp",
-    "UApp.exe",
-];
-
-/// Existing native-window binaries, best first: `UAPP_DESKTOP_BIN`, then
-/// siblings of `exe`, then PATH. Anything that resolves to the running
-/// binary itself is skipped. A CLI that "delegates" to itself re-execs in a
-/// loop (thousands of processes a second when the CLI is installed as `uapp`).
-pub fn desktop_bin_candidates(exe: &std::path::Path) -> Vec<PathBuf> {
-    let me = std::fs::canonicalize(exe).ok();
-    let mut found: Vec<PathBuf> = Vec::new();
-    let mut consider = |p: PathBuf| {
-        if !p.is_file() {
-            return;
-        }
-        let canon = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
-        if Some(&canon) == me.as_ref() || found.iter().any(|f| f == &canon) {
-            return;
-        }
-        found.push(canon);
-    };
-    if let Some(p) = std::env::var_os("UAPP_DESKTOP_BIN").filter(|p| !p.is_empty()) {
-        consider(PathBuf::from(p));
-    }
-    if let Some(dir) = exe.parent() {
-        for n in DESKTOP_NAMES {
-            consider(dir.join(n));
-        }
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            for n in DESKTOP_NAMES {
-                consider(dir.join(n));
-            }
-        }
-    }
-    found
+/// Is the file at `path` still the blank app `install` put there?
+fn is_blank(path: &Path) -> bool {
+    use rusqlite::{Connection, OpenFlags};
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map(|c| crate::store::is_blank_app(&c))
+        .unwrap_or(false)
 }

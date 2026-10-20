@@ -4,11 +4,39 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml runs these as its gate before building anything.
+  workflow_call:
+
+# A newer push to the same branch or PR cancels the run in progress. (Called
+# from release.yml the group includes the tag, so releases never cancel CI.)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri GUI deps (clippy builds the window too)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --check
+      - name: clippy (no window)
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+      - name: clippy (window)
+        run: cargo clippy --locked --all-targets -- -D warnings
+
   test:
     name: Build & test (Linux)
     runs-on: ubuntu-latest
@@ -17,88 +45,42 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install sqlite3 CLI (used by tests) + Tauri GUI deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y sqlite3 libwebkit2gtk-4.1-dev libgtk-3-dev \
-            librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev
+      # The sqlite3 CLI is used by the node suites.
+      - name: Install sqlite3
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
       - uses: Swatinem/rust-cache@v2
-      # gui is the default feature, so `cargo build` builds the desktop app.
-      # Also build the server binary (uapp-server) for tests.
-      - name: Build (debug — the test suites use the dev server)
-        run: |
-          cargo build
-          cargo build --bin uapp-server --no-default-features
-      - name: Rust unit/integration tests
-        run: cargo test
-      - name: Run test suites
-        run: |
-          fail=0
-          for t in tests/test_*.mjs; do
-            echo "::group::$t"
-            UAPP_BIN="$PWD/target/debug/uapp-server" node "$t" || fail=1
-            echo "::endgroup::"
-          done
-          exit $fail
+        with:
+          key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Rust tests
+        run: cargo test --locked --no-default-features
+      # Builds target/debug/uapp without the window, then runs every suite.
+      - name: End-to-end suites
+        run: scripts/test-e2e.sh
 
-  # Smoke-test the Android (local-mode) build: a debug arm64 APK through the
-  # real toolchain (NDK + vendored OpenSSL + gradle). Catches mobile-only
-  # regressions (cfg!(desktop) splits, mobile entry point, data-dir anchoring).
-  android:
-    name: Android APK (debug, arm64)
-    runs-on: ubuntu-24.04
-    env:
-      NDK_VERSION: 27.1.12297006
+  wasm:
+    name: cargo check (wasm32)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install Tauri CLI
-        run: npm install -g @tauri-apps/cli@^2.11.4
-      - name: Add Rust Android target
-        run: rustup target add aarch64-linux-android
-      # The hosted runners no longer ship Android cmdline-tools, so install
-      # them (provides sdkmanager on PATH + ANDROID_HOME).
-      - uses: android-actions/setup-android@v3
-      - name: Install Android SDK pieces (NDK ${{ env.NDK_VERSION }})
-        run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "ndk;${NDK_VERSION}" > /dev/null
-          echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-      # Vendored OpenSSL (SQLCipher) invokes the legacy unprefixed binutils
-      # names that NDK r24+ no longer ships — symlink them to the LLVM tools.
-      - name: NDK binutils symlinks (vendored OpenSSL)
-        run: |
-          NDKBIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          for p in aarch64-linux-android armv7a-linux-androideabi armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
-            for t in ar ranlib strip nm objdump readelf; do
-              ln -sf "llvm-$t" "$NDKBIN/$p-$t"
-            done
-          done
-          echo "$NDKBIN" >> "$GITHUB_PATH"
+      # rusqlite's sqlite-wasm-rs backend compiles SQLite with clang.
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
-          key: android-aarch64
-      # The gradle glue invokes the CLI as `cargo tauri android
-      # android-studio-script`, so it must be installed as cargo-tauri (the
-      # npm-distributed `tauri` shim can't serve that). rust-cache caches
-      # ~/.cargo/bin, so this compiles once and is restored afterwards.
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version 2.11.4 --locked
-      # gen/android is committed (the standard Tauri v2 workflow) — no init or
-      # patching; MainActivity/manifest/icons are edited in place in the repo.
-      - name: Build debug APK
-        run: cargo tauri android build --apk --debug --target aarch64
-      - uses: actions/upload-artifact@v4
+          key: wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --lib --target wasm32-unknown-unknown --no-default-features --locked
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          name: uapp-android-debug-arm64
-          path: gen/android/app/build/outputs/apk/**/*.apk
-          if-no-files-found: error
+          command: check advisories bans licenses sources
 
   check-cross:
     name: cargo check (${{ matrix.target }})
@@ -120,6 +102,91 @@ jobs:
           choco install nasm --no-progress -y
           echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
       - uses: Swatinem/rust-cache@v2
-      # gui is the default feature — Windows/macOS Tauri builds need no extra
-      # system libs at check time.
-      - run: cargo check --target ${{ matrix.target }}
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # gui is the default feature; Windows/macOS need no extra system libs to
+      # check it.
+      - run: cargo check --locked --target ${{ matrix.target }}
+
+  # Which parts of the tree changed, for the jobs that only matter to some.
+  # (Skipped for a release tag, which builds its own APKs.)
+  changes:
+    name: Changed paths
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    outputs:
+      android: ${{ steps.filter.outputs.android }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            android:
+              - 'gen/android/**'
+              - 'src/gui.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+
+  # Smoke-test the Android (local-mode) build: a debug arm64 APK through the
+  # real toolchain (NDK + vendored OpenSSL + gradle). Catches mobile-only
+  # regressions (cfg!(desktop) splits, mobile entry point, data-dir anchoring).
+  # It takes a while, so only on pushes to main or when the Android side changed.
+  android:
+    name: Android APK (debug, arm64)
+    needs: changes
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      NDK_VERSION: 27.1.12297006
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Add Rust Android target
+        run: rustup target add aarch64-linux-android
+      # The hosted runners no longer ship Android cmdline-tools, so install
+      # them (provides sdkmanager on PATH + ANDROID_HOME).
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK pieces (NDK ${{ env.NDK_VERSION }})
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "ndk;${NDK_VERSION}" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      # Vendored OpenSSL (SQLCipher) invokes the legacy unprefixed binutils
+      # names that NDK r24+ no longer ships, so symlink them to the LLVM tools.
+      - name: NDK binutils symlinks (vendored OpenSSL)
+        run: |
+          NDKBIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for p in aarch64-linux-android armv7a-linux-androideabi armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
+            for t in ar ranlib strip nm objdump readelf; do
+              ln -sf "llvm-$t" "$NDKBIN/$p-$t"
+            done
+          done
+          echo "$NDKBIN" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-aarch64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The gradle glue invokes the CLI as `cargo tauri android
+      # android-studio-script`, so it must be installed as cargo-tauri (the
+      # npm-distributed `tauri` shim can't serve that). rust-cache caches
+      # ~/.cargo/bin, so this compiles once and is restored afterwards.
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      # gen/android is committed (the standard Tauri v2 workflow), so there's
+      # no init or patching; MainActivity/manifest/icons are edited in place.
+      - name: Build debug APK
+        run: cargo tauri android build --apk --debug --target aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uapp-android-debug-arm64
+          path: gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

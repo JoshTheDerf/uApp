@@ -7,7 +7,7 @@ import { rmSync, mkdirSync, copyFileSync, readdirSync, statSync, readFileSync } 
 import { setTimeout as sleep } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
 
-const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-secrets";
 const HOME = process.env.HOME;
 let passed = 0, failed = 0;

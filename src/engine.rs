@@ -149,8 +149,8 @@ impl Engine {
             && registry::known_encrypted(&path).is_some()
             && Self::restore_newest_snapshot(&path).is_none()
         {
-            eprintln!(
-                "uapp: {} is empty and has no snapshot to restore — opening it as a new app",
+            tracing::warn!(
+                "{} is empty and has no snapshot to restore, so it opens as a new app",
                 path.display()
             );
         }
@@ -200,7 +200,7 @@ impl Engine {
         // opening an unchanged app ten times shouldn't churn all ten slots.
         if !eng.snapshot_is_current() {
             if let Err(e) = eng.snapshot() {
-                eprintln!("uapp: snapshot on open failed: {e:#}");
+                tracing::warn!("snapshot on open failed: {e:#}");
             }
         }
         Ok(eng)
@@ -229,8 +229,8 @@ impl Engine {
                 // A plaintext file opened WITH a password: encrypt it in place
                 // so the password takes effect immediately.
                 crate::cipher::encrypt_file_in_place(path, pw)?;
-                eprintln!(
-                    "uapp: {} was not encrypted — encrypted in place with the provided password",
+                tracing::info!(
+                    "{} was not encrypted, so it was encrypted in place with the provided password",
                     path.display()
                 );
             }
@@ -293,8 +293,8 @@ impl Engine {
         }
         match std::fs::copy(&snap, path) {
             Ok(_) => {
-                eprintln!(
-                    "uapp: {} was unreadable — restored the latest snapshot ({}); the damaged file was kept as {}",
+                tracing::warn!(
+                    "{} was unreadable, so the latest snapshot ({}) was restored; the damaged file was kept as {}",
                     path.display(),
                     snap.display(),
                     aside.display()
@@ -302,7 +302,7 @@ impl Engine {
                 Some(aside)
             }
             Err(e) => {
-                eprintln!("uapp: snapshot restore failed: {e}");
+                tracing::warn!("snapshot restore failed: {e}");
                 // Put the original back so the caller's error talks about it.
                 let _ = std::fs::rename(&aside, path);
                 None
@@ -358,7 +358,7 @@ impl Engine {
     pub fn maybe_snapshot(&mut self) {
         if self.dirty && now_ms().saturating_sub(self.last_snapshot_ms) >= SNAPSHOT_INTERVAL_MS {
             if let Err(e) = self.snapshot() {
-                eprintln!("uapp: periodic snapshot failed: {e:#}");
+                tracing::warn!("periodic snapshot failed: {e:#}");
             }
         }
     }
@@ -368,7 +368,7 @@ impl Engine {
     pub fn snapshot_if_dirty(&mut self) {
         if self.dirty {
             if let Err(e) = self.snapshot() {
-                eprintln!("uapp: snapshot on shutdown failed: {e:#}");
+                tracing::warn!("snapshot on shutdown failed: {e:#}");
             }
         }
     }
@@ -503,7 +503,7 @@ impl Engine {
         let old_pw = self.passphrase().map(|s| s.to_string());
         // Rescue point before a whole-file transform.
         if let Err(e) = self.snapshot() {
-            eprintln!("uapp: snapshot before encryption change failed: {e:#}");
+            tracing::warn!("snapshot before encryption change failed: {e:#}");
         }
         let old_snapshots = snapshot_files(&self.snapshot_dir);
         // The re-opened engine shares our lock, so the path stays locked.
@@ -582,7 +582,7 @@ impl Engine {
         }
         if snapshot_files(&self.snapshot_dir).is_empty() {
             if let Err(e) = self.snapshot() {
-                eprintln!("uapp: snapshot after encryption change failed: {e:#}");
+                tracing::warn!("snapshot after encryption change failed: {e:#}");
             }
         }
     }
@@ -605,7 +605,7 @@ impl Engine {
         self.dirty = true;
         self.writes += 1;
         if let Err(e) = self.snapshot() {
-            eprintln!("uapp: snapshot after compacting failed: {e:#}");
+            tracing::warn!("snapshot after compacting failed: {e:#}");
         }
         Ok(())
     }

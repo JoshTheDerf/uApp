@@ -6,7 +6,7 @@ import { spawn, execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, rmSync, existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-share";
 const FILE = `${DIR}/ops.uapp`;
 

@@ -136,13 +136,14 @@ The `install` button in the top bar provides a launcher entry for a given `.uapp
 
 ## Hosting .uapp files on a server
 
-Two small binaries, built with `--no-default-features` (no Tauri):
+The same `uapp` binary does this. On a server, build it with
+`--no-default-features` (no Tauri or webview):
 
-* **`uapp-server serve <file.uapp> --chrome dist-web`** serves ONE .uapp as a
+* **`uapp serve <file.uapp> --chrome dist-web`** serves ONE .uapp as a
   website: its `app/` pages at real URLs for everyone, plus an in-browser
   editor on a local copy. `PUT /site.uapp` with the token publishes an edited
   copy back.
-* **`uapp-server serve --chrome dist-web [--open <url>]`** — no file — hosts
+* **`uapp serve --chrome dist-web [--open <url>]`**, with no file, hosts
   the browser build alone. What the page opens is in its URL:
   `?open=<url>` fetches any .uapp on the origin (or a CORS-enabled one) and
   keeps your edits in the browser, `?app=<id>` opens one of the visitor's own
@@ -150,13 +151,14 @@ Two small binaries, built with `--no-default-features` (no Tauri):
   published back to the URL they came from. Put such a page in an `<iframe>`
   and you have a window that runs one .uapp; several on one page each get
   their own engine.
-* **`uapp-library <dir>`** serves a directory of .uapp files: `GET /` lists
+* **`uapp library <dir>`** serves a directory of .uapp files: `GET /` lists
   them as JSON, `GET /<name>.uapp` fetches one (ETag), `PUT` and `DELETE`
   (token) publish and remove. Every stored file is sanitized like `/site.uapp`
-  is — app files and user tables travel, chat, history and API keys never do.
+  is: app files and user tables travel, chat, history and API keys never do.
 
-`dist-web` is `scripts/build-web.sh` output. `Dockerfile.serve` builds both
-binaries into one image; mount `dist-web` at `/opt/uapp-web`.
+`dist-web` is `scripts/build-web.sh` output. `Dockerfile.serve` builds `uapp`
+into an image; mount `dist-web` at `/opt/uapp-web`. All commands and options
+are in [docs/CLI.md](docs/CLI.md).
 
 ## Known limitations
 

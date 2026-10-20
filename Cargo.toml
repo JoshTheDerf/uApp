@@ -2,47 +2,37 @@
 name = "uapp"
 version = "0.2.12"
 edition = "2021"
+# The oldest toolchain the dependency tree builds with (CI runs stable).
+rust-version = "1.88"
 description = "Single-file shareable apps: app + data + AI in one .uapp file"
 license = "MIT"
 repository = "https://github.com/JoshTheDerf/uApp"
 default-run = "uapp"
 
-# The core library both binaries share. `staticlib`/`cdylib` are required by
+# The core library. `staticlib`/`cdylib` are required by
 # `cargo tauri android/ios build` (the mobile entry points are linked as
-# static/dynamic libs.
+# static/dynamic libs).
 [lib]
 name = "uapp"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# The native UApp desktop window (Tauri) — the primary distributed binary.
-# Enabled by default (gui feature is default).
+# The one binary. With the default `gui` feature it opens apps in the native
+# window (Tauri); built with `--no-default-features` (servers, Docker, tests)
+# it opens them in the system browser instead. Every subcommand works in both.
 [[bin]]
 name = "uapp"
-path = "src/desktop.rs"
-required-features = ["gui"]
-
-# Server binary for future work — not distributed, not documented.
-# Built explicitly with `--bin uapp-server --no-default-features`.
-[[bin]]
-name = "uapp-server"
 path = "src/main.rs"
 
-# A directory of .uapp files over HTTP (fetch, publish); see src/library.rs.
-# Built with `--bin uapp-library --no-default-features`.
-[[bin]]
-name = "uapp-library"
-path = "src/bin/uapp-library.rs"
-
-# Demo apps builder — builds example .uapp files and the launcher.
-# Run with: cargo run --bin make-demo-apps -- <launcher-out-dir> [examples-dir]
-[[bin]]
+# Builds the browser demo's launcher.uapp (a dev tool, not shipped):
+#   cargo run --release --no-default-features --example make-demo-apps -- <out-dir>
+[[example]]
 name = "make-demo-apps"
-path = "src/bin/make-demo-apps.rs"
+path = "examples/make-demo-apps.rs"
 
 [features]
 default = ["gui"]
 # Native desktop/mobile shell (Tauri v2 + a system webview). Enabled by default.
-gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:webkit2gtk", "dep:webkit2gtk-sys", "dep:webview2-com"]
+gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:webkit2gtk", "dep:webkit2gtk-sys", "dep:webview2-com", "dep:windows-sys"]
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true , features = [] }
@@ -55,6 +45,9 @@ base64 = "0.22"
 flate2 = "1"
 anyhow = "1"
 fastrand = "2"
+# Diagnostics; the subscriber (stderr, plus a log file for the window) is
+# set up in main.rs and logging.rs.
+tracing = "0.1"
 
 # Everything OS-facing (server, files, processes, TLS) is native-only; the
 # wasm32 browser build swaps in the block below instead.
@@ -71,7 +64,7 @@ tauri-plugin-dialog = { version = "2", optional = true }
 # needs OPENSSL_DIR, which Windows CI runners don't have). Needs Perl at build
 # time (and NASM on Windows) — see the workflows.
 rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl", "backup", "functions", "hooks", "limits"] }
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util"] }
 ureq = { version = "2", features = ["tls", "json"] }
 whoami = "1"
@@ -83,9 +76,12 @@ getrandom = "0.2"
 # needs relative Location resolution. Already in the tree through ureq.
 url = "2"
 futures-util = "0.3"
-dirs = "5"
+dirs = "6"
 # Hidden master-password prompts in the CLI (no-tty falls back to flags/env).
 rpassword = "7"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Windows web-permission plumbing (gui feature only). WebView2 prompts for
 # camera/mic/location/notifications/clipboard itself and forgets the answer, so
@@ -95,6 +91,10 @@ rpassword = "7"
 # already builds against, so this unifies rather than adding a second binding.
 [target.'cfg(target_os = "windows")'.dependencies]
 webview2-com = { version = "0.38", optional = true }
+# The window build is a GUI-subsystem exe (no console flashes up behind it),
+# so a CLI subcommand run from a terminal attaches to that terminal's console
+# to print anything (gui feature only).
+windows-sys = { version = "0.61", optional = true, features = ["Win32_System_Console"] }
 
 # Linux web-permission plumbing (gui feature only). WebKitGTK ships
 # getUserMedia switched OFF and denies every permission request the embedder

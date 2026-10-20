@@ -1,27 +1,47 @@
 //! Native UApp shell (Tauri v2), compiled only with `--features gui` — the
 //! PRIMARY UApp experience (the browser shell is only the fallback). One
 //! entry for desktop (Windows/macOS/Linux) and mobile (iOS/Android): it starts
-//! the embedded `uapp` server and shows the UI in a native webview window (or
-//! hands it to the system browser, per the machine-local `shell` preference /
-//! a `--browser`/`--window` flag).
+//! the embedded `uapp` server and shows the UI in a native webview window.
+//! On desktop the `uapp` binary (`main.rs`) calls [`run_with`] after parsing
+//! its command line; mobile starts at [`run`].
 //!
 //! The window is frameless (`decorations(false)`) — the titlebar, drag region
 //! and min/max/close buttons live in the shell UI and are shown only when it
 //! detects it's running natively (see `native.rs` + the shell's `win.*` RPCs).
 
+use std::path::PathBuf;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
+/// What the window opens.
+#[derive(Default)]
+pub struct Launch {
+    /// The .uapp to open. None opens the per-user default document (a scratch
+    /// workspace that shows the "Not saved" banner until it's saved).
+    pub path: Option<PathBuf>,
+    /// Master password for an encrypted file. None shows the unlock page.
+    pub passphrase: Option<String>,
+    /// Port for the embedded server (0 = any free one).
+    pub port: u16,
+}
+
+/// Mobile entry point (and a desktop launch with nothing on the command line).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    run_with(Launch::default())
+}
+
+/// Open `launch` in the native window. Returns when the window closes.
+pub fn run_with(launch: Launch) {
+    let Launch {
+        path: arg_path,
+        passphrase,
+        port,
+    } = launch;
     tauri::Builder::default()
         // Native "Save…" dialog for scratch apps (opened with no file), and
         // the "Open…" dialog for picking another .uapp to run.
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
-            let args: Vec<String> = std::env::args().collect();
-            // A bare `uapp` scratch is delegated here with `--unsaved`, so the
-            // shell shows the "not saved — Save…" banner.
-            let unsaved = args.iter().any(|a| a == "--unsaved");
+        .setup(move |app| {
             // Mobile has no home/config dirs (the `dirs` crate returns None on
             // Android/iOS), so the core's "." fallbacks (device id, prefs, the
             // default document) would land on the read-only root. Anchor the
@@ -45,6 +65,9 @@ pub fn run() {
                 // lifecycle, and the AI turn runs on a server thread that must
                 // keep going while the page is suspended (see lib.rs).
                 std::env::set_var("UAPP_LINGER_SECS", "never");
+                // Only now that the working dir is the app's own does the log
+                // file have somewhere to go (registry::local_root).
+                crate::logging::init(0, true);
             }
             // Mobile: a .uapp opened from the file manager arrives as a VIEW
             // intent; MainActivity stages it under marker files in the app's
@@ -60,55 +83,39 @@ pub fn run() {
                     None::<std::path::PathBuf>
                 }
             };
-            let (path, default_doc) = resolve_app_path(mobile_data.as_deref());
             // The per-user default document (bare launcher, no file) is a
             // scratch workspace: it lives in app/user data storage the user
             // never browses, so show the "Not saved" banner until it's saved
             // to (mobile: downloaded as) a real file.
-            let unsaved = unsaved || default_doc;
-            let url = crate::serve_background(path, 0, unsaved)
+            let (path, unsaved) = match arg_path.clone() {
+                Some(p) => (p, false),
+                None => resolve_app_path(mobile_data.as_deref()),
+            };
+            let url = crate::serve_background(path, port, unsaved, passphrase.clone())
                 .map_err(|e| format!("could not start the UApp server: {e:#}"))?;
 
-            // Mobile always uses the native webview. Desktop: a CLI flag wins;
-            // else, launching with no .uapp file (the app's own launcher icon
-            // / a bare `uapp`) always opens natively — that's the
-            // whole point of running this binary directly. The saved "Open
-            // apps in" preference (default: native window) only applies when
-            // a specific file was handed to us (CLI/file-association delegate).
-            let flag = args.iter().find_map(|a| match a.as_str() {
-                "--window" | "--tauri" | "--native" => Some(true),
-                "--browser" | "--web" => Some(false),
-                _ => None,
-            });
-            let has_file_arg = args.iter().skip(1).any(|a| a.ends_with(".uapp"));
-            let native = cfg!(mobile)
-                || flag.unwrap_or_else(|| !has_file_arg || crate::prefs::shell() == "native");
-            if native {
-                // Route the shell's window-control / save requests to this
-                // window. Installed before the webview loads so the first
-                // click always has somewhere to go.
-                install_native_bridge(app.handle().clone());
-                // (mobile builds never take the `mut` rebinding below)
-                #[cfg_attr(mobile, allow(unused_mut))]
-                let mut b = WebviewWindowBuilder::new(
-                    app,
-                    "main",
-                    WebviewUrl::External(url.parse().map_err(|e| format!("bad url: {e}"))?),
-                )
-                .title("UApp")
-                .inner_size(1180.0, 800.0);
-                #[cfg(desktop)]
-                {
-                    b = b.decorations(false).min_inner_size(760.0, 480.0);
-                }
-                let win = b.build()?;
-                install_navigation_handler(&win);
-                install_drop_forwarding(&win);
-                install_permission_handling(&win);
-                install_permission_prompt(app.handle().clone());
-            } else {
-                let _ = open::that(&url);
+            // Route the shell's window-control / save requests to this
+            // window. Installed before the webview loads so the first click
+            // always has somewhere to go.
+            install_native_bridge(app.handle().clone());
+            // (mobile builds never take the `mut` rebinding below)
+            #[cfg_attr(mobile, allow(unused_mut))]
+            let mut b = WebviewWindowBuilder::new(
+                app,
+                "main",
+                WebviewUrl::External(url.parse().map_err(|e| format!("bad url: {e}"))?),
+            )
+            .title("UApp")
+            .inner_size(1180.0, 800.0);
+            #[cfg(desktop)]
+            {
+                b = b.decorations(false).min_inner_size(760.0, 480.0);
             }
+            let win = b.build()?;
+            install_navigation_handler(&win);
+            install_drop_forwarding(&win);
+            install_permission_handling(&win);
+            install_permission_prompt(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -222,8 +229,8 @@ fn install_permission_prompt(handle: tauri::AppHandle) {
             // fall-through here is what made every button mean "deny" once.
             R::Cancel => false,
             other => {
-                eprintln!(
-                    "uapp: unrecognised permission dialog result {other:?} — denying. \
+                tracing::error!(
+                    "unrecognised permission dialog result {other:?}, denying. \
                      This is a bug: the button labels and the result mapping disagree."
                 );
                 false
@@ -435,7 +442,7 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
         });
     });
     if let Err(e) = res {
-        eprintln!("uapp: could not install permission handling: {e}");
+        tracing::warn!("could not install permission handling: {e}");
     }
 }
 
@@ -532,7 +539,7 @@ fn install_permission_handling<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>)
         );
     });
     if let Err(e) = res {
-        eprintln!("uapp: could not install permission handling: {e}");
+        tracing::warn!("could not install permission handling: {e}");
     }
 }
 
@@ -630,11 +637,11 @@ fn open_dialog(handle: &tauri::AppHandle) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
-/// Which .uapp to open. Desktop: a path from the OS file association or the
-/// command line. Mobile: a document staged by MainActivity from an "open with"
-/// VIEW intent (marker files in the app's private dir), moved into the
-/// per-user documents dir and opened. Otherwise a per-user default document —
-/// the second tuple field is true for that fallback case.
+/// Which .uapp to open when the command line named none. Mobile: a document
+/// staged by MainActivity from an "open with" VIEW intent (marker files in the
+/// app's private dir), moved into the per-user documents dir and opened.
+/// Otherwise a per-user default document — the second tuple field is true for
+/// that fallback case.
 #[cfg_attr(desktop, allow(unused_variables))]
 fn resolve_app_path(mobile_data: Option<&std::path::Path>) -> (std::path::PathBuf, bool) {
     #[cfg(mobile)]
@@ -696,7 +703,7 @@ fn resolve_app_path(mobile_data: Option<&std::path::Path>) -> (std::path::PathBu
                     Err(e) => {
                         // The working copy (if any) is untouched; open it, or
                         // fall through to the default document.
-                        eprintln!("uapp: not importing {name}: {e:#}");
+                        tracing::warn!("not importing {name}: {e:#}");
                         let _ = std::fs::remove_file(&pending);
                         if dest.exists() {
                             return (dest, false);
@@ -704,12 +711,6 @@ fn resolve_app_path(mobile_data: Option<&std::path::Path>) -> (std::path::PathBu
                     }
                 }
             }
-        }
-    }
-    #[cfg(desktop)]
-    {
-        if let Some(arg) = std::env::args().skip(1).find(|a| a.ends_with(".uapp")) {
-            return (std::path::PathBuf::from(arg), false);
         }
     }
     let dir = dirs::data_dir()

@@ -1,7 +1,7 @@
 //! uapp core, exposed as a library so the native Tauri shells — the PRIMARY
 //! UApp experience, desktop and mobile (`--features gui`) — embed the exact
-//! same engine + server + UI. The CLI in `main.rs` wraps the same server and
-//! uses the system browser only as the fallback shell.
+//! same engine + server + UI. The `uapp` binary (`main.rs`) is the CLI on top:
+//! it opens the native window in gui builds and the system browser otherwise.
 
 pub mod ai;
 pub mod app;
@@ -14,6 +14,8 @@ pub mod gui;
 pub mod install;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod library;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod logging;
 pub mod mcp;
 pub mod native;
 pub mod net;
@@ -112,8 +114,8 @@ mod native_serve {
         }
         let theirs = resp.header("x-uapp-version").unwrap_or("");
         if theirs != env!("CARGO_PKG_VERSION") {
-            eprintln!(
-            "uapp: a server of another version ({}) still has {} open — stop it (or wait for it to exit) so this build can open the file",
+            tracing::warn!(
+            "a server of another version ({}) still has {} open; stop it (or wait for it to exit) so this build can open the file",
             if theirs.is_empty() { "unknown" } else { theirs },
             path.display()
         );
@@ -232,7 +234,7 @@ mod native_serve {
         // Keys and credentials an older build kept in the file move to this
         // machine (see secrets.rs) before anything can read them.
         if let Err(e) = secrets::migrate(&app) {
-            eprintln!("uapp: could not move saved keys out of the file: {e:#}");
+            tracing::warn!("could not move saved keys out of the file: {e:#}");
         }
 
         // Native window only: forward OS file drops to the shell (see native.rs +
@@ -314,7 +316,7 @@ mod native_serve {
                             let since = *zero_since.get_or_insert_with(std::time::Instant::now);
                             if since.elapsed().as_millis() as u64 >= linger_ms && !app.ai_busy_any()
                             {
-                                eprintln!("uapp: last client disconnected — shutting down");
+                                tracing::info!("last client disconnected, shutting down");
                                 app.graceful_cleanup();
                                 // A native window whose webview dropped the socket
                                 // (frozen/suspended) may still be up — close it too.
@@ -344,7 +346,7 @@ mod native_serve {
                 .with_graceful_shutdown(async move {
                     stop.await;
                     shutdown_app.graceful_cleanup();
-                    eprintln!("uapp: shutting down");
+                    tracing::info!("shutting down");
                     crate::exit_soon();
                 })
                 .await?;
@@ -354,15 +356,21 @@ mod native_serve {
 
     /// Embedder entry (native shells): open `path` on a background thread and
     /// return the URL to load into a webview once the server is listening. The
-    /// server runs until the process exits.
-    pub fn serve_background(path: PathBuf, fixed_port: u16, unsaved: bool) -> Result<String> {
+    /// server runs until the process exits. An encrypted file with no (or a
+    /// wrong) `passphrase` gets the web unlock page.
+    pub fn serve_background(
+        path: PathBuf,
+        fixed_port: u16,
+        unsaved: bool,
+        passphrase: Option<String>,
+    ) -> Result<String> {
         let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
         std::thread::spawn(move || {
             let tx2 = tx.clone();
             let on_ready: OnReady = Box::new(move |url, _port, _reused| {
                 let _ = tx2.send(Ok(url.to_string()));
             });
-            if let Err(e) = serve_opts(path, fixed_port, unsaved, None, on_ready) {
+            if let Err(e) = serve_opts(path, fixed_port, unsaved, passphrase, on_ready) {
                 let _ = tx.send(Err(format!("{e:#}")));
             }
         });
@@ -414,7 +422,7 @@ mod native_serve {
         if let Some(t) = &token {
             secrets::check_token(t).context("--token / UAPP_TOKEN")?;
             if t.len() < 16 {
-                eprintln!("uapp: warning: the token is short ({} characters); anyone who guesses it can edit and publish this site", t.len());
+                tracing::warn!("the token is short ({} characters); anyone who guesses it can edit and publish this site", t.len());
             }
         }
         let token = token.unwrap_or_else(secrets::new_token);
@@ -428,7 +436,7 @@ mod native_serve {
         // An MCP token left in the file would otherwise be published with
         // /site.uapp.
         if let Err(e) = secrets::migrate(&app) {
-            eprintln!("uapp: could not move saved keys out of the file: {e:#}");
+            tracing::warn!("could not move saved keys out of the file: {e:#}");
         }
 
         let rt = tokio::runtime::Runtime::new()?;
@@ -445,11 +453,11 @@ mod native_serve {
             eprintln!("uapp: token (pass --token or set UAPP_TOKEN to fix it): {token}");
         }
         if std::fs::OpenOptions::new().write(true).open(&path).is_err() {
-            eprintln!("uapp: {} is not writable — publishing (PUT /site.uapp) will fail", path.display());
+            tracing::warn!("{} is not writable, so publishing (PUT /site.uapp) will fail", path.display());
         }
         match &chrome_dir {
-            Some(dir) => eprintln!("uapp: editing chrome enabled (web build: {})", dir.display()),
-            None => eprintln!("uapp: no editing chrome (pass --chrome <dist-web> to enable)"),
+            Some(dir) => tracing::info!("editing chrome enabled (web build: {})", dir.display()),
+            None => tracing::info!("no editing chrome (pass --chrome <dist-web> to enable)"),
         }
         // Rolling rescue snapshot while publishes keep landing.
         {
@@ -471,7 +479,7 @@ mod native_serve {
             .with_graceful_shutdown(async move {
                 stop.await;
                 shutdown_app.graceful_cleanup();
-                eprintln!("uapp: shutting down");
+                tracing::info!("shutting down");
                 crate::exit_soon();
             })
             .await?;
@@ -502,22 +510,30 @@ mod native_serve {
         });
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(async move {
-        let stop = crate::shutdown_signal();
-        let listener = tokio::net::TcpListener::bind((bind, port)).await?;
-        let addr = listener.local_addr()?;
-        eprintln!("uapp: serving the browser build ({}) at http://{}/", chrome_dir.display(), addr);
-        match &open {
-            Some(u) => eprintln!("uapp: a bare visit opens {u}; ?open=<url> and ?app=<id> override it"),
-            None => eprintln!("uapp: a bare visit opens the launcher; ?open=<url> opens an archive from a URL"),
-        }
-        axum::serve(listener, webhost::router(host))
-            .with_graceful_shutdown(async {
-                stop.await;
-                eprintln!("uapp: shutting down");
-            })
-            .await?;
-        Ok::<_, anyhow::Error>(())
-    })
+            let stop = crate::shutdown_signal();
+            let listener = tokio::net::TcpListener::bind((bind, port)).await?;
+            let addr = listener.local_addr()?;
+            eprintln!(
+                "uapp: serving the browser build ({}) at http://{}/",
+                chrome_dir.display(),
+                addr
+            );
+            match &open {
+                Some(u) => {
+                    tracing::info!("a bare visit opens {u}; ?open=<url> and ?app=<id> override it")
+                }
+                None => tracing::info!(
+                    "a bare visit opens the launcher; ?open=<url> opens an archive from a URL"
+                ),
+            }
+            axum::serve(listener, webhost::router(host))
+                .with_graceful_shutdown(async {
+                    stop.await;
+                    tracing::info!("shutting down");
+                })
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        })
     }
 }
 #[cfg(not(target_arch = "wasm32"))]

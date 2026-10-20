@@ -46,7 +46,7 @@ pub fn router(lib: Arc<Library>) -> Router {
         .route("/index.json", get(list))
         .route("/health", get(health))
         .route(
-            "/:name",
+            "/{name}",
             get(fetch)
                 .put(put)
                 .delete(delete)
@@ -63,7 +63,6 @@ async fn health() -> Response {
 /// extractor, so no handler checks tokens itself.
 pub struct Owner;
 
-#[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<Library>> for Owner {
     type Rejection = Response;
     async fn from_request_parts(

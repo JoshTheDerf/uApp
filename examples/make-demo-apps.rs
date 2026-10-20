@@ -1,5 +1,5 @@
 //! Build the launcher.uapp for the browser demo.
-//! Usage: cargo run --bin make-demo-apps -- <launcher-out-dir>
+//! Usage: cargo run --release --no-default-features --example make-demo-apps -- <launcher-out-dir>
 //!
 //! Reads from templates/ at runtime:
 //! - templates/launcher.html - main launcher UI

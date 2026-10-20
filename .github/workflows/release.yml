@@ -1,7 +1,7 @@
 name: Release
 
-# Tag a commit `v*` (e.g. v0.1.0) to build binaries for every platform and
-# attach them to a GitHub release.
+# Tag a commit `v*` (e.g. v0.1.0) to build every platform's packages and
+# attach them to a GitHub release. The tag must match Cargo.toml's version.
 on:
   push:
     tags: ["v*"]
@@ -14,28 +14,53 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    name: Tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [[ "$GITHUB_REF" == refs/tags/* && "${GITHUB_REF_NAME#v}" != "$ver" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match the version in Cargo.toml ($ver)"
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+  # The whole CI run (lint, tests, wasm, cargo-deny, cross checks) gates the
+  # release.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: ${{ matrix.artifact }}
+    needs: [version, ci]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Desktop GUI builds — gui is the default feature.
-          # Linux — gnu build on the oldest supported runner for broad glibc
-          # compatibility (Ubuntu/Debian/Fedora/openSUSE/...).
+          # Linux: the oldest supported runner, for broad glibc compatibility.
+          # Tauri bundles a .deb and an AppImage (both register .uapp files).
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: uapp-linux-x86_64
-            packages: libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev
-          # macOS
+            bundles: deb,appimage
+            packages: libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev file
+          # macOS: UApp.app (with the .uapp document type) and a .dmg.
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: uapp-macos-arm64
+            bundles: app,dmg
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: uapp-macos-x86_64
-          # Windows
+            bundles: app,dmg
+          # Windows: the Inno Setup installer (installer/windows/uapp.iss)
+          # registers .uapp files, so it stays a plain cargo build.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: uapp-windows-x86_64
@@ -57,17 +82,37 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      # gui is the default feature, so no explicit --features needed.
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - uses: actions/setup-node@v4
+        if: matrix.bundles
+        with:
+          node-version: 22
+      - name: Install Tauri CLI
+        if: matrix.bundles
+        run: npm install -g @tauri-apps/cli@2.11.4
+      # gui is the default feature, so this is the window build.
+      - name: Build + bundle (Tauri)
+        if: matrix.bundles
+        run: tauri build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         run: |
+          b=target/${{ matrix.target }}/release
           mkdir -p dist/${{ matrix.artifact }}
-          cp target/${{ matrix.target }}/release/uapp dist/${{ matrix.artifact }}/
-          cp LICENSE README.md dist/${{ matrix.artifact }}/
+          cp $b/uapp LICENSE README.md dist/${{ matrix.artifact }}/
           tar -C dist -czf dist/${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
-      - name: Package (windows)
+          cp $b/bundle/deb/*.deb dist/${{ matrix.artifact }}.deb
+          cp $b/bundle/appimage/*.AppImage dist/${{ matrix.artifact }}.AppImage
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          b=target/${{ matrix.target }}/release/bundle
+          mkdir -p dist
+          ditto -c -k --keepParent "$b/macos/UApp.app" dist/${{ matrix.artifact }}.app.zip
+          cp $b/dmg/*.dmg dist/${{ matrix.artifact }}.dmg
+      - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -80,8 +125,7 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
-          $ver = "${{ github.ref_name }}" -replace '^v',''
-          if (-not $ver) { $ver = "0.0.0" }
+          $ver = "${{ needs.version.outputs.version }}"
           $stage = "installer/windows"
           Copy-Item target/${{ matrix.target }}/release/uapp.exe $stage/
           Copy-Item LICENSE "$stage/LICENSE.txt"
@@ -93,7 +137,11 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.dmg
             dist/*-setup.exe
+          if-no-files-found: error
 
   # Android APK, built from the committed gen/android project for all
   # realistic device ABIs, then signed with apksigner. The signing keystore
@@ -102,6 +150,7 @@ jobs:
   # (installable, but upgrades need an uninstall first).
   build-android:
     name: Android APK (universal)
+    needs: [version, ci]
     runs-on: ubuntu-24.04
     env:
       NDK_VERSION: 27.1.12297006
@@ -207,6 +256,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

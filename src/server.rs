@@ -209,7 +209,6 @@ pub enum Visitor {
     Reader,
 }
 
-#[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<App>> for Owner {
     type Rejection = Response;
     async fn from_request_parts(
@@ -226,7 +225,6 @@ impl axum::extract::FromRequestParts<Arc<App>> for Owner {
     }
 }
 
-#[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<App>> for Visitor {
     type Rejection = Response;
     async fn from_request_parts(
@@ -849,16 +847,16 @@ async fn ws_conn(app: Arc<App>, socket: WebSocket) {
         loop {
             tokio::select! {
                 ev = events.recv() => match ev {
-                    Ok(v) => { if tx.send(Message::Text(v.to_string())).await.is_err() { break; } }
+                    Ok(v) => { if tx.send(Message::Text(v.to_string().into())).await.is_err() { break; } }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => break,
                 },
                 resp = out_rx.recv() => match resp {
-                    Some(s) => { if tx.send(Message::Text(s)).await.is_err() { break; } }
+                    Some(s) => { if tx.send(Message::Text(s.into())).await.is_err() { break; } }
                     None => break,
                 },
                 _ = ping.tick() => {
-                    if tx.send(Message::Ping(vec![])).await.is_err() { break; }
+                    if tx.send(Message::Ping(Default::default())).await.is_err() { break; }
                 }
             }
         }
@@ -1314,7 +1312,7 @@ pub fn router(app: Arc<App>) -> Router {
             }),
         )
         .route(
-            "/shell/*file",
+            "/shell/{*file}",
             get(
                 |axum::extract::Path(file): axum::extract::Path<String>| async move {
                     match SHELL_MODULES.iter().find(|(name, _)| *name == file) {
@@ -1345,7 +1343,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/template.uapp", get(template_download))
         .route("/download.uapp", get(app_download))
         .route("/app/", get(app_root))
-        .route("/app/*path", get(app_file))
+        .route("/app/{*path}", get(app_file))
         .route("/ws", get(ws_route))
         .route(
             "/site.uapp",
@@ -1888,7 +1886,7 @@ async fn site_publish(
         }
         // Rescue point before a whole-site change, like a template update.
         if let Err(e) = app.eng().snapshot() {
-            eprintln!("uapp: snapshot before publish failed: {e:#}");
+            tracing::warn!("snapshot before publish failed: {e:#}");
         }
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body);
         let result = crate::rpc::local_op(&app, "publish", json!({"b64": b64, "data": opts.export_data}))

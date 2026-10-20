@@ -30,9 +30,23 @@ pub fn sql_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// SQLCipher prints its own errors to stderr ("ERROR CORE sqlite3Codec: error
+/// decrypting page 1") on every wrong password, which we already report in
+/// plain words. Its log level is process-wide; keep it off unless debug
+/// logging is on. Doesn't read the database, so it can run before the key.
+fn quiet_sqlcipher_log(conn: &Connection) {
+    let level = if tracing::enabled!(tracing::Level::DEBUG) {
+        "ERROR"
+    } else {
+        "NONE"
+    };
+    let _ = conn.execute_batch(&format!("PRAGMA cipher_log_level = {level};"));
+}
+
 /// Apply the master password to a connection. MUST be the first statement on
 /// it — SQLCipher refuses to decrypt anything read before the key is set.
 fn apply_key(conn: &Connection, passphrase: &str) -> Result<()> {
+    quiet_sqlcipher_log(conn);
     // execute_batch (not pragma_update) so the passphrase is a real SQL
     // literal, never a bound parameter.
     conn.execute_batch(&format!("PRAGMA key = {};", sql_quote(passphrase)))
@@ -104,6 +118,7 @@ pub fn encrypt_file_in_place(path: &Path, passphrase: &str) -> Result<()> {
     ));
     let result = (|| -> Result<()> {
         let src = Connection::open(path)?;
+        quiet_sqlcipher_log(&src);
         src.execute_batch(&format!(
             "ATTACH DATABASE {} AS enc KEY {};",
             sql_quote(&tmp.display().to_string()),
@@ -112,6 +127,7 @@ pub fn encrypt_file_in_place(path: &Path, passphrase: &str) -> Result<()> {
         .context("attaching encrypted target")?;
         src.query_row("SELECT sqlcipher_export('enc')", [], |_| Ok(()))
             .context("exporting to the encrypted copy")?;
+        copy_header(&src, "enc")?;
         src.execute_batch("DETACH DATABASE enc;")?;
         Ok(())
     })();
@@ -150,6 +166,7 @@ pub fn decrypt_file_in_place(path: &Path, passphrase: &str) -> Result<()> {
         // Old files stamped a record-sealing key into their meta (the retired
         // sync engine) — a plaintext file must never carry it.
         src.execute_batch("DELETE FROM plain.uapp_meta WHERE key='crypt';")?;
+        copy_header(&src, "plain")?;
         src.execute_batch("DETACH DATABASE plain;")?;
         Ok(())
     })();
@@ -165,6 +182,18 @@ pub fn decrypt_file_in_place(path: &Path, passphrase: &str) -> Result<()> {
             Err(e)
         }
     }
+}
+
+/// `sqlcipher_export` copies schema and rows but not the header's
+/// application_id and user_version, which say the file is a .uapp and which
+/// format it's in (see store.rs). Carry them over to the attached copy.
+fn copy_header(src: &Connection, schema: &str) -> Result<()> {
+    let app_id: i64 = src.query_row("PRAGMA main.application_id", [], |r| r.get(0))?;
+    let version: i64 = src.query_row("PRAGMA main.user_version", [], |r| r.get(0))?;
+    src.execute_batch(&format!(
+        "PRAGMA {schema}.application_id = {app_id}; PRAGMA {schema}.user_version = {version};"
+    ))?;
+    Ok(())
 }
 
 /// Change the master password (SQLCipher rekey).

@@ -15,7 +15,7 @@ import { spawn } from "node:child_process";
 import { rmSync, mkdirSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-toolbar";
 const FILE = `${DIR}/t.uapp`;
 let passed = 0, failed = 0;
@@ -31,7 +31,7 @@ async function start() {
   });
   const line = await new Promise((res) => { let b = ""; proc.stdout.on("data", (d) => { b += d; const i = b.indexOf("\n"); if (i >= 0) res(b.slice(0, i)); }); });
   const info = JSON.parse(line);
-  if (info.reused) { console.error("FAIL: an older uapp-server still has the test file open — pkill -x uapp-server"); process.exit(2); }
+  if (info.reused) { console.error("FAIL: an older uapp still has the test file open; stop that process first"); process.exit(2); }
   if (process.env.UAPP_DEBUG) proc.stderr.pipe(process.stderr);
   return info;
 }

@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { rmSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-encrypt";
 let passed = 0, failed = 0;
 const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (failed++, console.log(`  ✗ FAIL: ${n} ${x}`)); };
@@ -133,7 +133,7 @@ console.log("\n[4] encrypt-in-place, passwd, decrypt");
   A.proc.kill("SIGKILL"); await sleep(300);
 
   // passwd: old stops working, new works, data intact
-  const pw = await run(["passwd", F3, "--password", PW], { UAPP_PASSWORD: "new-pass-9" });
+  const pw = await run(["passwd", F3, "--password", PW], { UAPP_NEW_PASSWORD: "new-pass-9" });
   ok(pw.code === 0, `uapp passwd succeeded (${pw.out.trim()})`);
   const oldpw = await run(["open", F3, "--headless", "--port", "0", "--password", PW], { UAPP_DEVICE: "cvx", UAPP_LINGER_SECS: "600" });
   ok(oldpw.code !== 0 && /wrong master password/i.test(oldpw.err), "old password rejected after passwd");

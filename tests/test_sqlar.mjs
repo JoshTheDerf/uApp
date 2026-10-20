@@ -8,7 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { deflateSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
 
-const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-sqlar";
 let passed = 0, failed = 0;
 const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (failed++, console.log(`  ✗ FAIL: ${n} ${x}`)); };

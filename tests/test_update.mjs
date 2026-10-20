@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import { rmSync, mkdirSync, writeFileSync, readFileSync, copyFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
-const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp-server`;
+const BIN = process.env.UAPP_BIN || `${process.cwd()}/target/debug/uapp`;
 const DIR = process.env.TESTDIR || "/tmp/uapp-test-update";
 let passed = 0, failed = 0;
 const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (failed++, console.log(`  ✗ FAIL: ${n} ${x}`)); };

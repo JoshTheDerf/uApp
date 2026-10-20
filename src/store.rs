@@ -969,7 +969,7 @@ pub fn check_whole_bytes(head: &[u8], len: u64) -> Result<()> {
         }
         return Ok(());
     }
-    if len < 1024 || len % 512 != 0 {
+    if len < 1024 || !len.is_multiple_of(512) {
         bail!("the file is not a whole .uapp ({len} bytes)");
     }
     Ok(())
