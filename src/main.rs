@@ -28,10 +28,11 @@ use uapp::{device_id, install, serve_opts, store, OnReady};
 )]
 struct Cli {
     /// Log more (-v debug, -vv trace). UAPP_LOG overrides both flags
-    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    #[arg(short, long, action = clap::ArgAction::Count, global = true, help_heading = "Global options")]
     verbose: u8,
     /// Log less (-q warnings only, -qq errors only)
-    #[arg(short, long, action = clap::ArgAction::Count, global = true, conflicts_with = "verbose")]
+    #[arg(short, long, action = clap::ArgAction::Count, global = true, conflicts_with = "verbose",
+        help_heading = "Global options")]
     quiet: u8,
     #[command(flatten, next_help_heading = "Options for opening the scratch app")]
     open: OpenOpts,
@@ -50,6 +51,7 @@ enum Cmd {
     },
     /// Create a blank app without opening it
     New {
+        /// Where to create it
         file: PathBuf,
         /// Create it encrypted (asks for a master password)
         #[arg(long)]
@@ -87,6 +89,7 @@ enum Cmd {
     },
     /// Write a copy of an app to a new file
     Export {
+        /// The app to copy
         app: PathBuf,
         /// Where to write the copy
         #[arg(short, long, value_name = "OUT")]
@@ -103,6 +106,7 @@ enum Cmd {
     },
     /// Show what's in an app file (name, id, format, tables, files)
     Info {
+        /// The .uapp file
         app: PathBuf,
         /// Print JSON
         #[arg(long)]
@@ -112,12 +116,14 @@ enum Cmd {
     },
     /// Encrypt an app with a master password
     Encrypt {
+        /// The .uapp file
         file: PathBuf,
         #[command(flatten)]
         password: PasswordArgs,
     },
     /// Remove an app's encryption
     Decrypt {
+        /// The .uapp file
         file: PathBuf,
         #[command(flatten)]
         password: PasswordArgs,
@@ -127,6 +133,7 @@ enum Cmd {
                       The new password comes from UAPP_NEW_PASSWORD, else the second line of \
                       stdin (with --password-stdin), else a prompt.")]
     Passwd {
+        /// The .uapp file
         file: PathBuf,
         #[command(flatten)]
         password: PasswordArgs,
@@ -202,6 +209,7 @@ struct ServeArgs {
     /// Interface to bind (0.0.0.0 accepts outside connections)
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1")]
     bind: String,
+    /// Port to listen on
     #[arg(long, value_name = "N", default_value_t = 8080)]
     port: u16,
     /// Secret that unlocks the shell, the WebSocket and publishing (default:
@@ -246,6 +254,7 @@ struct LibraryArgs {
     /// Interface to bind (0.0.0.0 accepts outside connections)
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1")]
     bind: String,
+    /// Port to listen on
     #[arg(long, value_name = "N", default_value_t = 8090)]
     port: u16,
     /// Secret that unlocks PUT and DELETE (default: a random one, printed at start)

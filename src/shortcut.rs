@@ -303,6 +303,7 @@ fn icon_path(name: &str, ext: &str) -> Result<PathBuf> {
 /// .desktop string value: the name comes from the (shared, untrusted) .uapp
 /// meta, so control chars — which would let it inject extra `Key=` lines —
 /// are dropped, and backslashes are doubled per the spec's escape rules.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn desktop_string(s: &str) -> String {
     s.chars()
         .filter(|c| !c.is_control())
@@ -313,6 +314,7 @@ fn desktop_string(s: &str) -> String {
 /// One quoted Exec= argument. Inside double quotes the spec reserves
 /// `"` `` ` `` `$` `\` (backslash-escaped, with the backslash itself doubled
 /// again by the string-escape rule) and `%` is a field code, written `%%`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn desktop_exec_arg(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars().filter(|c| !c.is_control()) {
@@ -330,6 +332,7 @@ fn desktop_exec_arg(s: &str) -> String {
     out
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux(
     name: &str,
     path: &Path,
