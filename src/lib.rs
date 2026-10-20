@@ -23,6 +23,7 @@ pub mod prefs;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod registry;
 pub mod rpc;
+pub mod secrets;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 #[cfg(not(target_arch = "wasm32"))]
@@ -228,6 +229,11 @@ mod native_serve {
             }
         };
         let app = Arc::new(app::App::new(eng, token.clone(), unsaved));
+        // Keys and credentials an older build kept in the file move to this
+        // machine (see secrets.rs) before anything can read them.
+        if let Err(e) = secrets::migrate(&app) {
+            eprintln!("uapp: could not move saved keys out of the file: {e:#}");
+        }
 
         // Native window only: forward OS file drops to the shell (see native.rs +
         // App::native_drop). The webview never gets HTML5 drop events for them, so
@@ -413,6 +419,11 @@ mod native_serve {
             None => None,
         };
         let app = Arc::new(app);
+        // An MCP token left in the file would otherwise be published with
+        // /site.uapp.
+        if let Err(e) = secrets::migrate(&app) {
+            eprintln!("uapp: could not move saved keys out of the file: {e:#}");
+        }
 
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(async move {

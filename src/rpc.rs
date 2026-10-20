@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::app::App;
-use crate::store;
+use crate::{secrets, store};
 
 /// Entry point for anything that arrived over a transport (WebSocket, the
 /// browser worker's postMessage, an HTTP upload): strips the server-internal
@@ -258,15 +258,35 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                 None => bail!("that history entry has no content (file was created then)"),
             }
         }
+        // Secrets never come back out (see secrets.rs): the AI key reads as
+        // `has_api_key`, MCP credentials as `hasAuth`.
         "config.get" => {
-            let eng = app.engine.lock().unwrap();
-            Ok(store::config_get(&eng.db, need_str(&p, "key")?)?.unwrap_or(Value::Null))
+            let key = need_str(&p, "key")?;
+            if secrets::reserved_config_key(key) {
+                return Ok(Value::Null);
+            }
+            let v = store::config_get(&app.eng().db, key)?.unwrap_or(Value::Null);
+            Ok(match key {
+                "ai" => secrets::redact_ai(app, v),
+                "mcp" => secrets::redact_mcp(app, v),
+                _ => v,
+            })
         }
-        "config.set" => local_op(
-            app,
-            "config_set",
-            json!({"key": need_str(&p, "key")?, "value": p["value"]}),
-        ),
+        "config.set" => {
+            let key = need_str(&p, "key")?;
+            if secrets::reserved_config_key(key) {
+                bail!("'{key}' is kept by uapp on this machine and can't be set here");
+            }
+            let value = match key {
+                "ai" => secrets::prepare_ai(app, p["value"].clone())?,
+                "mcp" => match p["value"].as_array() {
+                    Some(list) => json!(secrets::mcp_store_credentials(app, list.clone())?),
+                    None => p["value"].clone(),
+                },
+                _ => p["value"].clone(),
+            };
+            local_op(app, "config_set", json!({"key": key, "value": value}))
+        }
 
         // ---- the toolbar around the app frame (see toolbar.rs) ----
         // The saved default: what every fresh open of this app starts from.
@@ -824,7 +844,9 @@ fn app_save(app: &Arc<App>) -> Result<Value> {
     // A scratch / default document is CONSUMED by Save As: its content now
     // lives in the chosen file, so delete the old one (and its registry
     // records) — the next bare launch starts a fresh blank document.
-    if was_unsaved && crate::registry::key(&old_path) != crate::registry::key(&path) {
+    let consumed = was_unsaved && crate::registry::key(&old_path) != crate::registry::key(&path);
+    crate::secrets::follow_save_as(&old_path, &path, consumed);
+    if consumed {
         let _ = std::fs::remove_file(&old_path);
         crate::registry::forget(&old_path);
     }
@@ -920,13 +942,14 @@ pub fn local_op(app: &Arc<App>, kind: &str, payload: Value) -> Result<Value> {
     Ok(result)
 }
 
+/// The configured MCP servers, each with this machine's credentials for it.
 pub fn mcp_servers(app: &Arc<App>) -> Vec<Value> {
-    let eng = app.engine.lock().unwrap();
-    store::config_get(&eng.db, "mcp")
+    let list = store::config_get(&app.eng().db, "mcp")
         .ok()
         .flatten()
         .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    secrets::mcp_with_credentials(app, list)
 }
 
 /// Only servers not switched off — what the toolset is built from.
@@ -1489,6 +1512,7 @@ fn mcp_mutate(
     if f(&mut servers) == 0 {
         bail!("no MCP server named '{name}' (mcp.status lists them)");
     }
+    let servers = secrets::mcp_store_credentials(app, servers)?;
     local_op(app, "config_set", json!({"key": "mcp", "value": servers}))?;
     Ok(json!({"ok": true}))
 }

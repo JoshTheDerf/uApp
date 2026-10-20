@@ -16,6 +16,15 @@ use tokio::sync::broadcast;
 
 use crate::engine::{ChangeSet, Engine};
 
+/// Lock a mutex even when a thread panicked while holding it. A poisoned
+/// engine mutex used to take every later request down with it (each handler
+/// unwrapped the lock), so one bad request ended the server. The data behind
+/// these locks stays usable after a panic: SQLite rolls back the transaction
+/// a panicking op left open, and the rest is plain bookkeeping.
+pub fn lock<T: ?Sized>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A gated tool call waiting for the user's decision (manual mode).
 /// Lives only on the device that started the AI run.
 pub struct PendingApproval {
@@ -285,6 +294,11 @@ impl App {
 }
 
 impl App {
+    /// The engine, locked (poison-tolerant, see [`lock`]).
+    pub fn eng(&self) -> std::sync::MutexGuard<'_, Engine> {
+        lock(&self.engine)
+    }
+
     /// Best-effort cleanup before the process exits: a final rescue snapshot
     /// if anything changed, and drop this file's registry addr so future opens
     /// stop dialing a dead server. Every exit path — quit from the shell,

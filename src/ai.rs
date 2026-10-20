@@ -173,7 +173,7 @@ fn load_config(app: &Arc<App>) -> Result<AiConfig> {
     let max_tokens = cfg["max_tokens"].as_u64().map(|v| v as u32);
     Ok(AiConfig {
         provider,
-        api_key: cfg["api_key"].as_str().unwrap_or("").to_string(),
+        api_key: crate::secrets::ai_key(app, &cfg),
         model: cfg["model"].as_str().unwrap_or("").to_string(),
         base_url: cfg["base_url"].as_str().map(|s| s.to_string()),
         max_tokens,
@@ -499,7 +499,7 @@ pub fn app_approval_gate(app: &Arc<App>, tool: &str, input: &Value) -> Result<bo
     drop(eng);
 
     // Check if this tool has been pre-approved for this app
-    if store::check_app_approval(&app.engine.lock().unwrap().db, &app_id, tool) {
+    if crate::secrets::app_approved(app, &app_id, tool) {
         return Ok(true);
     }
 
@@ -529,8 +529,7 @@ pub fn app_approval_gate(app: &Arc<App>, tool: &str, input: &Value) -> Result<bo
             Ok(v) => {
                 let allow = v["allow"].as_bool().unwrap_or(false);
                 if allow && v["always"].as_bool().unwrap_or(false) {
-                    let eng = app.engine.lock().unwrap();
-                    store::add_app_approval(&eng.db, &app_id, tool)?;
+                    crate::secrets::approve_app(app, &app_id, tool)?;
                 }
                 Ok(allow)
             }
@@ -558,8 +557,7 @@ pub fn app_approval_gate(app: &Arc<App>, tool: &str, input: &Value) -> Result<bo
         match decision {
             Ok((allow, always)) => {
                 if allow && always {
-                    let eng = app.engine.lock().unwrap();
-                    store::add_app_approval(&eng.db, &app_id, tool)?;
+                    crate::secrets::approve_app(app, &app_id, tool)?;
                 }
                 Ok(allow)
             }
