@@ -226,6 +226,7 @@ export const S = {
     unsavedTitle: "Cette appli n'est pas encore enregistrée dans un fichier",
     unsavedTitleBrowser: "Cette appli n'est pas encore enregistrée dans un fichier",
     aiSection: "Assistant IA",
+    notIsolated: "Cette appli n'est pas isolée de l'éditeur. N'ouvrez ici que des applis de confiance.",
     groupApp: "Cette appli (enregistrée dans le fichier)",
     groupDevice: "Cet appareil",
     appearance: "Apparence",
