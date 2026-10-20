@@ -154,6 +154,7 @@ let sab = null;    // bridge control + reply (see uapp_glue.js for the layout)
 let inbox = null;  // page → worker RPCs while the worker is blocked in an AI run
 let net = null;    // provider HTTP records, main-thread fetch → worker
 const WAKE = 3, BLOCKED = 4, HDR = 32; // same layout as uapp_glue.js
+const RUNTIME_TIMEOUT_MS = 90000;
 function wake() {
   const c = new Int32Array(sab);
   Atomics.add(c, WAKE, 1);
@@ -1287,15 +1288,54 @@ function splashAsk(title, text, okLabel, cancelLabel) {
   });
 }
 
-function fatal(msg) {
-  // Hosted-site mode (site-chrome.js): the body is the reader's page, and the
-  // right failure mode is to leave it alone. Report, don't repaint.
-  if (window.__uappSiteArchive) {
-    window.dispatchEvent(new CustomEvent("uapp-boot-fatal", { detail: String(msg) }));
+// Boot could not finish. Said on the splash, with a way to try again: a
+// production page opens its app with ?open= or the --open default, and a
+// silent failure there is an endless "Loading…".
+function fatal(msg, title = "uApp could not start") {
+  msg = String(msg || "Something went wrong.");
+  console.error("uapp:", msg);
+  // Hosted-site chrome (site-chrome.js): the body is the reader's page, and
+  // the right failure mode is to leave it alone. Report, don't repaint.
+  if (window.__uappChrome) {
+    window.dispatchEvent(new CustomEvent("uapp-boot-fatal", { detail: msg }));
     return;
   }
-  document.body.innerHTML = `<div style="max-width:520px;margin:80px auto;font:15px/1.6 system-ui;color:#eee;background:#2b3145;padding:24px;border-radius:12px"><b>uapp browser demo could not start</b><br>${msg}</div>`;
-  document.body.style.background = "#23293a";
+  const buttons = [["Try again", () => { leaving = true; location.reload(); }]];
+  if (!IS_LAUNCHER) buttons.push(["Back to your apps", () => switchTo(null)]);
+  errorCard(title, msg, buttons);
+}
+
+// A full-page message over whatever is there (the splash, a broken shell).
+// Text nodes only: the message is error text, which can carry markup.
+function errorCard(title, text, buttons) {
+  const old = document.getElementById("uapp-error");
+  if (old) old.remove();
+  const el = document.createElement("div");
+  el.id = "uapp-error";
+  el.setAttribute("role", "alert");
+  el.style.cssText = "position:fixed;inset:0;z-index:2147483600;display:flex;align-items:center;justify-content:center;background:#eef0f3;color:#1d2129;font:14px/1.5 system-ui,sans-serif;padding:16px";
+  const card = document.createElement("div");
+  card.style.cssText = "max-width:440px;text-align:center";
+  const h = document.createElement("div");
+  h.style.cssText = "font-size:16px;font-weight:600;margin-bottom:6px";
+  h.textContent = title;
+  const p = document.createElement("div");
+  p.style.cssText = "color:#4a5262;overflow-wrap:anywhere;white-space:pre-line";
+  p.textContent = text;
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:16px";
+  buttons.forEach(([label, fn], i) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.style.cssText = "padding:8px 16px;border-radius:8px;font:inherit;font-weight:600;cursor:pointer;" +
+      (i === 0 ? "border:none;background:#2f6df6;color:#fff" : "border:1px solid #c9ced8;background:#fff;color:#1d2129");
+    b.onclick = fn;
+    row.appendChild(b);
+  });
+  card.append(h, p, row);
+  el.appendChild(card);
+  document.body.appendChild(el);
+  if (splashEl) splashEl.style.display = "none";
 }
 
 // ---- one window per document -----------------------------------------------
@@ -1484,6 +1524,16 @@ if (tabChannel) {
 
     splashNote("Loading the runtime…"); // ~1.5 MB of wasm on a cold cache
     worker = new Worker(new URL("worker.js", BASE), { type: "module" });
+    // A module worker that fails to load (a 404, a syntax error, a network
+    // drop mid-download) says so only here, and never posts "ready".
+    let workerFailed = null;
+    const workerFailure = new Promise((_, reject) => { workerFailed = reject; });
+    workerFailure.catch(() => {});
+    worker.addEventListener("error", (ev) => {
+      const why = (ev && ev.message) || "the worker script failed to load";
+      if (!appIsReady) workerFailed(new Error("The runtime could not load (" + why + ")."));
+      else console.error("uapp: worker error:", why);
+    });
     worker.addEventListener("message", (ev) => {
       const m = ev.data || {};
       if (m.type === "reply") {
@@ -1506,16 +1556,22 @@ if (tabChannel) {
         if (win && stillOurs(win)) { try { postToFrame(win, JSON.parse(m.msg)); } catch {} }
         return;
       }
-      if (m.type === "fatal") fatal(m.error);
+      if (m.type === "fatal" && !appIsReady) workerFailed(new Error(m.error));
     });
-    await new Promise((resolve, reject) => {
-      const h = (ev) => {
-        if (ev.data && ev.data.type === "ready") { worker.removeEventListener("message", h); resolve(); }
-        if (ev.data && ev.data.type === "fatal") reject(new Error(ev.data.error));
-      };
-      worker.addEventListener("message", h);
-      worker.postMessage({ type: "init", sab, inbox, net });
-    });
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        const h = (ev) => {
+          if (ev.data && ev.data.type === "ready") { worker.removeEventListener("message", h); resolve(); }
+          if (ev.data && ev.data.type === "fatal") reject(new Error(ev.data.error));
+        };
+        worker.addEventListener("message", h);
+        worker.postMessage({ type: "init", sab, inbox, net });
+      }),
+      workerFailure,
+      // ~1.5 MB of wasm: a slow connection fits in this, a hung one does not.
+      new Promise((_, reject) => setTimeout(() => reject(new Error(
+        "Loading the runtime took too long. Check your connection and try again.")), RUNTIME_TIMEOUT_MS)),
+    ]);
 
     await migrateLegacy();
 
@@ -1530,9 +1586,7 @@ if (tabChannel) {
       const entry = appsIndex().find((a) => a.id === OPEN.id);
       const wantName = (entry && entry.name) || "App";
       splashShow("Opening " + wantName + "…", "Opening the document…");
-      let bytes;
-      try { bytes = await appRead(OPEN.id); } // null = brand-new app (host.create)
-      catch (e) { fatal(String(e.message || e)); return; }
+      const bytes = await appRead(OPEN.id); // null = brand-new app (host.create)
       try {
         info = await openApp(bytes, wantName);
         currentAppId = OPEN.id;
@@ -1647,6 +1701,6 @@ if (tabChannel) {
   } catch (e) {
     console.error(e);
     appReadyReject(e instanceof Error ? e : new Error(String(e)));
-    fatal(String((e && e.message) || e));
+    fatal(errText(e));
   }
 })();
