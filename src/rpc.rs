@@ -471,8 +471,12 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             if let Some(action) = name.strip_prefix("app__") {
                 app.wait_for_action(action)?;
             }
-            if crate::tools::is_gated(app, &name) {
-                crate::ai::app_approval_gate(app, &name, &p["input"])?;
+            // A Deny, a timeout or a stopped prompt all come back as false,
+            // and none of them may run the tool.
+            if crate::tools::is_gated(app, &name)
+                && !crate::ai::app_approval_gate(app, &name, &p["input"])?
+            {
+                bail!("denied: '{name}' was not allowed to run (the user said no, or the prompt timed out)");
             }
             crate::ai::run_tool(app, &name, &p["input"])
         }

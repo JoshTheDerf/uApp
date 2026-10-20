@@ -151,6 +151,32 @@ console.log("\n[4] attach-from-archive refs");
   ok(!!err && err.message.includes("no such file"), "missing ref rejected");
 }
 
+console.log("\n[5] app-triggered calls: deny means nothing runs");
+{
+  // What an app's uapp.tool() sends. The call blocks on the prompt, so it is
+  // answered from the side, the way the shell's dialog would.
+  const call = A.rpc("tools.call", { name: "sql_exec", input: { sql: "CREATE TABLE app_denied(x)" } });
+  const p = await waitFor(async () => {
+    const list = await A.rpc("ai.pending");
+    return list.find((x) => x.session === "app" && x.name === "sql_exec");
+  });
+  ok(!!p, "app-triggered gated call waits for approval");
+  await A.rpc("ai.approve", { id: p.id, allow: false });
+  let err = null;
+  try { await call; } catch (e) { err = e; }
+  ok(!!err && /denied/.test(err.message), `denied call fails with a clear error (${err && err.message})`);
+  const t = await A.rpc("sql.query", { sql: "SELECT count(*) FROM sqlite_master WHERE name='app_denied'" });
+  ok(t.rows[0][0] === 0, "denied call did NOT run");
+
+  // Allow once: runs, and the next call asks again.
+  const call2 = A.rpc("tools.call", { name: "sql_exec", input: { sql: "CREATE TABLE app_allowed(x)" } });
+  const p2 = await waitFor(async () => (await A.rpc("ai.pending")).find((x) => x.session === "app"));
+  await A.rpc("ai.approve", { id: p2.id, allow: true });
+  await call2;
+  const t2 = await A.rpc("sql.query", { sql: "SELECT count(*) FROM sqlite_master WHERE name='app_allowed'" });
+  ok(t2.rows[0][0] === 1, "allowed call ran");
+}
+
 await A.stop();
 mock.close();
 console.log(`\n==== ${passed} passed, ${failed} failed ====`);
