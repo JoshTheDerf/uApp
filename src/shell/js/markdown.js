@@ -165,28 +165,28 @@ export function mdRender(src, opts = {}) {
 installStyle("markdown", /* css */ `
 /* markdown body used by the viewer's pretty mode */
 .mdbody p { margin: 0 0 10px; white-space: pre-wrap; }
-.mdbody h1 { font-size: 22px; margin: 18px 0 8px; }
-.mdbody h2 { font-size: 18px; margin: 16px 0 6px; }
-.mdbody h3 { font-size: 15px; margin: 14px 0 6px; }
+.mdbody h1 { font-size: var(--fs-xl); margin: var(--sp-5) 0 var(--sp-2); }
+.mdbody h2 { font-size: var(--fs-lg); margin: var(--sp-4) 0 6px; }
+.mdbody h3 { font-size: var(--fs-base); margin: var(--sp-3) 0 6px; }
 .mdbody h1:first-child, .mdbody h2:first-child { margin-top: 0; }
-.mdbody ul, .mdbody ol { margin: 6px 0 10px; padding-left: 24px; }
+.mdbody ul, .mdbody ol { margin: 6px 0 10px; padding-left: var(--sp-6); }
 .mdbody blockquote {
-  margin: 8px 0; padding: 4px 12px; border-left: 3px solid var(--line-strong); color: var(--text-2);
+  margin: var(--sp-2) 0; padding: var(--sp-1) var(--sp-3); border-left: 3px solid var(--line-mid); color: var(--text-2);
 }
-.mdbody hr { border: none; border-top: 1px solid var(--line); margin: 16px 0; }
-.mdbody img { max-width: 100%; border-radius: 6px; }
+.mdbody hr { border: none; border-top: 1px solid var(--line); margin: var(--sp-4) 0; }
+.mdbody img { max-width: 100%; border-radius: var(--r-s); }
 .mdbody a { color: var(--brand); }
 .mdbody code {
-  font-family: var(--mono); font-size: 12px;
-  background: var(--code-bg); border-radius: 4px; padding: 1px 4px;
+  font-family: var(--mono); font-size: var(--fs-sm);
+  background: var(--code-bg); border-radius: var(--r-xs); padding: 1px var(--sp-1);
 }
 .mdbody pre.mdcode {
-  background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px;
-  padding: 10px 12px; overflow-x: auto; font: 12px/1.55 var(--mono);
+  background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: var(--r-m);
+  padding: 10px var(--sp-3); overflow-x: auto; font: var(--fs-sm)/1.55 var(--mono);
 }
 .mdbody pre.mdcode code { background: none; padding: 0; }
-.mdtable { border-collapse: collapse; font-size: 12px; margin: 6px 0; }
-.mdtable th, .mdtable td { border: 1px solid var(--line); padding: 3px 8px; text-align: left; }
+.mdtable { border-collapse: collapse; font-size: var(--fs-sm); margin: 6px 0; }
+.mdtable th, .mdtable td { border: 1px solid var(--line); padding: 3px var(--sp-2); text-align: left; }
 .mdtable th { background: var(--code-bg); }
 pre.mdcode { white-space: pre; }
 

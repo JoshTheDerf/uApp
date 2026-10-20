@@ -13,6 +13,7 @@ export const S = {
     loading: "Laden…",
     checking: "Prüfen…",
     retry: "Erneut versuchen",
+    showHide: "Ein- oder ausblenden",
   },
 
   chat: {
@@ -109,6 +110,12 @@ export const S = {
     diffEditNotFound: (name) => `Bearbeitet ${name}, alter Text nicht gefunden (wird fehlschlagen)`,
 
     stepCount: (n) => `${n} Schritt${n === 1 ? "" : "e"}`,
+    inputLabel: "Nachricht",
+    emptyTitle: "Den Assistenten fragen",
+    emptyHint: "Er kann die Dateien und Daten dieser App lesen und ändern und erklären, wie alles funktioniert.",
+    suggestExplain: "Erkläre, wie diese App funktioniert",
+    suggestFeature: "Schlage eine nützliche neue Funktion vor",
+    suggestData: "Fasse die Daten in dieser App zusammen",
   },
 
   settings: {
@@ -136,7 +143,7 @@ export const S = {
     openApp: "uApp-Datei öffnen…",
     openFailed: (msg) => `Diese Datei konnte nicht geöffnet werden: ${msg}`,
     language: "Sprache",
-    languageHint: "Diese Einstellung gilt nur für diesen Computer. Die Seite wird beim Wechsel neu geladen.",
+    languageHint: "Die Seite lädt beim Ändern neu.",
     aiHint: "KI-Einstellungen werden in der .uapp-Datei gespeichert und mit allen geteilt, die sie öffnen.",
     aiProvider: "KI-Anbieter",
     providerNone: "(keiner)",
@@ -207,6 +214,16 @@ export const S = {
     saveAs: "Speichern unter…",
     unsavedTitle: "Diese App ist noch nicht als Datei gespeichert",
     unsavedTitleBrowser: "Diese App ist noch nicht als Datei gespeichert",
+    aiSection: "KI-Assistent",
+    groupApp: "Diese App (in der Datei gespeichert)",
+    groupDevice: "Dieses Gerät",
+    appearance: "Darstellung",
+    themeSystem: "System",
+    themeLight: "Hell",
+    themeDark: "Dunkel",
+    failed: (msg) => `Fehlgeschlagen: ${msg}`,
+    launcherInstalledMsg: "Installiert.",
+    launcherRemovedMsg: "Entfernt.",
   },
 
   files: {
@@ -296,6 +313,7 @@ export const S = {
     menuChat: "KI-Chat",
     appClosed: "App geschlossen.",
     reopenHint: "Öffnen Sie die Datei erneut, um fortzufahren.",
+    chatLabel: "Chat",
   },
 
   sql: {
@@ -373,6 +391,7 @@ export const S = {
     filterValue: "Wert",
     filterCombine: "Mit der vorherigen Bedingung kombinieren",
     filterRemove: "Bedingung entfernen",
+    tablesLabel: "Tabellen",
   },
 
   tools: {
@@ -463,6 +482,8 @@ export const S = {
     downloadingName: (name) => `${name} wird heruntergeladen…`,
     downloadFailed: (msg) => `Download fehlgeschlagen: ${msg}`,
     resizerTitle: "Ziehen zum Ändern der Größe, Doppelklick zum Zurücksetzen",
+    pinPanel: "Neben der App anheften",
+    unpinPanel: "Lösen (über der App schweben)",
   },
 
   toolMeta: {

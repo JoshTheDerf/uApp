@@ -70,15 +70,15 @@ export function shortcutLabel(spec = def.shortcut) {
 const CSS = /* css */ `
 #toolbar-reveal {
   position: absolute; top: 0; right: 0; z-index: 40;
-  width: 32px; height: 26px; padding: 0;
+  width: var(--h-m); height: 28px; padding: 0;
   display: flex; align-items: center; justify-content: center;
   border: none; border-radius: 0 0 0 var(--r-m);
   background: var(--ink); color: var(--chrome-text);
-  opacity: .3; cursor: pointer; transition: opacity .15s;
+  opacity: .3; cursor: pointer; transition: opacity var(--dur-1) var(--ease);
 }
 #toolbar-reveal:hover, #toolbar-reveal:focus-visible { opacity: 1; }
 #toolbar-reveal[hidden] { display: none; }
-@media (pointer: coarse) { #toolbar-reveal { width: 44px; height: 34px; opacity: .45; } }
+@media (pointer: coarse) { #toolbar-reveal { width: 44px; height: 36px; opacity: .45; } }
 `;
 
 let handleEl = null;

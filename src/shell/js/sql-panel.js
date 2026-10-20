@@ -7,49 +7,51 @@
 import { rpc, on } from "./core.js";
 import {
   $, I, esc, div, fmtSize, installStyle, copyText, showMenu,
-  dlgAlert, dlgConfirm, makeDialog, footBtn, registerPanel, closePanel, isComposing,
+  dlgAlert, dlgConfirm, makeDialog, footBtn, registerPanel, closePanel, isComposing, menuFrom,
 } from "./ui.js";
 import { toCsv, toTsv, toXlsx, downloadBlob } from "./export.js";
 import { S } from "./strings.js";
 
 const TPL = /* html */ `
   <div class="panel-head">
-    <span class="panel-title"><span id="sql-head-icon"></span>${S.sql.title}</span>
+    <span class="panel-title" id="sql-title"><span id="sql-head-icon"></span>${S.sql.title}</span>
     <span id="sql-dbinfo" class="hint"></span>
     <div class="spacer"></div>
-    <div id="sql-tabs" role="tablist">
+    <div id="sql-tabs" role="tablist" aria-label="${S.sql.title}">
       <button id="tab-browse" class="sqltab active" role="tab">${S.sql.tabBrowse}</button>
       <button id="tab-sql" class="sqltab" role="tab">${S.sql.tabSql}</button>
     </div>
-    <button id="btn-sql-refresh" class="icon-btn" title="${S.sql.refreshTables}"></button>
-    <button id="btn-sql-close" class="icon-btn" title="${S.common.closeEsc}"></button>
+    <button id="btn-sql-refresh" class="icon-btn" title="${S.sql.refreshTables}" aria-label="${S.sql.refreshTables}"></button>
+    <button id="btn-sql-close" class="icon-btn" title="${S.common.closeEsc}" aria-label="${S.common.close}"></button>
   </div>
   <div id="sql-body">
-    <nav id="sql-tables"></nav>
+    <nav id="sql-tables" aria-label="${S.sql.tablesLabel}"></nav>
     <div id="sql-main">
       <section id="sql-browse">
         <div id="br-toolbar">
-          <strong id="br-title">${S.sql.pickTable}</strong>
+          <select id="sql-table-select" class="mini" aria-label="${S.sql.tablesLabel}"></select>
+          <strong id="br-title"></strong>
           <span id="br-count" class="hint"></span>
           <div class="spacer"></div>
-          <button id="br-filter" class="chip-btn hidden" title="${S.sql.addFilter}"></button>
-          <button id="br-insert" class="chip-btn hidden" title="${S.sql.insertRow}"></button>
-          <button id="br-schema" class="chip-btn hidden" title="${S.sql.showSchema}"></button>
-          <button id="br-sqlbtn" class="chip-btn hidden" title="${S.sql.openInSql}"></button>
-          <button id="br-export" class="chip-btn hidden" title="${S.sql.exportRows}"></button>
+          <button id="br-filter" class="chip-btn br-chip hidden" title="${S.sql.addFilter}"></button>
+          <button id="br-insert" class="chip-btn br-chip hidden" title="${S.sql.insertRow}"></button>
+          <button id="br-schema" class="chip-btn br-chip hidden" title="${S.sql.showSchema}"></button>
+          <button id="br-sqlbtn" class="chip-btn br-chip hidden" title="${S.sql.openInSql}"></button>
+          <button id="br-export" class="chip-btn br-chip hidden" title="${S.sql.exportRows}"></button>
+          <button id="br-more" class="icon-btn hidden" title="${S.files.more}" aria-label="${S.files.more}"></button>
         </div>
         <div id="br-filters" class="hidden"></div>
         <pre id="br-schemabox" class="schemabox hidden"></pre>
         <div id="br-result"><p class="hint pad">${S.sql.pickTableHint}</p></div>
         <div id="br-pager" class="hidden">
-          <button id="br-prev" class="icon-btn" title="${S.sql.prevPage}"></button>
+          <button id="br-prev" class="icon-btn" title="${S.sql.prevPage}" aria-label="${S.sql.prevPage}"></button>
           <span id="br-range" class="hint"></span>
-          <button id="br-next" class="icon-btn" title="${S.sql.nextPage}"></button>
+          <button id="br-next" class="icon-btn" title="${S.sql.nextPage}" aria-label="${S.sql.nextPage}"></button>
         </div>
       </section>
       <section id="sql-query" class="hidden">
         <div id="sql-editorbar">
-          <textarea id="sql-input" rows="3" spellcheck="false"
+          <textarea id="sql-input" rows="3" spellcheck="false" aria-label="${S.sql.tabSql}"
             placeholder="${S.sql.sqlPlaceholder}"></textarea>
           <button id="btn-sql-run" class="btn primary"></button>
         </div>
@@ -60,79 +62,85 @@ const TPL = /* html */ `
 `;
 
 const CSS = /* css */ `
-#sqlpanel { width: min(880px, 94vw); background: var(--surface); }
-#sql-tabs { display: flex; gap: 2px; background: var(--hover-2); border-radius: var(--r-pill); padding: 2px; }
-.sqltab {
-  border: none; background: none; font: inherit; font-size: 12px; cursor: pointer;
-  padding: 3px 12px; border-radius: var(--r-pill); color: var(--text-2);
+#sqlpanel { width: var(--panel-w-l); background: var(--surface); }
+#sql-tabs {
+  display: flex; gap: 2px; background: var(--hover-2); border-radius: var(--r-pill); padding: 2px;
+  margin-right: var(--sp-1);
 }
-.sqltab.active { background: var(--surface); color: var(--text); font-weight: 600;
-  box-shadow: 0 1px 2px rgba(20,26,40,.12); }
+.sqltab {
+  border: none; background: none; font: inherit; font-size: var(--fs-sm); cursor: pointer;
+  min-height: 24px; padding: 0 var(--sp-3); border-radius: var(--r-pill); color: var(--text-2);
+}
+.sqltab.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow-1); }
 #sql-body { flex: 1; display: flex; min-height: 0; }
 #sql-tables {
-  width: 200px; flex: 0 0 auto; overflow-y: auto; padding: 6px;
+  width: 200px; flex: 0 0 auto; overflow-y: auto; padding: var(--sp-2);
   border-right: 1px solid var(--line-soft); background: var(--surface-3);
 }
-#sql-tables .tsection { margin: 8px 2px 2px; }
+#sql-tables .tsection { margin: var(--sp-2) var(--sp-1) var(--sp-1); }
+#sql-tables .tsection:first-child { margin-top: var(--sp-1); }
 .tblrow {
-  display: flex; align-items: center; gap: 6px; width: 100%;
-  border: none; background: none; cursor: pointer; font: inherit; font-size: 13px;
-  padding: 5px 7px; border-radius: 6px; text-align: left; color: var(--text);
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%; min-height: var(--h-m);
+  border: none; background: none; cursor: pointer; font: inherit; font-size: var(--fs-md);
+  padding: 0 var(--sp-2); border-radius: var(--r-s); text-align: left; color: var(--text);
 }
 .tblrow:hover { background: var(--hover); }
-.tblrow.active { background: var(--brand-soft); }
+.tblrow.active { background: var(--brand-soft); color: var(--brand-ink); font-weight: 600; }
+.tblrow.active .ticon { color: var(--brand); }
 .tblrow .tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tblrow.internal { color: var(--faint); }
 .tblrow.internal .ticon { color: var(--ghost); }
+#sql-table-select { display: none; max-width: 50%; }
+#br-more { display: none; }
 #sql-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 #sql-browse, #sql-query { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #br-toolbar {
-  display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+  display: flex; align-items: center; gap: var(--sp-2); flex: 0 0 auto;
   /* wrap: on narrow screens the chip buttons drop to a second row instead of
      crushing the row-count text into one-word-per-line */
-  flex-wrap: wrap;
-  padding: 8px 10px; border-bottom: 1px solid var(--line-soft);
+  flex-wrap: wrap; min-height: var(--head-h);
+  padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--line-soft);
 }
-#br-toolbar strong { font-size: 13px; }
+#br-toolbar strong { font-size: var(--fs-md); }
 #br-count { white-space: nowrap; }
 #br-filters {
-  display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto;
-  padding: 7px 10px; border-bottom: 1px solid var(--line-soft); background: var(--surface-3);
+  display: flex; flex-direction: column; gap: var(--sp-1); flex: 0 0 auto;
+  padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--line-soft); background: var(--surface-3);
 }
-.qb-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.qb-row { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
 .qb-row .qb-col { max-width: 160px; }
 .qb-row .qb-op { max-width: 150px; }
 .qb-row .qb-val { flex: 1; width: 80px; min-width: 60px; }
-.qb-row .qb-and { width: 64px; color: var(--text-2); }
-#br-result { flex: 1; min-height: 0; overflow: auto; padding: 8px 10px; }
+.qb-row .qb-and { width: 68px; color: var(--text-2); }
+#br-result { flex: 1; min-height: 0; overflow: auto; padding: var(--sp-2) var(--sp-3); }
 #br-pager {
-  display: flex; align-items: center; justify-content: center; gap: 10px;
-  flex: 0 0 auto; padding: 5px; border-top: 1px solid var(--line-soft);
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-3);
+  flex: 0 0 auto; padding: var(--sp-1); border-top: 1px solid var(--line-soft);
 }
 .schemabox {
   flex: 0 0 auto; max-height: 30vh; overflow: auto;
-  background: var(--surface-2); border-bottom: 1px solid var(--line-soft);
-  padding: 8px 10px; font: 12px/1.5 var(--mono); white-space: pre-wrap; margin: 0;
+  background: var(--surface-2); border-bottom: 1px solid var(--line-soft); color: var(--text);
+  padding: var(--sp-2) var(--sp-3); font: var(--fs-sm)/1.5 var(--mono); white-space: pre-wrap; margin: 0;
 }
-#sql-editorbar { display: flex; gap: 6px; align-items: flex-start; padding: 8px 10px 0; }
+#sql-editorbar { display: flex; gap: var(--sp-2); align-items: flex-start; padding: var(--sp-3) var(--sp-3) 0; }
 #sql-input {
-  flex: 1; resize: vertical; min-height: 64px; max-height: 40vh;
-  font: 12px/1.5 var(--mono);
+  flex: 1; resize: vertical; min-height: 72px; max-height: 40vh;
+  font: var(--fs-sm)/1.5 var(--mono);
 }
-#sql-result { flex: 1; min-height: 0; overflow: auto; padding: 8px 10px; }
-.sqlmsg { color: var(--text-2); font-size: 13px; padding: 4px 2px; }
+#sql-result { flex: 1; min-height: 0; overflow: auto; padding: var(--sp-2) var(--sp-3); }
+.sqlmsg { color: var(--text-2); font-size: var(--fs-md); padding: var(--sp-1) 2px; }
 .sqlmsg.err { color: var(--err-ink); white-space: pre-wrap; }
 .sqlmsg svg { vertical-align: -2px; }
-.sqlmsg.note-row { display: flex; align-items: center; gap: 8px; }
-.rtable { border-collapse: collapse; font-size: 12px; margin: 4px 0; width: 100%; }
+.sqlmsg.note-row { display: flex; align-items: center; gap: var(--sp-2); }
+.rtable { border-collapse: collapse; font-size: var(--fs-sm); margin: var(--sp-1) 0; width: 100%; }
 .rtable th, .rtable td {
-  border: 1px solid var(--line); padding: 3px 8px; text-align: left; box-sizing: border-box;
+  border: 1px solid var(--line); padding: var(--sp-1) var(--sp-2); text-align: left; box-sizing: border-box;
   max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* frozen = explicit column widths (drag-resize / cell edit); the pane scrolls */
 .rtable.frozen { table-layout: fixed; }
 .rtable.frozen th, .rtable.frozen td { max-width: none; }
-.rtable th { background: var(--code-bg); position: sticky; top: 0; }
+.rtable th { background: var(--code-bg); position: sticky; top: 0; z-index: 1; font-weight: 600; }
 .col-grip {
   position: absolute; top: 0; right: 0; width: 8px; height: 100%;
   cursor: col-resize; user-select: none;
@@ -142,40 +150,55 @@ const CSS = /* css */ `
   border-radius: 2px; background: transparent;
 }
 .col-grip:hover::after { background: var(--brand); opacity: .55; }
-.rtable th.sortable { cursor: pointer; user-select: none; }
-.rtable th.sortable:hover { background: var(--hover-2); }
-.rtable th.asc::after { content: " ▲"; font-size: 9px; color: var(--brand); }
-.rtable th.desc::after { content: " ▼"; font-size: 9px; color: var(--brand); }
+.rtable th.sortable { padding: 0; }
+.th-sort {
+  display: flex; align-items: center; gap: var(--sp-1); width: 100%; min-height: 26px;
+  padding: var(--sp-1) var(--sp-2); border: none; background: none; cursor: pointer;
+  font: inherit; color: inherit; text-align: left;
+}
+.th-sort:hover { background: var(--hover-2); }
+.th-sort:focus-visible { outline-offset: -2px; }
+.th-sort .sort-ico { display: inline-flex; color: var(--brand); }
 .rtable tr:hover td { background: var(--surface-3); }
 .rtable td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .rtable td.null { color: var(--ghost); font-style: italic; }
-/* click-to-edit cells */
+/* click-to-edit cells (Enter edits the focused one) */
 .rtable td.editable { cursor: text; }
 .rtable td.editable:hover { outline: 2px solid var(--brand); outline-offset: -2px; }
+.rtable td:focus-visible { outline: var(--ring); outline-offset: -2px; }
 .rtable td.editing { padding: 0; outline: 2px solid var(--brand); outline-offset: -2px; }
 .rtable td .cell-edit {
-  width: 100%; box-sizing: border-box; border: none; padding: 3px 8px; font: inherit;
-  outline: none; background: var(--warn-bg);
+  width: 100%; box-sizing: border-box; border: none; padding: var(--sp-1) var(--sp-2); font: inherit;
+  outline: none; background: var(--warn-bg); color: var(--text);
 }
 .rtable td.saved { animation: cellflash 1.2s ease-out; }
 @keyframes cellflash {
   0% { background: var(--ok-soft); } 100% { background: transparent; }
 }
 /* insert-row dialog fields */
-.ins-row { display: flex !important; align-items: center; gap: 8px; margin: 6px 0 !important; }
+.ins-row { display: flex !important; align-items: center; gap: var(--sp-2); margin: 6px 0 !important; }
 .ins-row .ins-col {
   flex: 0 0 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 12.5px; color: var(--text);
+  font-size: var(--fs-md); color: var(--text);
 }
-.ins-row .ins-col i { color: var(--faint); font-size: 10.5px; font-style: normal; margin-left: 4px; }
+.ins-row .ins-col i { color: var(--faint); font-size: var(--fs-xs); font-style: normal; margin-left: var(--sp-1); }
 .ins-row input { flex: 1; margin-top: 0 !important; }
-@media (max-width: 700px) { #sql-tables { width: 138px; } }
-/* Touch devices: grow the tap targets (tabs, table list, cells, col grips). */
+/* Phones: the table list becomes a picker in the toolbar and the action
+   chips fold into one menu, so the grid gets the whole width. */
+@media (max-width: 700px) {
+  #sql-tables { display: none; }
+  #sql-table-select { display: block; }
+  #br-title { display: none; }
+  #br-toolbar .br-chip { display: none; }
+  #br-more:not(.hidden) { display: inline-flex; }
+  #sql-dbinfo { display: none; }
+}
+/* Touch devices: grow the tap targets (tabs, cells, col grips). */
 @media (pointer: coarse) {
-  .sqltab { padding: 8px 14px; }
-  .tblrow { padding: 10px 9px; }
-  .rtable th, .rtable td { padding: 7px 10px; }
-  .rtable td .cell-edit { padding: 7px 10px; }
+  .sqltab { min-height: 34px; padding: 0 var(--sp-4); }
+  .rtable td { padding: var(--sp-2) 10px; }
+  .th-sort { min-height: 36px; padding: var(--sp-2) 10px; }
+  .rtable td .cell-edit { padding: var(--sp-2) 10px; }
   .col-grip { width: 18px; }
 }
 `;
@@ -211,6 +234,7 @@ function setSqlTab(tab) {
 
 async function loadSqlTables(keepSelection) {
   const nav = $("sql-tables");
+  const pick = $("sql-table-select");
   let r;
   try {
     r = await rpc("sql.query", {
@@ -219,46 +243,62 @@ async function loadSqlTables(keepSelection) {
     });
   } catch (e) { nav.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
   nav.innerHTML = "";
-  let lastInternal = null;
+  pick.innerHTML = "";
+  let lastInternal = null, group = null;
   for (const [type, name] of r.rows) {
     const internal = isInternalTable(name);
     if (internal !== lastInternal) {
       lastInternal = internal;
+      const label = internal ? S.sql.sectionInternals : type === "view" ? S.sql.sectionTablesViews : S.sql.sectionTables;
       const s = div("tsection");
-      s.textContent = internal ? S.sql.sectionInternals : type === "view" ? S.sql.sectionTablesViews : S.sql.sectionTables;
+      s.textContent = label;
       nav.appendChild(s);
+      group = document.createElement("optgroup");
+      group.label = label;
+      pick.appendChild(group);
     }
     const b = document.createElement("button");
     b.className = "tblrow" + (internal ? " internal" : "");
     b.dataset.tbl = name;
-    b.innerHTML = `<span class="ticon">${I(type === "view" ? "book-open" : "table-2", 12)}</span>` +
+    b.innerHTML = `<span class="ticon">${I(type === "view" ? "book-open" : "table-2", 14)}</span>` +
       `<span class="tname" title="${esc(name)}">${esc(name)}</span>`;
     b.onclick = () => browseTable(name);
     b.oncontextmenu = (ev) => { ev.preventDefault(); tableMenu(name, type, ev.clientX, ev.clientY); };
-    if (keepSelection && name === sq.table) b.classList.add("active");
+    if (keepSelection && name === sq.table) { b.classList.add("active"); b.setAttribute("aria-current", "true"); }
     nav.appendChild(b);
+    group.appendChild(new Option(name, name, false, keepSelection && name === sq.table));
   }
   if (!r.rows.length) nav.innerHTML = `<p class="hint">${esc(S.sql.noTables)}</p>`;
   $("sql-dbinfo").textContent = S.sql.objectCount(r.rows.length);
   // The browsed table can vanish (dropped here or on another device).
   if (sq.table && !r.rows.some(([, n]) => n === sq.table)) resetBrowse();
+  // Nothing picked yet: start on the app's first own table instead of an
+  // empty pane that only says "pick a table".
+  if (!sq.table) {
+    const first = r.rows.find(([, n]) => !isInternalTable(n));
+    if (first) browseTable(first[1]);
+    else pick.value = "";
+  }
 }
 function resetBrowse() {
   sq.table = null;
-  $("br-title").textContent = S.sql.pickTable;
+  $("br-title").textContent = "";
   $("br-count").textContent = "";
   $("br-result").innerHTML = `<p class="hint pad">${esc(S.sql.pickTableHint)}</p>`;
   $("br-filters").innerHTML = "";
   $("br-filters").classList.add("hidden");
   $("br-schemabox").classList.add("hidden");
   $("br-pager").classList.add("hidden");
-  for (const id of ["br-filter", "br-insert", "br-schema", "br-sqlbtn", "br-export"]) $(id).classList.add("hidden");
+  for (const id of ["br-filter", "br-insert", "br-schema", "br-sqlbtn", "br-export", "br-more"]) $(id).classList.add("hidden");
 }
 const brError = (e) => { $("br-result").innerHTML = `<p class="sqlmsg err">${esc(e.message)}</p>`; };
 
 async function browseTable(name) {
-  document.querySelectorAll("#sql-tables .tblrow").forEach((b) =>
-    b.classList.toggle("active", b.dataset.tbl === name));
+  document.querySelectorAll("#sql-tables .tblrow").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tbl === name);
+    b.toggleAttribute("aria-current", b.dataset.tbl === name);
+  });
+  $("sql-table-select").value = name;
   setSqlTab("browse");
   if (sq.table !== name) {
     Object.assign(sq, { table: name, sort: null, page: 0, colWidths: {} });
@@ -407,6 +447,7 @@ function renderBrowse(data) {
   $("br-schema").classList.remove("hidden");
   $("br-sqlbtn").classList.remove("hidden");
   $("br-export").classList.remove("hidden");
+  $("br-more").classList.remove("hidden");
   $("br-insert").classList.toggle("hidden", !canEdit());
   $("br-schemabox").textContent = sq.ddl || S.sql.noSchema;
   const editCtx = canEdit() ? { table: sq.table, keyCols: sq.keyCols, cols: data.columns } : null;
@@ -504,12 +545,11 @@ async function insertRowDialog() {
 // ---- export: CSV / TSV / XLSX (shared by Browse and the SQL tab) ----
 const EXPORT_MAX = 100000; // rows per file — beyond this the export is cut short
 function exportMenu(btn, run) {
-  const r = btn.getBoundingClientRect();
-  showMenu([
+  menuFrom(btn, [
     { icon: "file-text", label: S.sql.exportCsv, run: () => run("csv") },
     { icon: "file-text", label: S.sql.exportTsv, run: () => run("tsv") },
     { icon: "table-2", label: S.sql.exportXlsx, run: () => run("xlsx") },
-  ], r.left, r.bottom + 4);
+  ], S.sql.exportLabel);
 }
 function exportRows(base, cols, rows, fmt) {
   if (fmt === "xlsx") {
@@ -712,20 +752,30 @@ function renderResultInto(holder, cols, rows, editCtx, opts = {}) {
   const hr = t.createTHead().insertRow();
   cols.forEach((c) => {
     const th = document.createElement("th");
-    th.textContent = c;
     if (opts.sortable) {
+      // The header is a real button (keyboard reachable); aria-sort says
+      // which way the column is sorted.
+      const dir = sq.sort && sq.sort.col === c ? sq.sort.dir : null;
       th.classList.add("sortable");
       th.dataset.col = c;
-      if (sq.sort && sq.sort.col === c) th.classList.add(sq.sort.dir === "ASC" ? "asc" : "desc");
-      th.title = S.sql.thSortTitle;
-      th.onclick = () => {
+      th.setAttribute("aria-sort", dir === "ASC" ? "ascending" : dir === "DESC" ? "descending" : "none");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "th-sort";
+      b.title = S.sql.thSortTitle;
+      b.innerHTML = `<span>${esc(c)}</span>` +
+        (dir ? `<span class="sort-ico">${I(dir === "ASC" ? "arrow-up" : "arrow-down", 12)}</span>` : "");
+      b.onclick = () => {
         sq.sort = !sq.sort || sq.sort.col !== c ? { col: c, dir: "ASC" }
           : sq.sort.dir === "ASC" ? { col: c, dir: "DESC" } : null;
         sq.page = 0;
         runBrowse();
       };
+      th.appendChild(b);
       // Re-apply the dragged width across re-renders (sort / page / filter).
       if (sq.colWidths[c] !== undefined) th.style.width = sq.colWidths[c] + "px";
+    } else {
+      th.textContent = c;
     }
     const grip = document.createElement("span");
     grip.className = "col-grip";
@@ -847,19 +897,34 @@ class SqlPanel extends HTMLElement {
 }
 
 function wire() {
-  registerPanel("sqlpanel", "btn-sql", () => loadSqlTables(true));
+  registerPanel("sqlpanel", "btn-sql", () => loadSqlTables(true), S.sql.title);
 
-  $("sql-head-icon").innerHTML = I("database", 14);
+  $("sql-head-icon").innerHTML = I("database", 16);
   $("btn-sql-run").innerHTML = I("play", 12) + " " + S.sql.run;
-  $("btn-sql-refresh").innerHTML = I("refresh-cw", 14);
-  $("btn-sql-close").innerHTML = I("x", 15);
+  $("btn-sql-refresh").innerHTML = I("refresh-cw", 16);
+  $("btn-sql-close").innerHTML = I("x", 16);
+  $("br-more").innerHTML = I("ellipsis-vertical", 16);
+  $("sql-table-select").onchange = (e) => { if (e.target.value) browseTable(e.target.value); };
+  // Phones: the toolbar chips, folded into one menu (same actions, same
+  // visibility rules: each item just clicks its chip).
+  $("br-more").onclick = () => {
+    const chip = (id, icon, label) => $(id).classList.contains("hidden") ? null
+      : { icon, label, run: () => $(id).click() };
+    menuFrom($("br-more"), [
+      chip("br-filter", "list-filter", S.sql.addFilter),
+      chip("br-insert", "plus", S.sql.insertRow),
+      chip("br-schema", "file-code", S.sql.showSchema),
+      chip("br-sqlbtn", "square-terminal", S.sql.openInSql),
+      chip("br-export", "download", S.sql.exportRows),
+    ].filter(Boolean), S.files.more);
+  };
   $("br-filter").innerHTML = I("list-filter", 12) + " " + S.sql.filterBtn;
   $("br-insert").innerHTML = I("plus", 12) + " " + S.sql.rowBtn;
   $("br-schema").innerHTML = I("file-code", 12) + " " + S.sql.schemaBtn;
   $("br-sqlbtn").innerHTML = I("square-terminal", 12) + " " + S.sql.sqlBtn;
   $("br-export").innerHTML = I("download", 12) + " " + S.sql.exportBtn;
-  $("br-prev").innerHTML = I("chevron-left", 14);
-  $("br-next").innerHTML = I("chevron-right", 14);
+  $("br-prev").innerHTML = I("chevron-left", 16);
+  $("br-next").innerHTML = I("chevron-right", 16);
 
   $("tab-browse").onclick = () => setSqlTab("browse");
   $("tab-sql").onclick = () => setSqlTab("sql");

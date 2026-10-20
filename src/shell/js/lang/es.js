@@ -13,6 +13,7 @@ export const S = {
     loading: "cargando…",
     checking: "verificando…",
     retry: "Reintentar",
+    showHide: "Mostrar u ocultar",
   },
 
   chat: {
@@ -109,6 +110,12 @@ export const S = {
     diffEditNotFound: (name) => `edita ${name}, texto anterior no encontrado (fallará)`,
 
     stepCount: (n) => `${n} paso${n === 1 ? "" : "s"}`,
+    inputLabel: "Mensaje",
+    emptyTitle: "Pregunta al asistente",
+    emptyHint: "Puede leer y cambiar los archivos y datos de esta app, y explicar cómo funciona.",
+    suggestExplain: "Explica cómo funciona esta app",
+    suggestFeature: "Sugiere una función nueva útil",
+    suggestData: "Resume los datos de esta app",
   },
 
   settings: {
@@ -136,7 +143,7 @@ export const S = {
     openApp: "Abrir archivo uApp…",
     openFailed: (msg) => `No se pudo abrir ese archivo: ${msg}`,
     language: "Idioma",
-    languageHint: "Este ajuste es local de tu ordenador. La página se recarga al cambiarlo.",
+    languageHint: "La página se recarga al cambiarlo.",
     aiHint: "La configuración de IA se guarda en el archivo .uapp y se comparte con todos los que lo abren.",
     aiProvider: "Proveedor de IA",
     providerNone: "(ninguno)",
@@ -207,6 +214,16 @@ export const S = {
     saveAs: "Guardar como…",
     unsavedTitle: "Esta app aún no se ha guardado en un archivo",
     unsavedTitleBrowser: "Esta app aún no se ha guardado en un archivo",
+    aiSection: "Asistente de IA",
+    groupApp: "Esta app (se guarda en el archivo)",
+    groupDevice: "Este dispositivo",
+    appearance: "Apariencia",
+    themeSystem: "Sistema",
+    themeLight: "Claro",
+    themeDark: "Oscuro",
+    failed: (msg) => `Error: ${msg}`,
+    launcherInstalledMsg: "Instalado.",
+    launcherRemovedMsg: "Eliminado.",
   },
 
   files: {
@@ -296,6 +313,7 @@ export const S = {
     menuChat: "Chat de IA",
     appClosed: "App cerrada.",
     reopenHint: "Vuelve a abrir el archivo para iniciarla de nuevo.",
+    chatLabel: "Chat",
   },
 
   sql: {
@@ -373,6 +391,7 @@ export const S = {
     filterValue: "valor",
     filterCombine: "Combinar con la condición anterior",
     filterRemove: "Eliminar condición",
+    tablesLabel: "Tablas",
   },
 
   tools: {
@@ -463,6 +482,8 @@ export const S = {
     downloadingName: (name) => `Descargando ${name}…`,
     downloadFailed: (msg) => `Error en la descarga: ${msg}`,
     resizerTitle: "Arrastra para redimensionar, doble clic para restablecer",
+    pinPanel: "Fijar junto a la app",
+    unpinPanel: "Desfijar (flotar sobre la app)",
   },
 
   toolMeta: {

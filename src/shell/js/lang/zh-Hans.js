@@ -13,6 +13,7 @@ export const S = {
     loading: "加载中…",
     checking: "检查中…",
     retry: "重试",
+    showHide: "显示或隐藏",
   },
 
   chat: {
@@ -109,6 +110,12 @@ export const S = {
     diffEditNotFound: (name) => `编辑 ${name}，未找到原文本（将失败）`,
 
     stepCount: (n) => `${n} 个步骤`,
+    inputLabel: "消息",
+    emptyTitle: "问问助手",
+    emptyHint: "它可以读取和修改此应用的文件和数据，并解释其工作原理。",
+    suggestExplain: "解释这个应用是如何工作的",
+    suggestFeature: "建议一个有用的新功能",
+    suggestData: "总结这个应用中的数据",
   },
 
   settings: {
@@ -136,7 +143,7 @@ export const S = {
     openApp: "打开 uApp 文件…",
     openFailed: (msg) => `无法打开该文件：${msg}`,
     language: "语言",
-    languageHint: "此设置仅适用于本机。更改后页面将重新加载。",
+    languageHint: "更改后页面会重新加载。",
     aiHint: "AI 设置保存在 .uapp 文件中，打开该文件的所有人共享这些设置。",
     aiProvider: "AI 提供商",
     providerNone: "（无）",
@@ -207,6 +214,16 @@ export const S = {
     saveAs: "另存为…",
     unsavedTitle: "此应用尚未保存到文件",
     unsavedTitleBrowser: "此应用尚未保存到文件",
+    aiSection: "AI 助手",
+    groupApp: "此应用（保存在文件中）",
+    groupDevice: "此设备",
+    appearance: "外观",
+    themeSystem: "跟随系统",
+    themeLight: "浅色",
+    themeDark: "深色",
+    failed: (msg) => `失败：${msg}`,
+    launcherInstalledMsg: "已安装。",
+    launcherRemovedMsg: "已移除。",
   },
 
   files: {
@@ -296,6 +313,7 @@ export const S = {
     menuChat: "AI 对话",
     appClosed: "应用已关闭。",
     reopenHint: "重新打开文件以再次启动。",
+    chatLabel: "聊天",
   },
 
   sql: {
@@ -373,6 +391,7 @@ export const S = {
     filterValue: "值",
     filterCombine: "与前一条件组合",
     filterRemove: "移除条件",
+    tablesLabel: "表",
   },
 
   tools: {
@@ -463,6 +482,8 @@ export const S = {
     downloadingName: (name) => `正在下载 ${name}…`,
     downloadFailed: (msg) => `下载失败：${msg}`,
     resizerTitle: "拖动调整大小，双击重置",
+    pinPanel: "固定在应用旁边",
+    unpinPanel: "取消固定（浮在应用上方）",
   },
 
   toolMeta: {

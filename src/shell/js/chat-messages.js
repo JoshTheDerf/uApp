@@ -16,61 +16,83 @@ import { cs } from "./chat-state.js";
 import { S } from "./strings.js";
 
 const CSS = /* css */ `
-#chat-messages { flex: 1; overflow-y: auto; padding: 10px; }
-.msg { margin-bottom: 10px; }
-.msg .who { font-size: 11px; color: var(--faint); margin-bottom: 2px; }
+#chat-messages { flex: 1; overflow-y: auto; padding: var(--sp-3) var(--sp-4); }
+.msg { margin-bottom: var(--sp-3); }
+.msg .who { font-size: var(--fs-xs); color: var(--faint); margin-bottom: 2px; }
 .msg .bubble {
-  padding: 7px 10px; border-radius: 10px; white-space: pre-wrap;
+  padding: var(--sp-2) var(--sp-3); border-radius: var(--r-l); white-space: pre-wrap;
   word-break: break-word; overflow-wrap: anywhere;
 }
-.msg.user .bubble { background: var(--brand-soft); }
-.msg.assistant .bubble { background: var(--surface); border: 1px solid var(--line); }
-.msg.system .bubble { background: var(--err-soft); color: var(--err-ink); font-size: 12px; }
-.msg .bubble code, .msg .bubble pre {
-  font-family: var(--mono); font-size: 12px;
-  background: var(--code-bg); border-radius: 4px;
+/* Your own messages sit on the right, the assistant's on the left. */
+.msg.user { display: flex; flex-direction: column; align-items: flex-end; }
+.msg.user .bubble {
+  background: var(--brand-soft); color: var(--text); max-width: 88%;
+  border-bottom-right-radius: var(--r-xs);
 }
-.msg .bubble pre { padding: 6px; overflow-x: auto; }
+.msg.user .attchip { margin: var(--sp-1) 0 0 var(--sp-1); }
+.msg.assistant .bubble { background: var(--surface); border: 1px solid var(--line); }
+.msg.system .bubble { background: var(--err-soft); color: var(--err-ink); font-size: var(--fs-sm); }
+.msg .bubble code, .msg .bubble pre {
+  font-family: var(--mono); font-size: var(--fs-sm);
+  background: var(--code-bg); border-radius: var(--r-xs);
+}
+.msg .bubble pre { padding: 6px var(--sp-2); overflow-x: auto; }
 .msg .bubble > :first-child { margin-top: 0; }
 .msg .bubble > :last-child { margin-bottom: 0; }
-.msg .bubble p { margin: 0 0 8px; }
+.msg .bubble p { margin: 0 0 var(--sp-2); }
 .msg .bubble h1, .msg .bubble h2, .msg .bubble h3,
-.msg .bubble h4, .msg .bubble h5, .msg .bubble h6 { margin: 10px 0 4px; font-size: 14px; }
-.msg .bubble ul, .msg .bubble ol { margin: 4px 0 8px; padding-left: 20px; }
+.msg .bubble h4, .msg .bubble h5, .msg .bubble h6 { margin: 10px 0 var(--sp-1); font-size: var(--fs-base); }
+.msg .bubble ul, .msg .bubble ol { margin: var(--sp-1) 0 var(--sp-2); padding-left: var(--sp-5); }
 .msg .bubble blockquote {
-  margin: 6px 0; padding: 2px 10px; border-left: 3px solid var(--line-strong); color: var(--text-2);
+  margin: 6px 0; padding: 2px 10px; border-left: 3px solid var(--line-mid); color: var(--text-2);
 }
-.msg .bubble img { max-width: 100%; border-radius: 6px; }
+.msg .bubble img { max-width: 100%; border-radius: var(--r-s); }
 .msg .bubble a { color: var(--brand); }
+/* ---- empty chat: what this is, and three ways to start ---- */
+.chat-empty {
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  gap: var(--sp-2); padding: var(--sp-8) var(--sp-4) var(--sp-4);
+}
+.chat-empty .ce-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; border-radius: var(--r-l);
+  background: var(--brand-soft); color: var(--brand-ink);
+}
+.chat-empty h3 { margin: var(--sp-1) 0 0; font-size: var(--fs-lg); font-weight: 600; }
+.chat-empty p { margin: 0 0 var(--sp-2); font-size: var(--fs-md); color: var(--text-2); max-width: 30em; }
+.chat-empty .ce-chips { display: flex; flex-direction: column; align-items: stretch; gap: var(--sp-2); width: 100%; max-width: 300px; }
+.chat-empty .chip-btn { justify-content: flex-start; min-height: var(--h-m); font-size: var(--fs-md); color: var(--text); }
+.chat-empty .chip-btn .ticon { color: var(--brand); }
 /* ---- compaction summary card ---- */
-.msg.summary details { border: 1px dashed var(--line-strong); border-radius: 10px; background: var(--surface-3); }
+.msg.summary details { border: 1px dashed var(--line-mid); border-radius: var(--r-l); background: var(--surface-3); }
 .msg.summary summary {
-  display: flex; align-items: center; gap: 6px; padding: 6px 9px;
-  font-size: 12px; color: var(--text-2); cursor: pointer; list-style: none;
+  display: flex; align-items: center; gap: 6px; padding: 6px var(--sp-3);
+  font-size: var(--fs-sm); color: var(--text-2); cursor: pointer; list-style: none;
 }
 .msg.summary summary::-webkit-details-marker { display: none; }
-.msg.summary .bubble { background: transparent; font-size: 12px; }
+.msg.summary .bubble { background: transparent; font-size: var(--fs-sm); }
 /* ---- sub-agent report inside a tool card ---- */
 .agentreport {
-  max-height: 260px; overflow: auto; padding: 6px 8px; margin: 4px 0;
-  background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font-size: 12px;
+  max-height: 260px; overflow: auto; padding: 6px var(--sp-2); margin: var(--sp-1) 0;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m); font-size: var(--fs-sm);
 }
 /* ---- tool call blocks ---- */
 .tool {
-  margin: 4px 0 8px; border: 1px solid var(--line); border-radius: 10px;
-  background: var(--surface); font-size: 12px; overflow: hidden;
+  margin: var(--sp-1) 0 var(--sp-2); border: 1px solid var(--line); border-radius: var(--r-m);
+  background: var(--surface); font-size: var(--fs-sm); overflow: hidden;
 }
 .tool summary {
-  display: flex; align-items: center; gap: 6px; padding: 6px 9px;
+  display: flex; align-items: center; gap: 6px; min-height: var(--h-m); padding: 0 10px;
   cursor: pointer; list-style: none; user-select: none;
 }
+.tool summary:focus-visible { outline-offset: -2px; }
 .tool summary::-webkit-details-marker { display: none; }
 .tool .tdetail {
-  color: var(--muted); font-family: var(--mono); font-size: 11px;
+  color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
 }
 .tool .tstate {
-  flex: 0 0 auto; font-size: 10px; padding: 1px 8px; border-radius: 999px;
+  flex: 0 0 auto; font-size: var(--fs-xs); padding: 1px var(--sp-2); border-radius: var(--r-pill);
   background: var(--hover); color: var(--muted); text-transform: uppercase; letter-spacing: .03em;
 }
 .tool.st-running .tstate { background: var(--brand-soft); color: var(--brand-ink); animation: pulse 1.4s infinite; }
@@ -80,80 +102,79 @@ const CSS = /* css */ `
 .tool.st-approval { border-color: var(--warn); box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 40%, transparent); }
 .tool.st-approval .tstate { background: var(--warn-soft); color: var(--warn-ink); }
 @keyframes pulse { 50% { opacity: .55; } }
-.tool .tbody { border-top: 1px solid var(--line-soft); padding: 6px 9px; }
+.tool .tbody { border-top: 1px solid var(--line-soft); padding: 6px 10px; }
 .tool pre {
-  margin: 4px 0; max-height: 16rem; overflow: auto; background: var(--surface-2);
-  padding: 6px; border-radius: 6px; font-size: 11px;
+  margin: var(--sp-1) 0; max-height: 16rem; overflow: auto; background: var(--surface-2);
+  padding: 6px var(--sp-2); border-radius: var(--r-s); font-size: var(--fs-xs);
   font-family: var(--mono); white-space: pre-wrap; word-break: break-word;
 }
 .tool pre.terr { background: var(--err-wash); color: var(--err-ink); }
 .approve-bar {
-  display: flex; gap: 6px; align-items: center; padding: 7px 9px;
+  display: flex; gap: 6px; align-items: center; padding: var(--sp-2) 10px;
   border-top: 1px solid var(--warn-line); background: var(--warn-bg); flex-wrap: wrap;
 }
 /* ask_user prompt card: question groups with radio/checkbox options + Other */
 .tool.question { padding: 0; }
 .tool.question .qhead {
-  display: flex; align-items: center; gap: 6px; padding: 7px 9px;
-  font-size: 12.5px; color: var(--warn-ink); border-bottom: 1px solid var(--warn-line);
+  display: flex; align-items: center; gap: 6px; padding: var(--sp-2) 10px;
+  font-size: var(--fs-md); color: var(--warn-ink); border-bottom: 1px solid var(--warn-line);
 }
-.tool.question .qitem { padding: 8px 10px; border-bottom: 1px solid var(--warn-line); }
+.tool.question .qitem { padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--warn-line); }
 .tool.question .qchip {
-  display: inline-block; font-size: 10.5px; font-weight: 600; color: var(--brand);
-  background: var(--brand-soft); border-radius: 999px; padding: 1px 8px; margin-bottom: 3px;
+  display: inline-block; font-size: var(--fs-xs); font-weight: 600; color: var(--brand-ink);
+  background: var(--brand-soft); border-radius: var(--r-pill); padding: 1px var(--sp-2); margin-bottom: var(--sp-1);
 }
-.tool.question .qtext { font-size: 13px; margin-bottom: 6px; }
+.tool.question .qtext { font-size: var(--fs-md); margin-bottom: 6px; }
 .tool.question .qopt {
-  display: flex; gap: 7px; align-items: flex-start; font-size: 12.5px;
-  padding: 4px 2px; border-radius: 6px; cursor: pointer;
+  display: flex; gap: var(--sp-2); align-items: flex-start; font-size: var(--fs-md);
+  padding: var(--sp-1) 2px; border-radius: var(--r-s); cursor: pointer;
 }
 .tool.question .qopt:hover { background: var(--brand-wash); }
-.tool.question .qopt input { margin-top: 2px; accent-color: var(--brand); }
+.tool.question .qopt input { margin-top: 2px; }
 .tool.question .qlabel { display: block; }
-.tool.question .qdesc { display: block; font-size: 11.5px; color: var(--muted); }
+.tool.question .qdesc { display: block; font-size: var(--fs-sm); color: var(--muted); }
 .tool.question .qfree {
-  width: calc(100% - 26px); margin: 2px 0 2px 24px; padding: 4px 8px;
-  font: inherit; font-size: 12.5px;
+  width: calc(100% - 26px); margin: 2px 0 2px 24px; font-size: var(--fs-md);
 }
 .msg.system .retrybtn {
-  display: inline-flex; align-items: center; gap: 4px; margin-left: 8px;
-  font-size: 11.5px; padding: 2px 9px; border: 1px solid var(--line-strong);
-  border-radius: 999px; background: var(--surface); cursor: pointer; color: var(--brand);
+  display: inline-flex; align-items: center; gap: var(--sp-1); margin-left: var(--sp-2);
+  font: inherit; font-size: var(--fs-sm); min-height: 24px; padding: 0 10px; border: 1px solid var(--line-mid);
+  border-radius: var(--r-pill); background: var(--surface); cursor: pointer; color: var(--brand);
 }
 .msg.system .retrybtn:hover { border-color: var(--brand); }
 /* write_file approval: compact red/green preview of the actual change */
 .write-diff {
-  flex-basis: 100%; font-family: var(--mono); font-size: 11px;
-  background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
-  padding: 5px 7px; margin-bottom: 4px; overflow-x: auto; white-space: pre;
+  flex-basis: 100%; font-family: var(--mono); font-size: var(--fs-xs);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-s);
+  padding: 5px var(--sp-2); margin-bottom: var(--sp-1); overflow-x: auto; white-space: pre;
 }
 .write-diff .wd-head, .write-diff .wd-more { color: var(--muted); font-family: inherit; }
 .write-diff .wd-del { color: var(--err-ink); background: color-mix(in srgb, var(--err-soft) 40%, transparent); }
 .write-diff .wd-add { color: var(--ok-ink); background: color-mix(in srgb, var(--ok-soft) 40%, transparent); }
 .write-diff .wd-new { color: var(--ok-ink); }
 .approve-note {
-  flex-basis: 100%; font-size: 12px; color: var(--warn-ink);
-  background: var(--warn-soft); border-radius: 6px; padding: 4px 8px; margin-bottom: 4px;
+  flex-basis: 100%; font-size: var(--fs-sm); color: var(--warn-ink);
+  background: var(--warn-soft); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-2); margin-bottom: var(--sp-1);
 }
-.approve-q { font-size: 12px; color: var(--warn-ink); margin-right: 2px;
-  display: inline-flex; align-items: center; gap: 4px; }
+.approve-q { font-size: var(--fs-sm); color: var(--warn-ink); margin-right: 2px;
+  display: inline-flex; align-items: center; gap: var(--sp-1); }
 .approve-bar button {
-  border: none; border-radius: 7px; padding: 4px 12px; font-size: 12px; cursor: pointer;
+  border: 1px solid transparent; border-radius: var(--r-s); min-height: var(--h-s); padding: 0 var(--sp-3);
+  font: inherit; font-size: var(--fs-sm); font-weight: 500; cursor: pointer;
 }
-.approve-bar .ok { background: var(--ok); color: #fff; }
-.approve-bar .always { background: var(--surface); border: 1px solid var(--line-strong); color: #444; }
-.approve-bar .no { background: var(--err); color: #fff; }
-.approve-bar .btn.primary { background: var(--brand); color: #fff; }
+.approve-bar .ok { background: var(--ok); color: var(--on-ok); }
+.approve-bar .always { background: var(--surface); border-color: var(--line-mid); color: var(--text); }
+.approve-bar .no { background: var(--err); color: var(--on-err); }
 
-.thinkline { font-size: 12px; color: var(--faint); margin: 2px 0 6px 4px; }
+.thinkline { font-size: var(--fs-sm); color: var(--faint); margin: 2px 0 6px var(--sp-1); }
 .thinkline summary { cursor: pointer; list-style: none;
-  display: inline-flex; align-items: center; gap: 4px; }
+  display: inline-flex; align-items: center; gap: var(--sp-1); }
 .thinkline pre {
-  max-height: 180px; overflow: auto; background: var(--surface-2);
-  padding: 6px; border-radius: 6px; font-size: 11px; white-space: pre-wrap;
+  max-height: 180px; overflow: auto; background: var(--surface-2); color: var(--text-2);
+  padding: 6px var(--sp-2); border-radius: var(--r-s); font-size: var(--fs-xs); white-space: pre-wrap;
 }
 .thinkingdots .bubble span {
-  display: inline-block; width: 6px; height: 6px; margin-right: 4px;
+  display: inline-block; width: 6px; height: 6px; margin-right: var(--sp-1);
   border-radius: 50%; background: var(--faint); animation: bounce 1.2s infinite;
 }
 .thinkingdots .bubble span:nth-child(2) { animation-delay: .15s; }
@@ -161,12 +182,11 @@ const CSS = /* css */ `
 @keyframes bounce { 30% { transform: translateY(-4px); } }
 /* presented-file shortcut on a tool card */
 .tool .topen {
-  display: inline-flex; align-items: center; gap: 5px; margin-top: 4px;
-  border: 1px solid var(--line-strong); background: var(--surface); border-radius: 7px;
-  padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px; margin-top: var(--sp-1);
+  border: 1px solid var(--line-mid); background: var(--surface); color: var(--text); border-radius: var(--r-s);
+  min-height: var(--h-s); padding: 0 10px; font: inherit; font-size: var(--fs-sm); cursor: pointer;
 }
 .tool .topen:hover { background: var(--brand-wash); border-color: var(--brand-line); }
-@media (pointer: coarse) { .tool .topen { padding: 7px 12px; } }
 `;
 
 const stateLabel = () => ({
@@ -174,8 +194,9 @@ const stateLabel = () => ({
   denied: S.chat.stateDenied, approval: S.chat.stateApproval, interrupted: S.chat.stateInterrupted,
 });
 
-/// Set by chat-panel.js: what a tool card's "Open agent conversation" does.
-export const hooks = { switchSession: () => {} };
+/// Set by chat-panel.js: what a tool card's "Open agent conversation" and an
+/// empty chat's suggestion chips do.
+export const hooks = { switchSession: () => {}, suggest: () => {} };
 
 /// Short, stable fingerprint of a string (signatures stay small in the DOM).
 function hash(s) {
@@ -251,6 +272,7 @@ function buildItems(rows) {
     if (cs.draftText) items.push({ key: "draft", sig: "draft", make: draftRow });
     else items.push({ key: "dots", sig: "dots", make: dotsRow });
   }
+  if (!items.length) items.push({ key: "empty", sig: "empty", make: emptyRow });
   return items;
 }
 
@@ -301,6 +323,19 @@ function summaryRow(text) {
 function draftRow() {
   const d = div("msg assistant");
   d.innerHTML = `<div class="who">${S.chat.whoAssistant}</div><div class="bubble" id="chat-draft" aria-busy="true">${mdRender(cs.draftText)}</div>`;
+  return d;
+}
+function emptyRow() {
+  const d = div("chat-empty");
+  d.innerHTML = `<span class="ce-icon">${I("sparkles", 22)}</span>` +
+    `<h3>${esc(S.chat.emptyTitle)}</h3><p>${esc(S.chat.emptyHint)}</p><div class="ce-chips"></div>`;
+  for (const [icon, text] of [["lightbulb", S.chat.suggestExplain], ["plus", S.chat.suggestFeature], ["chart-column", S.chat.suggestData]]) {
+    const b = document.createElement("button");
+    b.className = "chip-btn";
+    b.innerHTML = `<span class="ticon">${I(icon, 14)}</span>${esc(text)}`;
+    b.onclick = () => hooks.suggest(text);
+    d.querySelector(".ce-chips").appendChild(b);
+  }
   return d;
 }
 function dotsRow() {

@@ -22,9 +22,9 @@ const TPL = /* html */ `
     <button id="vw-toggle" class="hidden"></button>
     <button id="vw-edit" class="hidden"></button>
     <button id="vw-save" class="hidden"></button>
-    <button id="vw-dl" title="${S.viewer.downloadFile}"></button>
-    <button id="vw-tab" title="${S.viewer.openNewTab}"></button>
-    <button id="vw-close" class="icon-btn" title="${S.common.close}"></button>
+    <button id="vw-dl" title="${S.viewer.downloadFile}" aria-label="${S.viewer.downloadFile}"></button>
+    <button id="vw-tab" title="${S.viewer.openNewTab}" aria-label="${S.viewer.openNewTab}"></button>
+    <button id="vw-close" class="icon-btn" title="${S.common.close}" aria-label="${S.common.close}"></button>
   </div>
   <div id="vw-banner" class="hidden"></div>
   <div id="vw-body"></div>
@@ -38,36 +38,37 @@ dialog#viewerdlg {
 #vw-icon { display: inline-flex; color: var(--text-2); }
 #vw-titles { display: flex; flex-direction: column; min-width: 0; }
 #vw-name {
-  font-weight: 600; font-size: 13px; overflow: hidden;
+  font-weight: 600; font-size: var(--fs-md); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
 }
 #vw-badge {
-  font-size: 11px; background: var(--brand-soft); color: var(--brand-ink);
-  border-radius: 999px; padding: 2px 9px; white-space: nowrap;
+  font-size: var(--fs-xs); background: var(--brand-soft); color: var(--brand-ink);
+  border-radius: var(--r-pill); padding: 2px var(--sp-2); white-space: nowrap;
 }
-#vw-head { padding: 8px 10px; }
+#vw-head { gap: var(--sp-1); }
 #vw-head button {
   background: none; border: 1px solid transparent; cursor: pointer; color: var(--text-2);
-  display: inline-flex; align-items: center; gap: 5px; font: inherit; font-size: 12px;
-  padding: 4px 8px; border-radius: 7px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  font: inherit; font-size: var(--fs-sm);
+  min-width: var(--h-m); min-height: var(--h-m); padding: 0 var(--sp-2); border-radius: var(--r-s);
 }
 #vw-head button:hover { background: var(--hover-2); border-color: var(--line); }
 #vw-head button svg { display: block; }
-#vw-save.dirty { background: var(--brand); border-color: var(--brand); color: #fff; }
+#vw-save.dirty { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 #vw-banner {
-  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
-  padding: 6px 10px; background: var(--warn-bg); border-bottom: 1px solid var(--warn-line);
-  font-size: 12px; color: var(--warn-ink);
+  flex: 0 0 auto; display: flex; align-items: center; gap: var(--sp-2);
+  padding: 6px var(--sp-3); background: var(--warn-bg); border-bottom: 1px solid var(--warn-line);
+  font-size: var(--fs-sm); color: var(--warn-ink);
 }
 #vw-banner span { display: inline-flex; align-items: center; gap: 5px; }
 #vw-banner button {
-  border: 1px solid var(--warn-line); background: var(--surface); border-radius: 7px;
-  padding: 2px 10px; font: inherit; font-size: 12px; cursor: pointer;
+  border: 1px solid var(--warn-line); background: var(--surface); color: var(--text); border-radius: var(--r-s);
+  min-height: 24px; padding: 0 10px; font: inherit; font-size: var(--fs-sm); cursor: pointer;
 }
 #vw-banner button:hover { background: var(--warn-bg); }
 #vw-body { flex: 1; min-height: 0; overflow: auto; }
 #vw-body.vw-media {
-  display: flex; align-items: center; justify-content: center; padding: 12px;
+  display: flex; align-items: center; justify-content: center; padding: var(--sp-3);
   background: var(--ink);
 }
 #vw-body.vw-media.checker {
@@ -80,27 +81,27 @@ dialog#viewerdlg {
   max-width: 100%; max-height: 100%; object-fit: contain;
 }
 #vw-body.vw-frame { display: flex; }
-#vw-body.vw-frame iframe { flex: 1; border: none; }
+#vw-body.vw-frame iframe { flex: 1; border: none; background: var(--frame-bg); }
 #vw-body.vw-empty {
   display: flex; align-items: center; justify-content: center;
-  color: var(--muted); font-size: 13px; padding: 20px;
+  color: var(--muted); font-size: var(--fs-md); padding: var(--sp-5);
 }
-.vw-fallback { display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--faint); }
+.vw-fallback { display: flex; flex-direction: column; align-items: center; gap: var(--sp-2); color: var(--faint); }
 .vw-fallback p { margin: 0; color: var(--text-2); }
-#vw-body.mdbody { padding: 20px 26px; max-width: 62rem; }
+#vw-body.mdbody { padding: var(--sp-5) var(--sp-6); max-width: 62rem; }
 #vw-body.codebody, #vw-body.editbody { display: flex; align-items: stretch; }
 .linenos {
-  margin: 0; padding: 12px 8px 12px 12px; text-align: right; flex: 0 0 auto;
-  background: var(--surface-2); border-right: 1px solid var(--line-soft); color: var(--ghost);
-  font: 12px/1.55 var(--mono); user-select: none; overflow: hidden;
+  margin: 0; padding: var(--sp-3) var(--sp-2) var(--sp-3) var(--sp-3); text-align: right; flex: 0 0 auto;
+  background: var(--surface-2); border-right: 1px solid var(--line-soft); color: var(--faint);
+  font: var(--fs-sm)/1.55 var(--mono); user-select: none; overflow: hidden;
 }
 .codepane {
-  margin: 0; padding: 12px; flex: 1; min-width: 0; overflow-x: auto;
-  font: 12px/1.55 var(--mono); white-space: pre; tab-size: 2;
+  margin: 0; padding: var(--sp-3); flex: 1; min-width: 0; overflow-x: auto;
+  font: var(--fs-sm)/1.55 var(--mono); white-space: pre; tab-size: 2;
 }
 #ed-ta {
   flex: 1; min-width: 0; border: none !important; outline: none; resize: none;
-  margin: 0; padding: 12px; font: 12px/1.55 var(--mono); tab-size: 2;
+  margin: 0; padding: var(--sp-3); font: var(--fs-sm)/1.55 var(--mono); tab-size: 2;
   border-radius: 0 !important; word-break: normal;
   white-space: pre; overflow: auto; background: var(--surface); color: var(--text);
 }
@@ -112,7 +113,7 @@ dialog#viewerdlg {
 }
 #ed-hl {
   position: absolute; top: 0; left: 0; margin: 0; border: none;
-  padding: 12px; font: 12px/1.55 var(--mono); tab-size: 2;
+  padding: var(--sp-3); font: var(--fs-sm)/1.55 var(--mono); tab-size: 2;
   white-space: pre; word-break: normal; width: max-content; min-width: 100%;
   pointer-events: none; will-change: transform; color: var(--text);
 }
@@ -130,7 +131,7 @@ dialog#viewerdlg {
     width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh;
     border-radius: 0;
   }
-  #vw-body.mdbody { padding: 14px 16px; }
+  #vw-body.mdbody { padding: var(--sp-4); }
 }
 `;
 
@@ -386,9 +387,9 @@ class FileViewer extends HTMLElement {
 }
 
 function wire(dlg) {
-  $("vw-dl").innerHTML = I("download", 14);
-  $("vw-tab").innerHTML = I("external-link", 14);
-  $("vw-close").innerHTML = I("x", 15);
+  $("vw-dl").innerHTML = I("download", 16);
+  $("vw-tab").innerHTML = I("external-link", 16);
+  $("vw-close").innerHTML = I("x", 16);
   $("vw-dl").onclick = () => vw.name && downloadUrl(appUrl(vw.name));
   $("vw-tab").onclick = () => vw.name && window.open(appUrl(vw.name), "_blank", "noopener");
   $("vw-toggle").onclick = () => { vw.mode = vw.mode === "raw" ? "pretty" : "raw"; renderViewer(); };

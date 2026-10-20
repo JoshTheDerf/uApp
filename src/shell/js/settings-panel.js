@@ -9,6 +9,7 @@ import {
   dlgAlert, dlgConfirm, wirePwToggle, downloadUrl, fmtSize,
 } from "./ui.js";
 import { S, LOCALES, getLocale, setLocale } from "./strings.js";
+import { getTheme, setTheme } from "./theme.js";
 import { MAC } from "./toolbar-visibility.js";
 import { pickTemplate } from "./template-update.js";
 
@@ -16,10 +17,13 @@ const TPL = /* html */ `
   <div class="panel-head">
     <span class="panel-title"><span id="st-head-icon"></span>${S.settings.title}</span>
     <div class="spacer"></div>
-    <button id="btn-settings-close" class="icon-btn" title="${S.common.closeEsc}"></button>
+    <button id="btn-settings-close" class="icon-btn" title="${S.common.closeEsc}" aria-label="${S.common.close}"></button>
   </div>
   <div class="panel-body" id="settings-form">
-    <div id="export-box">
+    <!-- Two groups, because the difference matters: what is saved in the
+         .uapp travels to everyone who opens it, the rest stays here. -->
+    <h3 class="st-group"><span class="st-gicon" id="st-gicon-app"></span>${S.settings.groupApp}</h3>
+    <div id="export-box" class="st-sect">
       <div class="sect-head"><b>${S.settings.downloadSection}</b></div>
       <p class="hint">${S.settings.downloadHint}</p>
       <div class="row">
@@ -29,18 +33,8 @@ const TPL = /* html */ `
       </div>
       <p class="hint">${S.settings.updateHint}</p>
     </div>
-    <hr>
-    <!-- Desktop only: open a DIFFERENT .uapp (the topbar offers the same
-         thing on a blank app). The way in when .uapp files aren't associated
-         with UApp on this machine, so there's nothing to double-click. -->
-    <div id="open-box" class="hidden">
-      <div class="sect-head"><b>${S.settings.openSection}</b></div>
-      <p class="hint">${S.settings.openHint}</p>
-      <div class="row">
-        <button id="btn-open-uapp" class="btn sm"></button>
-      </div>
-    </div>
-    <hr id="open-hr" class="hidden">
+    <div class="st-sect">
+    <div class="sect-head"><b>${S.settings.aiSection}</b></div>
     <p class="hint">${S.settings.aiHint}</p>
     <label>${S.settings.aiProvider}
       <select id="cfg-provider">
@@ -66,12 +60,12 @@ const TPL = /* html */ `
       <input id="cfg-maxtokens" type="number" min="1024" placeholder="${S.settings.maxTokensPlaceholder}">
     </label>
     <p class="hint">${S.settings.mcpHint}</p>
-    <hr>
+    </div>
     <!-- The toolbar: the bar this shell wraps around the app. Stored in the
          .uapp (not machine-local), so an app can ship as a plain-looking app
          wherever it is opened. Only the DEFAULT lives here — hiding or showing
          it from the bar itself is never saved (see toolbar.rs). -->
-    <div id="toolbar-box">
+    <div id="toolbar-box" class="st-sect">
       <div class="sect-head"><b>${S.settings.toolbarSection}</b></div>
       <p class="hint">${S.settings.toolbarHint}</p>
       <label>${S.settings.toolbarOpenWith}
@@ -88,51 +82,67 @@ const TPL = /* html */ `
       </label>
       <p class="hint" id="toolbar-key-hint">${S.settings.toolbarShortcutHint}</p>
     </div>
-    <hr>
-    <label>${S.settings.language}
-      <select id="cfg-lang">
-        ${LOCALES.map((l) => `<option value="${l.code}"${l.code === getLocale() ? " selected" : ""}>${l.label}</option>`).join("")}
-      </select>
-    </label>
-    <p class="hint">${S.settings.languageHint}</p>
-    <hr>
-    <label>${S.settings.openIn}
-      <select id="cfg-shell">
-        <option value="native">${S.settings.openNative}</option>
-        <option value="browser">${S.settings.openBrowser}</option>
-      </select>
-    </label>
-    <p class="hint">${S.settings.openInHint}</p>
-    <hr>
-    <div id="launch-box">
-      <div class="sect-head"><b>${S.settings.launcherSection}</b><span id="launch-status" class="sect-badge"></span></div>
-      <p class="hint">${S.settings.launcherHint}</p>
-      <div id="launch-fields"></div>
-      <div id="launch-msg" class="hint"></div>
-      <input type="file" id="launch-icon-file" accept="image/png" class="hidden">
-    </div>
-    <hr>
-    <!-- Android only: an intent-opened doc works on a private copy; link the
-         original .uapp so every change is written back to it. -->
-    <div id="mirror-box" class="hidden">
-      <div class="sect-head"><b>${S.settings.originalFileSection}</b><span id="mirror-status" class="sect-badge"></span></div>
-      <p class="hint">${S.settings.originalFileHint}</p>
-      <div class="row" id="mirror-fields"></div>
-    </div>
-    <hr id="mirror-hr" class="hidden">
-    <div id="crypt-box">
+    <div id="crypt-box" class="st-sect">
       <div class="sect-head"><b>${S.settings.encryptionSection}</b><span id="crypt-status" class="sect-badge"></span></div>
       <p class="hint">${S.settings.encryptionHint}</p>
       <div id="crypt-fields"></div>
       <div id="crypt-msg" class="hint"></div>
     </div>
-    <details>
+    <details class="st-sect">
       <summary>${S.settings.maintenance}</summary>
       <div class="row">
         <button id="btn-compact" class="btn sm">${S.settings.compactNow}</button>
         <span id="sync-info" class="hint"></span>
       </div>
     </details>
+
+    <h3 class="st-group"><span class="st-gicon" id="st-gicon-device"></span>${S.settings.groupDevice}</h3>
+    <div class="st-sect">
+      <div class="sect-head"><b id="st-theme-label">${S.settings.appearance}</b></div>
+      <div class="seg" role="radiogroup" aria-labelledby="st-theme-label">
+        <label class="seg-opt"><input type="radio" name="st-theme" value="system" class="vh"><span><i data-icon="monitor"></i>${S.settings.themeSystem}</span></label>
+        <label class="seg-opt"><input type="radio" name="st-theme" value="light" class="vh"><span><i data-icon="sun"></i>${S.settings.themeLight}</span></label>
+        <label class="seg-opt"><input type="radio" name="st-theme" value="dark" class="vh"><span><i data-icon="moon"></i>${S.settings.themeDark}</span></label>
+      </div>
+      <label>${S.settings.language}
+        <select id="cfg-lang">
+          ${LOCALES.map((l) => `<option value="${l.code}"${l.code === getLocale() ? " selected" : ""}>${l.label}</option>`).join("")}
+        </select>
+      </label>
+      <p class="hint">${S.settings.languageHint}</p>
+      <label>${S.settings.openIn}
+        <select id="cfg-shell">
+          <option value="native">${S.settings.openNative}</option>
+          <option value="browser">${S.settings.openBrowser}</option>
+        </select>
+      </label>
+    </div>
+    <!-- Desktop only: open a DIFFERENT .uapp (the topbar offers the same
+         thing on a blank app). The way in when .uapp files aren't associated
+         with UApp on this machine, so there's nothing to double-click. -->
+    <div id="open-box" class="st-sect hidden">
+      <div class="sect-head"><b>${S.settings.openSection}</b></div>
+      <p class="hint">${S.settings.openHint}</p>
+      <div class="row">
+        <button id="btn-open-uapp" class="btn sm"></button>
+      </div>
+    </div>
+    <hr id="open-hr" class="hidden">
+    <div id="launch-box" class="st-sect">
+      <div class="sect-head"><b>${S.settings.launcherSection}</b><span id="launch-status" class="sect-badge"></span></div>
+      <p class="hint">${S.settings.launcherHint}</p>
+      <div id="launch-fields"></div>
+      <div id="launch-msg" class="hint"></div>
+      <input type="file" id="launch-icon-file" accept="image/png" class="hidden">
+    </div>
+    <!-- Android only: an intent-opened doc works on a private copy; link the
+         original .uapp so every change is written back to it. -->
+    <div id="mirror-box" class="st-sect hidden">
+      <div class="sect-head"><b>${S.settings.originalFileSection}</b><span id="mirror-status" class="sect-badge"></span></div>
+      <p class="hint">${S.settings.originalFileHint}</p>
+      <div class="row" id="mirror-fields"></div>
+    </div>
+    <hr id="mirror-hr" class="hidden">
   </div>
   <div class="panel-foot">
     <button id="btn-cancel" class="btn">${S.common.cancel}</button>
@@ -141,19 +151,48 @@ const TPL = /* html */ `
 `;
 
 const CSS = /* css */ `
-#settingspanel { width: min(440px, 94vw); background: var(--surface); }
-.sect-head { display: flex; align-items: center; gap: 8px; }
-.sect-badge { font-size: 10px; border-radius: 999px; padding: 2px 9px; font-weight: 600; }
+#settingspanel { width: var(--panel-w-s); background: var(--surface); }
+#settings-form { padding-top: 0; }
+/* group headings: what is saved in the file vs. what stays on this device */
+.st-group {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; gap: var(--sp-2);
+  margin: 0 calc(-1 * var(--sp-4)); padding: var(--sp-3) var(--sp-4) var(--sp-2);
+  background: var(--surface); border-bottom: 1px solid var(--line);
+  font-size: var(--fs-base); font-weight: 600; color: var(--text);
+}
+.st-group:not(:first-child) { margin-top: var(--sp-6); }
+.st-gicon { display: inline-flex; color: var(--brand); }
+.st-sect { padding: var(--sp-4) 0 var(--sp-1); }
+.st-sect + .st-sect { border-top: 1px solid var(--line-soft); }
+.st-sect .hint { margin: var(--sp-1) 0; }
+.sect-head { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-md); }
+.sect-badge { font-size: var(--fs-xs); border-radius: var(--r-pill); padding: 2px var(--sp-2); font-weight: 600; }
 .sect-badge.on { background: var(--ok-soft); color: var(--ok-ink); }
 .sect-badge.off { background: var(--hover); color: var(--muted); }
-#crypt-fields, #launch-fields { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+#crypt-fields, #launch-fields { display: flex; flex-direction: column; gap: var(--sp-2); margin: var(--sp-2) 0; }
 #crypt-fields .btn { align-self: flex-start; }
 #launch-fields .row { flex-wrap: wrap; margin-top: 0; }
 #export-box .row { flex-wrap: wrap; }
-#launch-icon-preview { width: 22px; height: 22px; border-radius: 5px; object-fit: contain; }
-#settings-form details summary { cursor: pointer; font-size: 13px; color: var(--text-2); }
-#toolbar-keyrow { display: flex; gap: 8px; align-items: center; margin-top: 3px; }
+#launch-icon-preview { width: 22px; height: 22px; border-radius: var(--r-xs); object-fit: contain; }
+#settings-form details summary { cursor: pointer; font-size: var(--fs-md); font-weight: 600; color: var(--text); }
+#open-hr, #mirror-hr { display: none !important; } /* the sections carry their own rules */
+#toolbar-keyrow { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-1); }
 #toolbar-keyrow input { flex: 1; min-width: 0; }
+/* segmented control (theme): native radios, so arrow keys just work */
+.seg {
+  display: flex; gap: 2px; padding: 2px; margin: var(--sp-2) 0 var(--sp-1);
+  background: var(--hover-2); border-radius: var(--r-m);
+}
+.panel-body label.seg-opt { flex: 1; margin: 0; display: flex; }
+.seg-opt span {
+  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: var(--h-s); padding: 0 var(--sp-2); border-radius: var(--r-s);
+  font-size: var(--fs-sm); color: var(--text-2); cursor: pointer;
+}
+.seg-opt span svg { display: block; }
+.seg-opt input:checked + span { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow-1); }
+.seg-opt input:focus-visible + span { outline: var(--ring); outline-offset: 0; }
 `;
 
 // ---------- launcher (applications menu / Start Menu / home screen) ----------
@@ -183,8 +222,11 @@ function iconPickerRow() {
     img.id = "launch-icon-preview";
     img.src = "data:image/png;base64," + iconB64;
     row.appendChild(img);
-    const clr = launchBtn("✕");
+    const clr = document.createElement("button");
+    clr.className = "icon-btn";
+    clr.innerHTML = I("x", 16);
     clr.title = S.settings.useDefaultIcon;
+    clr.setAttribute("aria-label", S.settings.useDefaultIcon);
     clr.onclick = () => { iconB64 = null; iconName = ""; renderLauncher(); };
     row.appendChild(clr);
   }
@@ -213,7 +255,7 @@ async function renderLauncher() {
         } else {
           androidBridge.addShortcut(nm, info.path);
         }
-      } catch (e) { msg.textContent = "Failed: " + e.message; }
+      } catch (e) { msg.textContent = S.settings.failed(e.message); }
     };
     fields.appendChild(b);
     return;
@@ -246,7 +288,7 @@ async function renderLauncher() {
     btn.disabled = true;
     try {
       const r = await rpc("app.installShortcut", iconB64 ? { icon_b64: iconB64 } : {});
-      msg.textContent = (r && r.message) || "Installed.";
+      msg.textContent = (r && r.message) || S.settings.launcherInstalledMsg;
       await renderLauncher();
     } catch (e) { btn.disabled = false; msg.textContent = e.message; }
   };
@@ -265,7 +307,7 @@ async function renderLauncher() {
       rm.disabled = true;
       try {
         const r = await rpc("app.removeShortcut");
-        msg.textContent = (r && r.message) || "Removed.";
+        msg.textContent = (r && r.message) || S.settings.launcherRemovedMsg;
         await renderLauncher();
       } catch (e) { rm.disabled = false; msg.textContent = e.message; }
     };
@@ -281,7 +323,7 @@ const mkPw = (ph) => {
   const i = document.createElement("input");
   i.type = "password"; i.placeholder = ph; i.autocomplete = "new-password";
   const t = document.createElement("button");
-  t.type = "button"; t.className = "icon-btn pw-toggle"; t.title = "Show / hide";
+  t.type = "button"; t.className = "icon-btn pw-toggle";
   wrap.append(i, t);
   wirePwToggle(wrap);
   // doCrypt reads .value off what mkPw returns — forward it to the input.
@@ -524,9 +566,18 @@ class SettingsPanel extends HTMLElement {
 }
 
 function wire() {
-  registerPanel("settingspanel", "btn-settings", loadSettings);
-  $("st-head-icon").innerHTML = I("settings", 14);
-  $("btn-settings-close").innerHTML = I("x", 15);
+  registerPanel("settingspanel", "btn-settings", loadSettings, S.settings.title);
+  $("st-head-icon").innerHTML = I("settings", 16);
+  $("btn-settings-close").innerHTML = I("x", 16);
+  $("st-gicon-app").innerHTML = I("package", 14);
+  $("st-gicon-device").innerHTML = I("monitor", 14);
+  for (const el of document.querySelectorAll("#settings-form i[data-icon]")) el.outerHTML = I(el.dataset.icon, 14);
+  // Theme: applies at once, device-wide, and is not part of Save/Cancel
+  // (like Language) because it is about this screen, not this app.
+  for (const r of document.querySelectorAll('input[name="st-theme"]')) {
+    r.checked = r.value === getTheme();
+    r.onchange = () => { if (r.checked) setTheme(r.value); };
+  }
   $("btn-settings-close").onclick = () => { stopRecording(); closePanel("settingspanel"); };
   $("btn-dl-app").innerHTML = I("download", 13) + " " + S.settings.downloadApp;
   $("btn-dl-template").innerHTML = I("package", 13) + " " + S.settings.downloadTemplate;

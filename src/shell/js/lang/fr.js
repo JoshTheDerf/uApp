@@ -13,6 +13,7 @@ export const S = {
     loading: "chargement…",
     checking: "vérification…",
     retry: "Réessayer",
+    showHide: "Afficher ou masquer",
   },
 
   chat: {
@@ -109,6 +110,12 @@ export const S = {
     diffEditNotFound: (name) => `modifie ${name}, ancien texte introuvable (échec prévu)`,
 
     stepCount: (n) => `${n} étape${n === 1 ? "" : "s"}`,
+    inputLabel: "Message",
+    emptyTitle: "Demandez à l'assistant",
+    emptyHint: "Il peut lire et modifier les fichiers et les données de cette app, et expliquer son fonctionnement.",
+    suggestExplain: "Explique comment fonctionne cette app",
+    suggestFeature: "Propose une nouvelle fonctionnalité utile",
+    suggestData: "Résume les données de cette app",
   },
 
   settings: {
@@ -136,7 +143,7 @@ export const S = {
     openApp: "Ouvrir un fichier uApp…",
     openFailed: (msg) => `Impossible d’ouvrir ce fichier : ${msg}`,
     language: "Langue",
-    languageHint: "Ce choix est propre à cet ordinateur. La page se recharge au changement.",
+    languageHint: "La page se recharge quand vous le changez.",
     aiHint: "Les paramètres IA sont enregistrés dans le fichier .uapp et partagés avec tous ceux qui l'ouvrent.",
     aiProvider: "Fournisseur IA",
     providerNone: "(aucun)",
@@ -207,6 +214,16 @@ export const S = {
     saveAs: "Enregistrer sous…",
     unsavedTitle: "Cette appli n'est pas encore enregistrée dans un fichier",
     unsavedTitleBrowser: "Cette appli n'est pas encore enregistrée dans un fichier",
+    aiSection: "Assistant IA",
+    groupApp: "Cette app (enregistré dans le fichier)",
+    groupDevice: "Cet appareil",
+    appearance: "Apparence",
+    themeSystem: "Système",
+    themeLight: "Clair",
+    themeDark: "Sombre",
+    failed: (msg) => `Échec : ${msg}`,
+    launcherInstalledMsg: "Installé.",
+    launcherRemovedMsg: "Supprimé.",
   },
 
   files: {
@@ -296,6 +313,7 @@ export const S = {
     menuChat: "Chat IA",
     appClosed: "Appli fermée.",
     reopenHint: "Rouvrez le fichier pour la relancer.",
+    chatLabel: "Chat",
   },
 
   sql: {
@@ -373,6 +391,7 @@ export const S = {
     filterValue: "valeur",
     filterCombine: "Combiner avec la condition précédente",
     filterRemove: "Supprimer la condition",
+    tablesLabel: "Tables",
   },
 
   tools: {
@@ -463,6 +482,8 @@ export const S = {
     downloadingName: (name) => `Téléchargement de ${name}…`,
     downloadFailed: (msg) => `Échec du téléchargement : ${msg}`,
     resizerTitle: "Glissez pour redimensionner, double-cliquez pour réinitialiser",
+    pinPanel: "Épingler à côté de l'app",
+    unpinPanel: "Détacher (flotter au-dessus de l'app)",
   },
 
   toolMeta: {

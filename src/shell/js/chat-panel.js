@@ -16,32 +16,32 @@ const TPL = /* html */ `
   <div class="panel-head">
     <!-- Chat switcher: the active chat's title opens a menu of chats
          (new / rename / archive / delete). -->
-    <button id="chat-switch" title="${S.chat.switchChat}"><span id="chat-title">${S.chat.title}</span></button>
-    <span id="ai-status"></span>
+    <button id="chat-switch" title="${S.chat.switchChat}" aria-haspopup="menu" aria-expanded="false"><span id="chat-title">${S.chat.title}</span><span id="chat-switch-chev"></span></button>
+    <span id="ai-status" aria-live="polite"></span>
     <div class="spacer"></div>
-    <button id="chat-mode" title="${S.chat.toggleMode}"></button>
-    <button id="chat-compact" class="icon-btn"
-      title="${S.chat.summarize}"></button>
-    <button id="chat-clear" class="icon-btn" title="${S.chat.clearChat}"></button>
-    <button id="chat-close" class="icon-btn" title="${S.common.closeEsc}"></button>
+    <button id="chat-compact" class="icon-btn" title="${S.chat.summarize}" aria-label="${S.chat.summarize}"></button>
+    <button id="chat-clear" class="icon-btn" title="${S.chat.clearChat}" aria-label="${S.chat.clearChat}"></button>
+    <button id="chat-close" class="icon-btn" title="${S.common.closeEsc}" aria-label="${S.common.close}"></button>
   </div>
   <div id="ai-setup" class="hidden">
     <span id="ai-setup-msg"></span>
     <button id="btn-ai-setup"></button>
   </div>
   <div id="agent-banner" class="hidden"></div>
-  <div id="chat-messages"></div>
-  <div id="chat-staged"></div>
-  <div id="chat-input-row">
-    <div id="composer-btns">
-      <button id="chat-attach" class="icon-btn boxed" title="${S.chat.attachFiles}"></button>
-      <button id="chat-fromapp" class="icon-btn boxed" title="${S.chat.attachFromApp}"></button>
-    </div>
-    <textarea id="chat-input" rows="2"
-      placeholder="${S.chat.inputPlaceholder}"></textarea>
-    <div id="chat-btns">
-      <button id="chat-send" title="${S.chat.send}"></button>
-      <button id="chat-stop" title="${S.chat.stop}" class="hidden"></button>
+  <div id="chat-messages" role="log" aria-label="${S.chat.title}"></div>
+  <div id="chat-composer">
+    <div id="chat-staged"></div>
+    <div id="chat-input-row">
+      <textarea id="chat-input" rows="1" data-autofocus aria-label="${S.chat.inputLabel}"
+        placeholder="${S.chat.inputPlaceholder}"></textarea>
+      <div id="chat-tools">
+        <button id="chat-attach" class="icon-btn" title="${S.chat.attachFiles}" aria-label="${S.chat.attachFiles}"></button>
+        <button id="chat-fromapp" class="icon-btn" title="${S.chat.attachFromApp}" aria-label="${S.chat.attachFromApp}"></button>
+        <button id="chat-mode" title="${S.chat.toggleMode}"></button>
+        <div class="spacer"></div>
+        <button id="chat-send" title="${S.chat.send}" aria-label="${S.chat.send}"></button>
+        <button id="chat-stop" title="${S.chat.stop}" aria-label="${S.chat.stop}" class="hidden"></button>
+      </div>
     </div>
   </div>
   <input type="file" id="chat-file-input" multiple class="hidden">
@@ -49,47 +49,42 @@ const TPL = /* html */ `
 `;
 
 const CSS = /* css */ `
-#sidebar { width: 380px; max-width: 55vw; }
+#sidebar { width: var(--panel-w-s); }
 #chat-switch {
-  display: inline-flex; align-items: center; gap: 5px; max-width: 45%;
+  display: inline-flex; align-items: center; gap: var(--sp-1); min-width: 0; max-width: 60%;
+  min-height: var(--h-m); margin-left: calc(-1 * var(--sp-2));
   font: inherit; font-weight: 600; color: var(--text); background: none;
-  border: none; cursor: pointer; padding: 3px 6px; border-radius: 6px;
+  border: none; cursor: pointer; padding: 0 var(--sp-2); border-radius: var(--r-s);
 }
-#chat-switch::after { content: "▾"; font-size: 10px; opacity: .55; }
 #chat-switch:hover { background: var(--hover); }
 #chat-switch #chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#chat-switch-chev { display: inline-flex; color: var(--muted); }
 /* another chat is still working */
 #chat-switch.working::before {
-  content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--brand);
+  content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--brand); flex: 0 0 auto;
   animation: pulse 1.4s ease-in-out infinite;
 }
-#ai-status { font-size: 12px; color: var(--muted); }
-/* approval-mode pill (auto → manual → plan) */
-#chat-mode {
-  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
-  font: inherit; font-size: 12px; color: var(--text-2); cursor: pointer;
-  border: 1px solid var(--line-strong); background: var(--surface);
-  border-radius: var(--r-pill); padding: 3px 10px;
+#ai-status {
+  font-size: var(--fs-sm); color: var(--muted); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-#chat-mode:hover { background: var(--hover); }
-#chat-mode svg { display: block; }
 /* ---- provider setup banner (no AI provider configured yet) ---- */
 #ai-setup {
-  display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
-  padding: 8px 10px; font-size: 12px; color: var(--warn-ink);
+  display: flex; align-items: center; gap: var(--sp-2); flex: 0 0 auto;
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-4); font-size: var(--fs-sm); color: var(--warn-ink);
   background: var(--warn-bg); border-bottom: 1px solid var(--warn-line);
 }
 #ai-setup span { display: inline-flex; align-items: center; gap: 6px; flex: 1; }
 #ai-setup button {
   display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
-  background: var(--warn); color: #3a2c05; border: none; border-radius: 6px;
-  padding: 3px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+  min-height: var(--h-s); background: var(--warn); color: var(--on-warn); border: none; border-radius: var(--r-s);
+  padding: 0 10px; font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
 }
 #ai-setup button:hover { filter: brightness(1.06); }
 /* ---- agent conversation banner (read-only view) ---- */
 #agent-banner {
-  display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
-  padding: 6px 10px; font-size: 12px; color: var(--warn-ink);
+  display: flex; align-items: center; gap: var(--sp-2); flex: 0 0 auto;
+  padding: 6px var(--sp-3) 6px var(--sp-4); font-size: var(--fs-sm); color: var(--warn-ink);
   background: var(--warn-bg); border-bottom: 1px solid var(--warn-line);
 }
 #agent-banner span { display: inline-flex; align-items: center; gap: 6px; }
@@ -97,49 +92,60 @@ const CSS = /* css */ `
   margin-left: auto; font: inherit; cursor: pointer; color: var(--brand);
   background: none; border: none; text-decoration: underline;
 }
-#chat-input-row.readonly { opacity: .5; pointer-events: none; }
 .refchip { background: var(--ok-soft); border-color: var(--ok-line); }
 .clearall {
-  border: none; background: none; color: var(--muted); font-size: 11px;
+  border: none; background: none; color: var(--muted); font-size: var(--fs-xs);
   cursor: pointer; text-decoration: underline;
 }
-#chat-staged { padding: 0 10px; flex: 0 0 auto; }
 
-#composer-btns { display: flex; flex-direction: column; gap: 4px; }
+/* ---- composer: one box, the text on top and its tools underneath ---- */
+#chat-composer { flex: 0 0 auto; padding: var(--sp-2) var(--sp-3) var(--sp-3); background: var(--surface-3); }
+#chat-staged:not(:empty) { padding-bottom: var(--sp-2); }
 #chat-input-row {
-  display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line);
-  flex: 0 0 auto; align-items: flex-end; background: var(--surface);
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line-strong); border-radius: var(--r-l); background: var(--surface);
+  transition: border-color var(--dur-1) var(--ease);
 }
-#chat-input { flex: 1; resize: none; min-width: 0; }
-#chat-btns button {
-  width: 34px; height: 34px; border-radius: 8px; border: none;
-  background: var(--brand); color: #fff; cursor: pointer;
+#chat-input-row:focus-within { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
+#chat-input-row.readonly { opacity: .5; pointer-events: none; }
+#chat-input {
+  border: none !important; outline: none !important; background: transparent !important;
+  resize: none; min-width: 0; padding: 10px var(--sp-3) var(--sp-1) !important;
+  line-height: 1.45; max-height: calc(8 * 1.45em + 14px); overflow-y: auto;
+}
+#chat-tools { display: flex; align-items: center; gap: 2px; padding: var(--sp-1); }
+/* approval-mode pill (auto → manual → plan) */
+#chat-mode {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
+  min-height: var(--h-s); margin-left: var(--sp-1);
+  font: inherit; font-size: var(--fs-sm); color: var(--text-2); cursor: pointer;
+  border: 1px solid var(--line-mid); background: var(--surface);
+  border-radius: var(--r-pill); padding: 0 10px;
+}
+#chat-mode:hover { background: var(--hover); }
+#chat-mode svg { display: block; }
+#chat-send, #chat-stop {
+  width: var(--h-m); height: var(--h-m); border-radius: var(--r-m); border: none;
+  background: var(--brand); color: var(--on-brand); cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
 }
-#chat-btns button:hover { background: var(--brand-strong); }
-#chat-stop { background: var(--err) !important; }
-/* Touch devices: grow the panel's bespoke tap targets. */
-@media (pointer: coarse) {
-  #chat-btns button { width: 42px; height: 42px; }
-  #chat-switch { padding: 8px 10px; }
-  #chat-mode { padding: 7px 12px; }
-  #ai-setup button { padding: 7px 12px; }
-}
+#chat-send:hover { background: var(--brand-strong); }
+#chat-stop { background: var(--err); color: var(--on-err); }
 #chat-dropzone {
   position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-  background: rgba(47,109,246,.12); border: 3px dashed var(--brand); color: var(--brand);
-  font-size: 16px; font-weight: 600; pointer-events: none; z-index: 5;
+  background: color-mix(in srgb, var(--brand) 12%, transparent); border: 3px dashed var(--brand); color: var(--brand);
+  font-size: var(--fs-lg); font-weight: 600; pointer-events: none; z-index: 5;
 }
 #sidebar.dropping #chat-dropzone { display: flex; }
 /* attach-from-app dialog rows */
 .filerow {
-  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px;
-  border: none; background: none; cursor: pointer; font: inherit; font-size: 13px;
-  border-radius: 6px; text-align: left;
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%; min-height: var(--h-m); padding: 0 var(--sp-2);
+  border: none; background: none; cursor: pointer; font: inherit; font-size: var(--fs-md); color: var(--text);
+  border-radius: var(--r-s); text-align: left;
 }
 .filerow:hover { background: var(--hover); }
 .filerow .fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.filerow .fsz { color: var(--faint); font-size: 11px; }
+.filerow .fsz { color: var(--faint); font-size: var(--fs-xs); }
 `;
 
 // ---------- state ----------
@@ -262,7 +268,7 @@ async function switchSession(id) {
   refreshChat();
 }
 hooks.switchSession = switchSession;
-function chatMenu(x, y) {
+function chatMenu() {
   const items = [];
   for (const s of cs.sessions.filter((s) => s.kind !== "agent" && !s.archived)) {
     const working = cs.busySessions.includes(s.id) ? " ●" : "";
@@ -291,7 +297,9 @@ function chatMenu(x, y) {
     });
     items.push({ icon: "trash-2", label: S.chat.menuDeleteChat, danger: true, run: deleteChat });
   }
-  showMenu(items, x, y);
+  const btn = $("chat-switch");
+  const r = btn.getBoundingClientRect();
+  showMenu(items, r.left, r.bottom + 4, { opener: btn, label: S.chat.switchChat });
 }
 async function newChat() {
   const title = await dlgInput(S.chat.newChatPrompt, S.chat.newChatDefault, S.common.create);
@@ -333,6 +341,19 @@ async function compactChat() {
 }
 
 // ---------- sending & attachments ----------
+function growInput() {
+  const ta = $("chat-input");
+  ta.style.height = "auto";
+  ta.style.height = ta.scrollHeight + 2 + "px";
+}
+/// A suggestion chip from the empty chat: put it in the composer to edit or send.
+hooks.suggest = (text) => {
+  const ta = $("chat-input");
+  ta.value = text;
+  growInput();
+  ta.focus();
+  ta.setSelectionRange(text.length, text.length);
+};
 function renderStaged() {
   const s = $("chat-staged");
   s.innerHTML = "";
@@ -381,13 +402,14 @@ async function send() {
     return;
   }
   input.value = "";
+  growInput();
   const atts = staged, r = refs;
   staged = []; refs = []; renderStaged();
   try {
     await rpc("chat.send", { text, attachments: atts, refs: r, mode: state.mode, session: cs.session });
   } catch (e) {
     // Give the message and its attachments back: a failed send must not eat them.
-    input.value = text; staged = atts; refs = r; renderStaged();
+    input.value = text; staged = atts; refs = r; renderStaged(); growInput();
     dlgAlert(S.chat.sendFailed(e.message));
   }
 }
@@ -513,15 +535,16 @@ class ChatPanel extends HTMLElement {
 }
 
 function wire(host) {
-  registerPanel("sidebar", "btn-chat", () => { try { $("chat-input").focus(); } catch {} });
+  registerPanel("sidebar", "btn-chat", null, S.chat.title);
 
-  $("chat-compact").innerHTML = I("package", 14);
-  $("chat-clear").innerHTML = I("trash-2", 14);
-  $("chat-close").innerHTML = I("x", 15);
-  $("chat-attach").innerHTML = I("paperclip", 14);
-  $("chat-fromapp").innerHTML = I("folder-open", 14);
-  $("chat-send").innerHTML = I("send-horizontal", 15);
-  $("chat-stop").innerHTML = I("square", 13);
+  $("chat-switch-chev").innerHTML = I("chevron-down", 14);
+  $("chat-compact").innerHTML = I("package", 16);
+  $("chat-clear").innerHTML = I("trash-2", 16);
+  $("chat-close").innerHTML = I("x", 16);
+  $("chat-attach").innerHTML = I("paperclip", 16);
+  $("chat-fromapp").innerHTML = I("folder-open", 16);
+  $("chat-send").innerHTML = I("send-horizontal", 16);
+  $("chat-stop").innerHTML = I("square", 14);
 
   // "Configure a provider" banner: shown while app.info reports no AI
   // provider (absent field = older core → stay hidden). config.set triggers
@@ -542,13 +565,12 @@ function wire(host) {
     setMode(state.mode === "auto" ? "manual" : state.mode === "manual" ? "plan" : "auto");
     renderMode();
   };
-  $("chat-switch").onclick = (e) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    chatMenu(r.left, r.bottom + 4);
-  };
+  $("chat-switch").onclick = () => chatMenu();
   $("chat-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !isComposing(e)) { e.preventDefault(); send(); }
   });
+  // Grow with the text, up to about eight lines (then it scrolls).
+  $("chat-input").addEventListener("input", growInput);
   $("chat-input").addEventListener("paste", (e) => {
     for (const item of e.clipboardData?.items || []) {
       if (item.kind === "file") { const f = item.getAsFile(); if (f) { stageFile(f); e.preventDefault(); } }

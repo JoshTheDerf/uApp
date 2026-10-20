@@ -16,19 +16,21 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "src", "shell", "icons.js");
 
 const ICONS = [
-  "archive", "arrow-left", "arrow-right", "arrow-up", "book-open", "bot",
-  "brain", "chart-column", "check", "chevron-left", "chevron-right",
-  "circle-alert", "circle-help", "circle-plus", "code", "compass", "copy",
-  "database", "download", "ellipsis-vertical", "eraser", "external-link",
-  "eye", "eye-off", "file", "file-code", "file-pen", "file-plus",
-  "file-question", "file-text", "file-type", "files", "film", "folder",
-  "folder-input", "folder-open", "folder-plus", "globe", "hard-drive", "history", "image",
-  "layout-grid", "link", "list", "list-filter", "message-square", "minus",
-  "music", "package", "panel-right-close", "paperclip", "pencil",
-  "pencil-line", "play", "plug-zap", "plus", "puzzle", "refresh-cw",
-  "rotate-cw", "save", "search", "send-horizontal", "server", "settings",
-  "shield-alert", "shield-check", "smartphone", "square", "square-terminal",
-  "table-2", "trash-2", "type", "upload", "wrench", "x", "zap",
+  "archive", "arrow-down", "arrow-left", "arrow-right", "arrow-up",
+  "book-open", "bot", "brain", "chart-column", "check", "chevron-down",
+  "chevron-left", "chevron-right", "circle-alert", "circle-help",
+  "circle-plus", "code", "compass", "copy", "database", "download",
+  "ellipsis-vertical", "eraser", "external-link", "eye", "eye-off", "file",
+  "file-code", "file-pen", "file-plus", "file-question", "file-text",
+  "file-type", "files", "film", "folder", "folder-input", "folder-open",
+  "folder-plus", "globe", "hard-drive", "history", "image", "layout-grid",
+  "lightbulb", "link", "list", "list-filter", "message-square", "minus",
+  "monitor", "moon", "music", "package", "panel-right-close", "paperclip",
+  "pencil", "pencil-line", "pin", "pin-off", "play", "plug-zap", "plus",
+  "puzzle", "refresh-cw", "rotate-cw", "save", "search", "send-horizontal",
+  "server", "settings", "shield-alert", "shield-check", "smartphone",
+  "sparkles", "square", "square-terminal", "sun", "table-2", "trash-2",
+  "type", "upload", "wrench", "x", "zap",
 ];
 
 const extra = process.argv.slice(2).filter((n) => !ICONS.includes(n));
@@ -58,7 +60,7 @@ const js = `/* Embedded lucide icons (ISC license, lucide.dev). Monochrome, stro
   const paths = {${body}};
   window.uappIcon = (name, size = 16) => {
     const p = paths[name] || paths["wrench"];
-    return \`<svg xmlns="http://www.w3.org/2000/svg" width="\${size}" height="\${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">\${p}</svg>\`;
+    return \`<svg xmlns="http://www.w3.org/2000/svg" width="\${size}" height="\${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="\${size < 14 ? 1.75 : 2}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">\${p}</svg>\`;
   };
 })();
 `;
@@ -68,7 +70,7 @@ console.log(`wrote ${OUT} (${names.length} icons)`);
 // Guard: every icon name the shell references must be in the list.
 const { readdirSync } = await import("node:fs");
 const shellFiles = ["index.html",
-  ...readdirSync(join(ROOT, "src", "shell", "js")).map((f) => join("js", f))];
+  ...readdirSync(join(ROOT, "src", "shell", "js")).filter((f) => f.endsWith(".js")).map((f) => join("js", f))];
 const used = new Set();
 for (const f of shellFiles) {
   const src = readFileSync(join(ROOT, "src", "shell", f), "utf8");

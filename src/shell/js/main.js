@@ -2,6 +2,7 @@
  * native-window file drops, the shutdown overlay, and hash deep-links.
  * Everything visible is a component (see the imports). */
 
+import "./theme.js"; // first: the pinned Light/Dark choice before anything paints
 import { connect, on, rpc, closeSocket, state } from "./core.js";
 
 // ---------- External URL handling ----------
