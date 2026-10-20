@@ -18,8 +18,8 @@ const TPL = /* html */ `
     <span id="sql-dbinfo" class="hint"></span>
     <div class="spacer"></div>
     <div id="sql-tabs" role="tablist" aria-label="${S.sql.title}">
-      <button id="tab-browse" class="sqltab active" role="tab">${S.sql.tabBrowse}</button>
-      <button id="tab-sql" class="sqltab" role="tab">${S.sql.tabSql}</button>
+      <button id="tab-browse" class="sqltab active" role="tab" aria-selected="true" aria-controls="sql-browse">${S.sql.tabBrowse}</button>
+      <button id="tab-sql" class="sqltab" role="tab" aria-selected="false" aria-controls="sql-query" tabindex="-1">${S.sql.tabSql}</button>
     </div>
     <button id="btn-sql-refresh" class="icon-btn" title="${S.sql.refreshTables}" aria-label="${S.sql.refreshTables}"></button>
     <button id="btn-sql-close" class="icon-btn" title="${S.common.closeEsc}" aria-label="${S.common.close}"></button>
@@ -27,7 +27,7 @@ const TPL = /* html */ `
   <div id="sql-body">
     <nav id="sql-tables" aria-label="${S.sql.tablesLabel}"></nav>
     <div id="sql-main">
-      <section id="sql-browse">
+      <section id="sql-browse" role="tabpanel" aria-labelledby="tab-browse">
         <div id="br-toolbar">
           <select id="sql-table-select" class="mini" aria-label="${S.sql.tablesLabel}"></select>
           <strong id="br-title"></strong>
@@ -49,7 +49,7 @@ const TPL = /* html */ `
           <button id="br-next" class="icon-btn" title="${S.sql.nextPage}" aria-label="${S.sql.nextPage}"></button>
         </div>
       </section>
-      <section id="sql-query" class="hidden">
+      <section id="sql-query" class="hidden" role="tabpanel" aria-labelledby="tab-sql">
         <div id="sql-editorbar">
           <textarea id="sql-input" rows="3" spellcheck="false" aria-label="${S.sql.tabSql}"
             placeholder="${S.sql.sqlPlaceholder}"></textarea>
@@ -225,8 +225,12 @@ const sq = {
 const canEdit = () => !!sq.table && sq.type === "table" && sq.keyCols.length > 0;
 
 function setSqlTab(tab) {
-  $("tab-browse").classList.toggle("active", tab === "browse");
-  $("tab-sql").classList.toggle("active", tab === "sql");
+  for (const [id, name] of [["tab-browse", "browse"], ["tab-sql", "sql"]]) {
+    const b = $(id), on = name === tab;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+    b.tabIndex = on ? 0 : -1; // one tab stop for the tab list; arrows move within it
+  }
   $("sql-browse").classList.toggle("hidden", tab !== "browse");
   $("sql-query").classList.toggle("hidden", tab !== "sql");
   if (tab === "sql") $("sql-input").focus();
@@ -641,6 +645,7 @@ function startColDrag(ev, t, th, persist) {
 }
 
 // Click-to-edit: the cell becomes an input; blur or Enter saves, Escape cancels.
+// Started from the keyboard, focus goes back to the cell afterwards.
 function editCell(td, editCtx, colIdx, rowVals) {
   if (td.querySelector("input")) return;
   freezeCols(td.closest("table")); // the input must not change the column width
@@ -682,8 +687,8 @@ function editCell(td, editCtx, colIdx, rowVals) {
   };
   input.onblur = () => finish(true);
   input.onkeydown = (e) => {
-    if (e.key === "Enter" && !isComposing(e)) { e.preventDefault(); input.blur(); }
-    if (e.key === "Escape") { e.preventDefault(); done = true; restore(); }
+    if (e.key === "Enter" && !isComposing(e)) { e.preventDefault(); input.blur(); td.focus(); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done = true; restore(); td.focus(); }
   };
 }
 async function setCellNull(td, editCtx, colIdx, rowVals) {
@@ -712,6 +717,7 @@ const cellText = (v) =>
   v === null ? S.sql.cellNull : typeof v === "object" && v && v.b64 ? S.sql.cellBlob : String(v);
 function cellMenu(ev, td, cols, row, i, editCtx, refresh) {
   ev.preventDefault();
+  if (ev.clientX === undefined) { const r = td.getBoundingClientRect(); ev = { clientX: r.left, clientY: r.bottom }; }
   const items = [
     { icon: "copy", label: S.sql.ctxCopyCell, run: () => copyText(cellText(row[i])) },
     { icon: "copy", label: S.sql.ctxCopyRowJson,
@@ -794,15 +800,52 @@ function renderResultInto(holder, cols, rows, editCtx, opts = {}) {
     const tr = tbody.insertRow();
     row.forEach((v, i) => {
       const td = tr.insertCell();
+      td.tabIndex = -1;
       renderCell(td, v);
-      if (editCtx && !editCtx.keyCols.includes(cols[i])) {
+      const editable = editCtx && !editCtx.keyCols.includes(cols[i]);
+      if (editable) {
         td.classList.add("editable");
         td.title = S.sql.cellEditTitle;
         td.onclick = () => editCell(td, editCtx, i, row);
       }
       td.oncontextmenu = (ev) => cellMenu(ev, td, cols, row, i, editCtx, opts.refresh);
+      // Keyboard: Enter (or F2) edits, the menu key or Shift+F10 opens the
+      // cell's menu.
+      td.onkeydown = (ev) => {
+        if (ev.target !== td) return;
+        if ((ev.key === "Enter" || ev.key === "F2") && editable && !isComposing(ev)) {
+          ev.preventDefault();
+          editCell(td, editCtx, i, row);
+        } else if (ev.key === "ContextMenu" || (ev.key === "F10" && ev.shiftKey)) {
+          cellMenu(ev, td, cols, row, i, editCtx, opts.refresh);
+        }
+      };
     });
   }
+  // One tab stop for the whole grid; arrow keys move between cells.
+  const first = tbody.rows[0]?.cells[0];
+  if (first) first.tabIndex = 0;
+  t.addEventListener("focusin", (ev) => {
+    const td = ev.target.closest?.("td");
+    if (!td || td.tabIndex === 0) return;
+    t.querySelectorAll('td[tabindex="0"]').forEach((c) => (c.tabIndex = -1));
+    td.tabIndex = 0;
+  });
+  t.addEventListener("keydown", (ev) => {
+    const td = ev.target;
+    if (td.tagName !== "TD") return;
+    const tr = td.parentElement, c = td.cellIndex, rows = tbody.rows;
+    let to = null;
+    if (ev.key === "ArrowRight") to = tr.cells[c + 1];
+    else if (ev.key === "ArrowLeft") to = tr.cells[c - 1];
+    else if (ev.key === "ArrowDown") to = rows[tr.sectionRowIndex + 1]?.cells[c];
+    else if (ev.key === "ArrowUp") to = rows[tr.sectionRowIndex - 1]?.cells[c];
+    else if (ev.key === "Home") to = ev.ctrlKey ? rows[0]?.cells[0] : tr.cells[0];
+    else if (ev.key === "End") to = ev.ctrlKey ? rows[rows.length - 1]?.cells[c] : tr.cells[tr.cells.length - 1];
+    else return;
+    ev.preventDefault();
+    if (to) { to.focus(); to.scrollIntoView({ block: "nearest", inline: "nearest" }); }
+  });
   holder.appendChild(t);
 }
 
@@ -928,6 +971,14 @@ function wire() {
 
   $("tab-browse").onclick = () => setSqlTab("browse");
   $("tab-sql").onclick = () => setSqlTab("sql");
+  $("sql-tabs").addEventListener("keydown", (e) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+    e.preventDefault();
+    const next = e.key === "Home" ? "browse" : e.key === "End" ? "sql"
+      : $("tab-browse").classList.contains("active") ? "sql" : "browse";
+    setSqlTab(next);
+    $(next === "sql" ? "tab-sql" : "tab-browse").focus();
+  });
   $("btn-sql-run").onclick = runSql;
   $("sql-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !isComposing(e)) { e.preventDefault(); runSql(); }

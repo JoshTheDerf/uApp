@@ -321,7 +321,16 @@ function wireEntry(el, e) {
     el.classList.add("sel");
   };
   el.ondblclick = open;
-  el.onkeydown = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); open(); } };
+  el.onkeydown = (ev) => {
+    if (ev.target !== el) return; // the entry's own ⋮ button handles its keys
+    if (ev.key === "Enter") { ev.preventDefault(); open(); }
+    else if (ev.key === "ContextMenu" || (ev.key === "F10" && ev.shiftKey)) {
+      ev.preventDefault();
+      const r = el.getBoundingClientRect();
+      fb.sel = e.name;
+      entryMenu(e, r.left + 8, r.bottom - 4);
+    }
+  };
   el.oncontextmenu = (ev) => {
     ev.preventDefault();
     fb.sel = e.name;

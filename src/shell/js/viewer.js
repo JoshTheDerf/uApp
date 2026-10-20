@@ -380,6 +380,7 @@ class FileViewer extends HTMLElement {
     const dlg = document.createElement("dialog");
     dlg.id = "viewerdlg";
     dlg.className = "dlg";
+    dlg.setAttribute("aria-labelledby", "vw-name");
     dlg.innerHTML = TPL;
     this.appendChild(dlg);
     wire(dlg);

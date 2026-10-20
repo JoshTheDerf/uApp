@@ -419,15 +419,18 @@ export function menuFrom(btn, items, label) {
 // .dlg-head (icon + title + X), .dlg-body, .dlg-foot. Esc, focus trapping
 // and the backdrop come free. (window.alert()/confirm() stay banned — they
 // are blocked or invisible in the frameless desktop webview.)
+let dlgSeq = 0;
 export function makeDialog(title, icon = "circle-alert") {
   const d = document.createElement("dialog");
+  const hid = `dlg-title-${++dlgSeq}`;
   d.className = "dlg dlg-s";
-  d.innerHTML = `<div class="dlg-head"><h2><span class="dlg-hicon"></span><span class="dlg-title"></span></h2>` +
-    `<button class="icon-btn dlg-x" title="${esc(S.common.close)}"></button></div>` +
+  d.setAttribute("aria-labelledby", hid);
+  d.innerHTML = `<div class="dlg-head"><h2 id="${hid}"><span class="dlg-hicon"></span><span class="dlg-title"></span></h2>` +
+    `<button class="icon-btn dlg-x" title="${esc(S.common.close)}" aria-label="${esc(S.common.close)}"></button></div>` +
     `<div class="dlg-body"></div><div class="dlg-foot"></div>`;
   d.querySelector(".dlg-title").textContent = title;
-  d.querySelector(".dlg-hicon").innerHTML = I(icon, 15);
-  d.querySelector(".dlg-x").innerHTML = I("x", 15);
+  d.querySelector(".dlg-hicon").innerHTML = I(icon, 16);
+  d.querySelector(".dlg-x").innerHTML = I("x", 16);
   d.querySelector(".dlg-x").onclick = () => d.close();
   d.addEventListener("close", () => d.remove());
   document.body.appendChild(d);
