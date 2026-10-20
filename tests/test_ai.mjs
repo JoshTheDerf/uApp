@@ -11,6 +11,7 @@ let passed = 0, failed = 0;
 const ok = (c, n, x = "") => { c ? (passed++, console.log(`  ✓ ${n}`)) : (failed++, console.log(`  ✗ FAIL: ${n} ${x}`)); };
 
 // ---------- mock provider + MCP ----------
+let mcp3Calls = [], deadCalls = [], useCalls = [];
 let oaCalls = [], anthCalls = [], mcpCalls = [], thinkCalls = [], nsCalls = [], respCalls = [], namesCalls = [], mcp2Calls = [];
 const readBody = (req) => new Promise((res) => { let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => res(b)); });
 
@@ -137,6 +138,31 @@ const mock = createServer(async (req, res) => {
         { type: "tool_use", id: "n2", name: "call_action", input: { action: "" } } ] });
     }
     return send({ stop_reason: "end_turn", content: [{ type: "text", text: "names done" }] });
+  }
+  if (req.url === "/mcpdead") { deadCalls.push(body); res.writeHead(500); return res.end("down"); }
+  if (req.url === "/mcp3") {
+    mcp3Calls.push(body);
+    if (!body.method) { res.writeHead(202); return res.end(); } // our answer to its ping
+    if (body.method === "initialize")
+      return send({ jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "m3" } } }, { "Mcp-Session-Id": "s3" });
+    if (body.method === "notifications/initialized") { res.writeHead(202); return res.end(); }
+    if (body.method === "tools/list")
+      return send({ jsonrpc: "2.0", id: body.id, result: { tools: [{ name: "snap", description: "photo", inputSchema: { type: "object" } }] } });
+    // tools/call: an SSE stream with a notification and a server request before the reply.
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const ev = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+    ev({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } });
+    ev({ jsonrpc: "2.0", id: "srv-1", method: "ping" });
+    ev({ jsonrpc: "2.0", id: body.id, result: { content: [
+      { type: "text", text: "took a photo" },
+      { type: "image", mimeType: "image/png", data: "A".repeat(8000) } ] } });
+    return res.end();
+  }
+  if (req.url === "/mcpuse/v1/messages") {
+    useCalls.push(body);
+    if (useCalls.length % 2 === 1)
+      return send({ stop_reason: "tool_use", content: [{ type: "tool_use", id: `u${useCalls.length}`, name: "mcp__three__snap", input: {} }] });
+    return send({ stop_reason: "end_turn", content: [{ type: "text", text: `mcp turn ${useCalls.length}` }] });
   }
   if (req.url === "/mcp2") {
     mcp2Calls.push(body);
@@ -388,6 +414,34 @@ await A.rpc("config.set", { key: "ai", value: { provider: "anthropic", api_key: 
   const results = done.rows.filter((r) => r[4] === "tool").map((r) => r[5]).join("");
   ok(results.includes("MCP2:90:via long name"), "the shortened name reached the right server with the full tool name");
   ok(results.includes("call_action needs an action name"), "call_action without a name lists the registered actions");
+}
+
+console.log("\n[9] MCP: server requests answered, images summarized, failures cached");
+await A.rpc("config.set", { key: "mcp", value: [{ name: "three", url: `${MOCK}/mcp3` }, { name: "dead", url: `${MOCK}/mcpdead` }] });
+await A.rpc("config.set", { key: "ai", value: { provider: "anthropic", api_key: "test", model: "claude-sonnet-5-5", base_url: `${MOCK}/mcpuse` } });
+{
+  await A.rpc("chat.send", { text: "take a photo" });
+  let done = await waitFor(async () => {
+    const r = await A.rpc("chat.list");
+    return r.rows.some((row) => row[5].includes("mcp turn 2")) ? r : null;
+  });
+  ok(!!done, "loop completed");
+  const results = done.rows.filter((r) => r[4] === "tool").map((r) => r[5]).join("");
+  ok(results.includes("took a photo") && results.includes("[image result (image/png, 6KB), not shown]"), "image content kept as a note");
+  ok(mcp3Calls.some((b) => b.id === "srv-1" && b.result && !b.method), "the server's ping was answered");
+  const ids = mcp3Calls.filter((b) => b.method && b.id !== undefined).map((b) => b.id);
+  ok(new Set(ids).size === ids.length, `JSON-RPC ids unique (${ids})`);
+  const listedDead = deadCalls.length;
+  ok(listedDead > 0, "dead server was tried");
+  await A.rpc("chat.send", { text: "again" });
+  done = await waitFor(async () => {
+    const r = await A.rpc("chat.list");
+    return r.rows.some((row) => row[5].includes("mcp turn 4")) ? r : null;
+  });
+  ok(!!done, "second turn completed");
+  ok(deadCalls.length === listedDead, `dead server not retried on the next turn (${listedDead} -> ${deadCalls.length})`);
+  const tools = await A.rpc("mcp.tools");
+  ok(tools.some((t) => t.name === "snap"), "mcp.tools served from the cache");
 }
 
 await A.stop();

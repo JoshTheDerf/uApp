@@ -469,7 +469,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                     "kind": "app",
                     "enabled": !disabled.contains(&tool_name)}));
             }
-            for t in crate::mcp::list_all_tools(&mcp_servers_enabled(app)) {
+            for t in crate::mcp::list_all_tools_cached(&mcp_servers_enabled(app)) {
                 let name = format!(
                     "mcp__{}__{}",
                     t["server"].as_str().unwrap_or(""),
@@ -551,7 +551,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         }
         "mcp.tools" => {
             let servers = mcp_servers_enabled(app);
-            Ok(json!(crate::mcp::list_all_tools(&servers)))
+            Ok(json!(crate::mcp::list_all_tools_cached(&servers)))
         }
         "mcp.status" => Ok(mcp_status(app)),
         "mcp.add" => mcp_add(app, p),
@@ -1551,13 +1551,19 @@ fn mcp_mutate(
 }
 
 fn mcp_add(app: &Arc<App>, p: Value) -> Result<Value> {
-    let name: String = need_str(&p, "name")?
+    // ASCII only and no "__": the name becomes part of tool names
+    // (mcp__<name>__<tool>), which providers restrict to [a-zA-Z0-9_-].
+    let mut name: String = need_str(&p, "name")?
         .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(32)
         .collect();
+    while name.contains("__") {
+        name = name.replace("__", "_");
+    }
+    let name = name.trim_matches('_').to_string();
     if name.is_empty() {
-        bail!("server name must be alphanumeric");
+        bail!("server name must use letters, digits, - or _");
     }
     let url = need_str(&p, "url")?.to_string();
     if !url.starts_with("https://") && !url.starts_with("http://") {

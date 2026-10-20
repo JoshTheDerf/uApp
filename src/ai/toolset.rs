@@ -139,7 +139,7 @@ impl Toolset {
         }
         if !plan {
             let servers = rpc::mcp_servers_enabled(app);
-            for t in crate::mcp::list_all_tools(&servers) {
+            for t in crate::mcp::list_all_tools_cached(&servers) {
                 let server_name = t["server"].as_str().unwrap_or("");
                 let Some(server) = servers.iter().find(|s| s["name"] == server_name) else {
                     continue;
