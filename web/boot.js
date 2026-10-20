@@ -16,6 +16,10 @@
  * approvals, console); and the auto-saver.
  */
 
+// This page's build (build-web.sh stamps it, and writes it to
+// uapp-build.json). The worker and the service worker report theirs; any
+// difference means a deploy happened under this page.
+const BUILD = "__UAPP_BUILD__";
 const enc = new TextEncoder();
 // How pages in our frames know they are in the browser build: uapp.js walks
 // up to the window carrying this flag and talks to it. A property on THIS
@@ -239,6 +243,32 @@ function stripWasmMarker(text) {
   return text.replace(/\s*<script>\s*window\.__uappWasm\s*=\s*1;?\s*<\/script>/gi, "");
 }
 
+// ---- updates --------------------------------------------------------------------
+// A page left open across a deploy keeps its old boot.js while anything it
+// loads later comes from the new one. Say so (once), and reload only after
+// a save.
+let updateShown = false;
+function noteBuild(other) {
+  if (!other || other === BUILD || BUILD.startsWith("__") || updateShown) return;
+  updateShown = true;
+  showBanner("uapp-updated", "uApp was updated", "Reload to get the new version. Your changes are saved first.",
+    [["Reload", async () => {
+      if (await flushSave()) { leaving = true; location.reload(); } else saveFailureBanner();
+    }], ["Later", (el) => el.remove()]]);
+}
+// After a failed boot: was it because the server now has another build?
+async function serverMovedOn() {
+  if (BUILD.startsWith("__")) return false;
+  try {
+    const r = await fetch(new URL("uapp-build.json", BASE), { cache: "no-store" });
+    const j = r.ok ? await r.json() : null;
+    return !!(j && j.build && j.build !== BUILD);
+  } catch { return false; }
+}
+function updatedError() {
+  return Object.assign(new Error("A new version of uApp was deployed while this page was loading."), { updated: true });
+}
+
 // ---- worker RPC -------------------------------------------------------------
 
 function sendRpc(method, params = {}) {
@@ -460,6 +490,7 @@ async function handleSwRequest(m) {
   const reply = (data) => data.swAck
     ? swPost({ swAck: true, id: m.id, inst: INST })
     : swPost({ swReply: true, id: m.id, inst: INST, ...data });
+  if (m.build) noteBuild(m.build);
   // Until an app is open, anything the TOP document asks for is the server's
   // own resource — in hosted-site mode that is the page the reader is looking
   // at, still loading its scripts. Waiting on appReady here would stall them
@@ -1543,7 +1574,19 @@ if (tabChannel) {
     }
     navigator.serviceWorker.addEventListener("message", (ev) => {
       if (ev.data && ev.data.swRequest) handleSwRequest(ev.data);
+      else if (ev.data && ev.data.swBuild) noteBuild(ev.data.swBuild);
     });
+    // A tab left open for days never navigates, so nothing checks for a new
+    // service worker; look when it comes back into view (at most twice an
+    // hour). A new one takes over, and its build reaches noteBuild.
+    {
+      let checked = Date.now();
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible" || Date.now() - checked < 30 * 60000) return;
+        checked = Date.now();
+        try { navigator.serviceWorker.__uappReg.update().catch(() => {}); } catch {}
+      });
+    }
 
     // Tell the worker this client is the shell. On a hosted site the shell's
     // pages live at the site's own arbitrary paths (thederf.com/, /admin,
@@ -1555,7 +1598,7 @@ if (tabChannel) {
       const announce = () => {
         const sw = navigator.serviceWorker.controller
           || (navigator.serviceWorker.__uappReg && navigator.serviceWorker.__uappReg.active);
-        if (sw) sw.postMessage({ shellClient: true, inst: INST });
+        if (sw) sw.postMessage({ shellClient: true, inst: INST, build: BUILD });
       };
       announce();
       navigator.serviceWorker.addEventListener("controllerchange", announce);
@@ -1567,7 +1610,7 @@ if (tabChannel) {
     net = sab ? new SharedArrayBuffer(1024 * 1024 + HDR) : null;
 
     splashNote("Loading the runtime…"); // ~1.5 MB of wasm on a cold cache
-    worker = new Worker(new URL("worker.js", BASE), { type: "module" });
+    worker = new Worker(new URL("worker.js" + (BUILD.startsWith("__") ? "" : "?v=" + BUILD), BASE), { type: "module" });
     // A module worker that fails to load (a 404, a syntax error, a network
     // drop mid-download) says so only here, and never posts "ready".
     let workerFailed = null;
@@ -1610,8 +1653,15 @@ if (tabChannel) {
     await Promise.race([
       new Promise((resolve, reject) => {
         const h = (ev) => {
-          if (ev.data && ev.data.type === "ready") { worker.removeEventListener("message", h); resolve(); }
-          if (ev.data && ev.data.type === "fatal") reject(new Error(ev.data.error));
+          const d = ev.data || {};
+          if (d.type === "ready") {
+            worker.removeEventListener("message", h);
+            // A worker.js from another deploy than this boot.js: they
+            // would talk past each other.
+            if (d.build && d.build !== BUILD && !BUILD.startsWith("__")) reject(updatedError());
+            else resolve();
+          }
+          if (d.type === "fatal") reject(d.updated ? updatedError() : new Error(d.error));
         };
         worker.addEventListener("message", h);
         worker.postMessage({ type: "init", sab, inbox, net });
@@ -1753,6 +1803,10 @@ if (tabChannel) {
   } catch (e) {
     console.error(e);
     appReadyReject(e instanceof Error ? e : new Error(String(e)));
-    fatal(errText(e));
+    if ((e && e.updated) || await serverMovedOn()) {
+      fatal("A new version was deployed while this page was loading. Reload to get it.", "uApp was updated");
+    } else {
+      fatal(errText(e));
+    }
   }
 })();

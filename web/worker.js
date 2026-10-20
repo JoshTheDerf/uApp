@@ -3,10 +3,23 @@
  * postMessage (same protocol the native WebSocket carries) — or, while an AI
  * run has this worker blocked, over the shared-memory inbox the glue drains. */
 
-import init, { open_app, rpc_dispatch, ai_tick, export_bytes } from "./uapp_wasm.js";
-import { glueConfigure, glueDrainInbox, gluePanicked } from "./uapp_glue.js";
-
-const ready = init();
+// The build this worker belongs to (build-web.sh stamps it). The runtime is
+// fetched for exactly this build (?v=), so no cache or CDN can pair one
+// deploy's glue with another's wasm, and each file says which build it is
+// from: a server that has moved on (it ignores ?v= and serves what it has)
+// is reported as an update instead of being run.
+const BUILD = "__UAPP_BUILD__";
+const V = BUILD.startsWith("__") ? "" : "?v=" + BUILD; // unstamped: as the generated glue imports it
+let open_app, rpc_dispatch, ai_tick, export_bytes, glueConfigure, glueDrainInbox, gluePanicked;
+const ready = (async () => {
+  const [wasm, glue] = await Promise.all([import("./uapp_wasm.js" + V), import("./uapp_glue.js" + V)]);
+  if (glue.GLUE_BUILD !== BUILD || (wasm.WASM_BUILD !== undefined && wasm.WASM_BUILD !== BUILD)) {
+    throw Object.assign(new Error("the runtime on the server is from another build"), { updated: true });
+  }
+  ({ open_app, rpc_dispatch, ai_tick, export_bytes } = wasm);
+  ({ glueConfigure, glueDrainInbox, gluePanicked } = glue);
+  await wasm.default({ module_or_path: new URL("uapp_wasm_bg.wasm" + V, import.meta.url) });
+})();
 
 // After a panic (or any trap) the module's memory is whatever the crash left:
 // locks held, a transaction half done. Nothing more runs in it, so a broken
@@ -18,6 +31,7 @@ function markDead(why) {
   postMessage({ type: "dead", message: dead });
 }
 function crashed(e) {
+  if (!gluePanicked) return; // the runtime never loaded
   if (gluePanicked() || e instanceof WebAssembly.RuntimeError) markDead(gluePanicked() || String(e));
 }
 const DEAD = () => ({ error: { message: "the engine stopped after an internal error (reload the page)" } });
@@ -27,7 +41,7 @@ self.onmessage = async (ev) => {
   try {
     await ready;
   } catch (e) {
-    postMessage({ type: "fatal", error: "wasm failed to load: " + e });
+    postMessage({ type: "fatal", error: "wasm failed to load: " + e, updated: !!(e && e.updated) });
     return;
   }
   if (m.type === "init") {
@@ -53,7 +67,7 @@ self.onmessage = async (ev) => {
         }
       },
     });
-    postMessage({ type: "ready" });
+    postMessage({ type: "ready", build: BUILD });
     return;
   }
   if (m.type === "open") {

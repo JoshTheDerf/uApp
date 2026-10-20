@@ -20,6 +20,9 @@
  *   net   [0] state (1 = a record is ready)   [1] length   [2] flags (1 eof, 2 error)
  */
 
+// Which build this file is from (build-web.sh stamps it; worker.js checks).
+export const GLUE_BUILD = "__UAPP_BUILD__";
+
 const cfg = { sab: null, inbox: null, net: null, notify: () => {}, aiTick: null, dispatch: null, onPanic: () => {} };
 export function glueConfigure(c) { Object.assign(cfg, c); }
 

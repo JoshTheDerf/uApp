@@ -13,6 +13,11 @@
  *     behaviour — see shellPath / clientIsShell below.
  */
 
+// This worker's build (build-web.sh stamps it). Sent with every ask, and
+// told to a shell that announces another one, so a page left open across a
+// deploy learns it is out of date.
+const BUILD = "__UAPP_BUILD__";
+
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
@@ -38,6 +43,7 @@ self.addEventListener("message", (ev) => {
   // /admin, /posts/x are all shell pages), so no path rule can spot them.
   if (m.shellClient) {
     if (ev.source && ev.source.id) { shellClients.add(ev.source.id); clientKind.delete(ev.source.id); learnInst(ev.source.id, m.inst); }
+    if (m.build && m.build !== BUILD && ev.source) { try { ev.source.postMessage({ swBuild: BUILD }); } catch {} }
     return;
   }
   // Any reply at all proves the sender is the shell — free re-registration
@@ -84,7 +90,7 @@ async function askShell(req, frameType, inst) {
     try { const c = id && await self.clients.get(id); if (c) cs = [c]; } catch { /* broadcast */ }
   }
   if (!cs) cs = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  req = { ...req, frameType, inst: inst || null };
+  req = { ...req, frameType, inst: inst || null, build: BUILD };
   const id = seq++;
   const p = new Promise((res) => {
     waiting.set(id, res);

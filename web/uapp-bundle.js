@@ -31,4 +31,5 @@ self.UAPP_BUNDLE = {
   "uapp_wasm.js": null,
   "uapp_wasm_bg.wasm": null,
   "launcher.uapp": null,
+  "uapp-build.json": null,
 };
