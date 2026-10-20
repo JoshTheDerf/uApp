@@ -44,6 +44,7 @@ const TPL = /* html */ `
         <option value="openrouter">${S.settings.providerOpenRouter}</option>
         <option value="openai">${S.settings.providerOpenAI}</option>
         <option value="local">${S.settings.providerLocal}</option>
+        <option value="openai-compatible">${S.settings.providerOpenAICompat || "Other OpenAI-compatible server"}</option>
       </select>
     </label>
     <p class="hint hidden" id="local-hint">${S.settings.localHint}</p>
@@ -58,6 +59,9 @@ const TPL = /* html */ `
     </label>
     <label>${S.settings.maxTokens}
       <input id="cfg-maxtokens" type="number" min="1024" placeholder="${S.settings.maxTokensPlaceholder}">
+    </label>
+    <label>${S.settings.contextTokens || "Context size (tokens)"}
+      <input id="cfg-context" type="number" min="4096" placeholder="${S.settings.maxTokensPlaceholder}">
     </label>
     <p class="hint">${S.settings.mcpHint}</p>
     </div>
@@ -465,6 +469,7 @@ async function loadSettings() {
   $("cfg-model").value = ai.model || "";
   $("cfg-baseurl").value = ai.base_url || "";
   $("cfg-maxtokens").value = ai.max_tokens || "";
+  $("cfg-context").value = ai.context_tokens || "";
   syncLocalHint();
   try {
     const prefs = (await rpc("prefs.get")) || {};
@@ -639,6 +644,7 @@ function wire() {
       model: ($("cfg-model").value || "").trim(),
       base_url: ($("cfg-baseurl").value || "").trim() || undefined,
       max_tokens: parseInt($("cfg-maxtokens").value, 10) || undefined,
+      context_tokens: parseInt($("cfg-context").value, 10) || undefined,
     } : null;
     stopRecording();
     try {

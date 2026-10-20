@@ -4,10 +4,11 @@ The AI chat (and apps themselves via `uapp.tool()`) have access to a set of buil
 
 ## Approval modes
 
-- **Manual** — Every gated tool prompts for user approval before running. The default.
-- **Auto** — Gated tools run without prompting, except for operations that reach outside the app (ATTACH'ing another database, contacting local/private network URLs).
+- **Auto** (the default): gated tools run without prompting, except for operations that reach outside the app (ATTACH'ing another database, contacting local/private network URLs).
+- **Manual**: every gated tool prompts for approval before running, and so do `fetch_url` and `web_search` (a page the assistant reads could tell it to send your data somewhere).
+- **Plan**: read-only. Gated tools, sub-agents and MCP tools are left out, and the assistant proposes a plan instead of making changes.
 
-You can toggle between modes in the chat header.
+You can switch modes in the chat header. Each chat keeps its own mode, so switching one chat to Auto doesn't stop the prompts in another.
 
 ## Built-in tools
 
@@ -17,7 +18,7 @@ You can toggle between modes in the chat header.
 |------|-------|-------------|
 | `get_schema` | No | Get all table definitions and row counts in the app database. |
 | `sql_query` | No | Run read-only SQL (SELECT/WITH/PRAGMA). Complex queries, joins and aggregates are encouraged. |
-| `sql_exec` | Yes | Run ONE deterministic write statement (INSERT/UPDATE/DELETE/DDL) with optional params. |
+| `sql_exec` | Yes | Run ONE write statement (INSERT/UPDATE/DELETE/DDL) with optional params. |
 | `sql_batch` | Yes | Run multiple write statements separated by semicolons as one atomic write. |
 | `import_csv` | Yes | Parse a CSV/TSV file from the archive into a database table as one efficient bulk write. Auto-detects delimiter and column types. |
 
@@ -65,22 +66,23 @@ hang off it). `sql` is accepted for `database`, `ai` for `chat`.
 | `agent_run` | No | Delegate a self-contained task to an autonomous sub-agent. It works in its own conversation and returns a written report. |
 | `agent_send` | No | Send a follow-up instruction to a sub-agent started with `agent_run`. |
 | `ask_user` | No | Ask the user 1-4 questions and wait for their answers. Each question always offers a free-form 'Other' field. Use it when a decision genuinely belongs to the user. |
+| `call_action` | Like the action | Call one of the app's actions by name (see [App actions](#app-actions)). |
 
 ### Web
 
 | Tool | Gated | Description |
 |------|-------|-------------|
-| `web_search` | No | Search the web via DuckDuckGo (no API key). Returns titles, URLs and snippets. |
-| `fetch_url` | No | Fetch a web page and return its readable text (HTML stripped, 20KB cap). |
+| `web_search` | Manual mode | Search the web via DuckDuckGo (no API key). Returns titles, URLs and snippets. |
+| `fetch_url` | Manual mode | Fetch a web page and return its readable text (HTML stripped, 20KB cap). |
 
 ### MCP (Model Context Protocol) servers
 
 | Tool | Gated | Description |
 |------|-------|-------------|
-| `add_mcp_server` | Yes | Connect a remote MCP server. Its tools appear immediately as `mcp__<name>__*`. |
+| `add_mcp_server` | Yes | Connect a remote MCP server. Its tools appear as `mcp__<name>__*` from the assistant's next step. |
 | `remove_mcp_server` | Yes | Disconnect a previously added MCP server. |
 
-MCP tools are **always gated** (unknown side effects) and are prefixed with `mcp__`.
+MCP tools are **always gated** (unknown side effects) and are prefixed with `mcp__`. Providers only accept tool names made of letters, digits, `_` and `-`, up to 64 characters, so a longer or odd MCP tool name is shortened for the model (with a short hash to keep it unique). Apps still call it by its full `mcp__<server>__<tool>` name.
 
 ## App actions
 
@@ -97,6 +99,8 @@ uapp.action("add_employee", {
 ```
 
 Actions automatically become tools available to the AI chat (named `app__<name>`), so the human clicking a button and the AI answering a chat request run the **same code**. Actions run inside the open app page and exist as tools only while the app is open.
+
+The assistant's tool list is fixed when it starts answering a message (changing it mid-answer would throw away the prompt cache), so an action registered after that, such as one it just wrote, is called through `call_action {"action": "name", "input": {...}}`. Called with an unknown name, `call_action` returns the registered actions and their parameters.
 
 Mark pure reads with `readonly: true` to skip approval prompts.
 
@@ -118,4 +122,4 @@ The user can choose:
 - **Always allow** — store approval for this app+tool combination, skip future prompts
 - **Deny** — don't run, return error to app
 
-Approvals are stored in the .uapp file and persist across app restarts. They're scoped per-app, so approving a tool for one app doesn't approve it for others.
+"Always allow" is remembered on this computer (not in the .uapp file, so it doesn't travel with a copy of the app) and persists across restarts. It's scoped per app, so approving a tool for one app doesn't approve it for others.

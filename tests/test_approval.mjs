@@ -16,6 +16,16 @@ const readBody = (req) => new Promise((res) => { let b = ""; req.on("data", (d) 
 const mock = createServer(async (req, res) => {
   const body = JSON.parse((await readBody(req)) || "{}");
   const send = (o) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
+  if (req.url === "/web/chat/completions") {
+    // Per session: "web …" asks to fetch a page once, anything else answers.
+    const users = body.messages.filter((m) => m.role === "user").map((m) => m.content.map((c) => c.text || "").join(" "));
+    const first = users[0] || "";
+    const fetched = body.messages.some((m) => m.role === "tool");
+    if (first.includes("web please") && !fetched)
+      return send({ choices: [{ message: { content: null, tool_calls: [
+        { id: "w1", type: "function", function: { name: "fetch_url", arguments: JSON.stringify({ url: "https://example.com/" }) } } ] } }] });
+    return send({ choices: [{ message: { content: `answered: ${first.slice(0, 20)}` } }] });
+  }
   if (req.url !== "/chat/completions") { res.writeHead(404); return res.end(); }
   calls.push(body);
   const n = calls.length;
@@ -175,6 +185,25 @@ console.log("\n[5] app-triggered calls: deny means nothing runs");
   await call2;
   const t2 = await A.rpc("sql.query", { sql: "SELECT count(*) FROM sqlite_master WHERE name='app_allowed'" });
   ok(t2.rows[0][0] === 1, "allowed call ran");
+}
+
+console.log("\n[6] modes are per chat; manual mode asks before web tools");
+{
+  await A.rpc("config.set", { key: "ai", value: { provider: "openrouter", api_key: "t", model: "m", base_url: `${MOCK}/web` } });
+  const { id: sa } = await A.rpc("sessions.create", { title: "manual" });
+  const { id: sb } = await A.rpc("sessions.create", { title: "auto" });
+  await A.rpc("chat.send", { session: sa, text: "web please", mode: "manual" });
+  const pend = await waitFor(async () => (await A.rpc("ai.pending")).find((p) => p.session === sa));
+  ok(!!pend && pend.name === "fetch_url", "fetch_url waits for approval in manual mode");
+  await A.rpc("chat.send", { session: sb, text: "hello there", mode: "auto" });
+  const answered = await waitFor(async () => (await A.rpc("chat.list", { session: sb })).rows.some((r) => r[5].includes("answered: hello")));
+  ok(!!answered, "the other chat ran in auto mode");
+  ok((await A.rpc("ai.pending")).some((p) => p.id === pend.id), "its auto send didn't release the manual chat's prompt");
+  await A.rpc("ai.approve", { id: pend.id, allow: false });
+  const done = await waitFor(async () => (await A.rpc("chat.list", { session: sa })).rows.some((r) => r[5].includes("answered: web please")));
+  ok(!!done, "manual chat finished after the denial");
+  const denied = (await A.rpc("chat.list", { session: sa })).rows.some((r) => r[4] === "tool" && r[5].includes("denied permission to run fetch_url"));
+  ok(denied, "denial reported to the model");
 }
 
 await A.stop();

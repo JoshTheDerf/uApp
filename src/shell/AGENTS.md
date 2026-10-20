@@ -33,7 +33,8 @@ Then open with `uapp open <file>.uapp` to test.
 - `uapp.action(name, {description, params}, handler)` — register business logic
 - `uapp.onChange(cb)` — re-render on changes. Returns a function that
   unsubscribes (so do `onFilesChange`, `onPresent`, `onTeardown`)
-- `await uapp.ready` — `{user, device, …}`
+- `await uapp.ready` — `{user, device, …}`; `uapp.user` and `uapp.device`
+  are null until it resolves
 
 Failed calls reject with `uapp.UappError`: `.method` is the call, `.code` is
 `"timeout"`, `"disconnected"`, `"no_host"` or a server code when known.

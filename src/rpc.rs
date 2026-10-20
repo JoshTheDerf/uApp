@@ -345,13 +345,16 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         }
         "chat.list" => {
             let session = session_arg(&p)?;
+            // `context` rows are the app snapshots the assistant's loop
+            // appends for the model (see ai/run.rs); only it asks for them.
+            let context = p["context"].as_bool().unwrap_or(false);
             let eng = app.eng();
             store::query(
                 &eng.db,
                 "SELECT mid, ts, device, user, role, content, COALESCE(session,'main') AS session
-                 FROM uapp_chat WHERE COALESCE(session,'main') = ?1
+                 FROM uapp_chat WHERE COALESCE(session,'main') = ?1 AND (?2 OR role != 'context')
                  ORDER BY ts, ctr, device, id",
-                &[json!(session)],
+                &[json!(session), json!(context)],
             )
         }
         "chat.send" => chat_send(app, p),
@@ -419,6 +422,11 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             }
             Ok(json!({"ok": true}))
         }
+        // Token usage recorded on assistant rows: {session?} (see ai/usage.rs).
+        "ai.usage" => match p["session"].as_str() {
+            Some(s) => crate::ai::usage_report(app, Some(&session_id(s)?)),
+            None => crate::ai::usage_report(app, None),
+        },
         "ai.pending" => Ok(app.pending_list()),
         "ai.questions" => Ok(app.questions_list()),
         // Answer an ask_user prompt: {"id", "answers": [{choices:[..], other:".."}]},
@@ -468,7 +476,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
                     "kind": "app",
                     "enabled": !disabled.contains(&tool_name)}));
             }
-            for t in crate::mcp::list_all_tools(&mcp_servers_enabled(app)) {
+            for t in crate::mcp::list_all_tools_cached(&mcp_servers_enabled(app)) {
                 let name = format!(
                     "mcp__{}__{}",
                     t["server"].as_str().unwrap_or(""),
@@ -550,7 +558,7 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
         }
         "mcp.tools" => {
             let servers = mcp_servers_enabled(app);
-            Ok(json!(crate::mcp::list_all_tools(&servers)))
+            Ok(json!(crate::mcp::list_all_tools_cached(&servers)))
         }
         "mcp.status" => Ok(mcp_status(app)),
         "mcp.add" => mcp_add(app, p),
@@ -990,7 +998,7 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
         if !matches!(mode, "auto" | "manual" | "plan") {
             bail!("mode must be auto, manual or plan (got '{mode}')");
         }
-        *crate::app::lock(&app.ai_mode) = mode.to_string();
+        crate::app::lock(&app.ai_modes).insert(session.clone(), mode.to_string());
     }
     let attachments = p["attachments"].as_array().cloned().unwrap_or_default();
     let mut stored = Vec::new();
@@ -1029,6 +1037,25 @@ fn chat_send(app: &Arc<App>, p: Value) -> Result<Value> {
                 "attachment too large ({}MB limit)",
                 MAX_UPLOAD_BYTES / 1024 / 1024
             );
+        }
+        // An image goes to the model as an image, and one the provider
+        // refuses would fail every later turn of the chat: say so now.
+        if crate::ai::is_image(&path) {
+            let problem = if b64.len() / 4 * 3 > crate::ai::MAX_IMAGE_BYTES + 3 {
+                crate::ai::image_too_big(b64.len() / 4 * 3)
+            } else {
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .ok()
+                    .and_then(|bytes| crate::ai::image_problem(&bytes))
+            };
+            if let Some(why) = problem {
+                bail!(
+                    "{} can't go to the assistant: {why}. Shrink it and attach it again, \
+                     or upload it in the file browser and mention its name",
+                    safe.trim()
+                );
+            }
         }
         local_op(app, "file_put", json!({"name": path, "data": b64}))?;
         stored.push(json!({"name": path, "bytes": b64.len() * 3 / 4}));
@@ -1162,7 +1189,7 @@ pub fn sessions_list(app: &Arc<App>) -> Result<Value> {
             store::query(
                 &eng.db,
                 "SELECT COALESCE(session,'main') AS s, count(*), max(ts) FROM uapp_chat
-                 GROUP BY 1",
+                 WHERE role != 'context' GROUP BY 1",
                 &[],
             )?,
         )
@@ -1532,13 +1559,19 @@ fn mcp_mutate(
 }
 
 fn mcp_add(app: &Arc<App>, p: Value) -> Result<Value> {
-    let name: String = need_str(&p, "name")?
+    // ASCII only and no "__": the name becomes part of tool names
+    // (mcp__<name>__<tool>), which providers restrict to [a-zA-Z0-9_-].
+    let mut name: String = need_str(&p, "name")?
         .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(32)
         .collect();
+    while name.contains("__") {
+        name = name.replace("__", "_");
+    }
+    let name = name.trim_matches('_').to_string();
     if name.is_empty() {
-        bail!("server name must be alphanumeric");
+        bail!("server name must use letters, digits, - or _");
     }
     let url = need_str(&p, "url")?.to_string();
     if !url.starts_with("https://") && !url.starts_with("http://") {
