@@ -270,11 +270,24 @@ function bindFrame() {
 // the archive is shared, and an app hiding the toolbar in someone else's
 // window on another device would be indefensible. This reaches exactly the
 // shell hosting the page that asked.
+function insideOurFrames(w) {
+  try {
+    for (let i = 0; w && i < 16; i++) {
+      if (w.parent === window) return true;
+      if (w === w.parent) return false;
+      w = w.parent;
+    }
+  } catch {}
+  return false;
+}
+
 function bindPages() {
   window.addEventListener("message", (e) => {
     // Same-origin only: that means a page this shell itself served out of the
     // archive. Anything else has no business driving the shell's UI.
-    if (e.origin !== location.origin) return;
+    // And only from a window inside this shell's own frames: another tab on
+    // the same origin (another app in the browser build) must not reach it.
+    if (e.origin !== location.origin || !insideOurFrames(e.source)) return;
     const m = e.data && e.data.__uappToolbar;
     if (!m || typeof m !== "object") return;
     if (m.action === "show") setToolbar(true);

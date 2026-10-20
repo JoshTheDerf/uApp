@@ -69,7 +69,7 @@
   let ws, nextId = 1, openp;
   // One raw-send for both transports; JSON objects in, transport framing here.
   const rawSend = (obj) => {
-    if (wasmMode) { wasmHost.postMessage({ __uappRPC: true, m: obj }, "*"); return true; }
+    if (wasmMode) { wasmHost.postMessage({ __uappRPC: true, m: obj }, location.origin); return true; }
     if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; }
     return false;
   };
@@ -444,6 +444,8 @@
     }
     if (wasmMode) {
       window.addEventListener("message", (ev) => {
+        // Only the shell hosting this page speaks for the engine.
+        if (ev.origin !== location.origin || ev.source !== wasmHost) return;
         const d = ev.data;
         if (d && d.__uappMsg && d.m) onTransportMessage(d.m);
       });

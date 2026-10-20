@@ -719,12 +719,13 @@ pub fn dispatch(app: &Arc<App>, method: &str, p: Value) -> Result<Value> {
             };
             crate::shortcut::remove(&app_id, &name).map(|msg| json!({ "ok": true, "message": msg }))
         }
-        // The whole current app as .uapp bytes (base64) — OPFS auto-save and
-        // the Download button.
+        // The whole current app as .uapp bytes (base64), as a page may share
+        // it: without the API key, MCP headers or approvals. OPFS auto-save
+        // has its own transfer path (wasm.rs export_bytes) that keeps them.
         #[cfg(target_arch = "wasm32")]
         "app.export" => {
             let eng = app.eng();
-            let bytes = eng.serialize_bytes()?;
+            let bytes = crate::store::export_shareable(&eng.db)?;
             Ok(
                 json!({"b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
                       "bytes": bytes.len()}),

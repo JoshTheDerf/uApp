@@ -166,7 +166,10 @@ try {
   const setCfg = (key, value) => `${inner("w1")}.defaultView.uapp.rpc("config.set", ${JSON.stringify({ key, value })})`;
   await desk.evalJs(setCfg("ai", { provider: "anthropic", model: "x", api_key: "sk-e2e-secret-key" }));
   await desk.evalJs(setCfg("mcp", [{ name: "e2e", url: "https://mcp.invalid/", headers: { authorization: "Bearer e2e-mcp-secret" } }]));
-  await desk.evalJs(setCfg("approvals.app.e2e", ["run_js"]));
+  // Approvals are only ever written by the approval prompt itself; a page
+  // can't plant one.
+  const planted = await desk.evalJs(`${setCfg("approvals.app.e2e", ["run_js"])}.then(() => "set", (e) => String(e.message || e))`);
+  ok(/can't be set here/.test(planted), "a page can't plant an approval", planted);
   const secrets = await desk.evalJs(`(async () => {
     const w = ${F("w1")};
     await w.__uappFlushSave();
@@ -174,13 +177,13 @@ try {
     const dl = text(new Uint8Array(await (await w.fetch(w.__uappBase + "download.uapp")).arrayBuffer()));
     const dir = await (await w.navigator.storage.getDirectory()).getDirectoryHandle("apps");
     const saved = text(new Uint8Array(await (await (await dir.getFileHandle(w.__uappSiteState.id + ".uapp")).getFile()).arrayBuffer()));
-    const has = (s) => ({ key: s.includes("sk-e2e-secret-key"), mcp: s.includes("e2e-mcp-secret"), approvals: s.includes("approvals.app.e2e"), sqlite: s.startsWith("SQLite format 3"), provider: s.includes("anthropic") });
+    const has = (s) => ({ key: s.includes("sk-e2e-secret-key"), mcp: s.includes("e2e-mcp-secret"), approvals: s.includes("approvals."), sqlite: s.startsWith("SQLite format 3"), provider: s.includes("anthropic") });
     return { download: has(dl), saved: has(saved) };
   })()`);
   console.log("  ", JSON.stringify(secrets));
   ok(secrets.download.sqlite && secrets.download.provider && !secrets.download.key && !secrets.download.mcp && !secrets.download.approvals,
      "a downloaded copy has no API key, MCP headers or approvals (and keeps the provider)");
-  ok(secrets.saved.key && secrets.saved.mcp && secrets.saved.approvals, "the copy saved in this browser keeps them");
+  ok(secrets.saved.key && secrets.saved.mcp, "the copy saved in this browser keeps them");
 
   // ---- who may talk to the shell ------------------------------------------
   console.log("\nonly the shell's own frames get RPCs:");

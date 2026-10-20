@@ -162,16 +162,7 @@ function fatal(msg, title = "uApp could not start", retryLabel = "Try again") {
       if (tb && tb.hidden) document.getElementById("topbar")?.classList.add("hidden");
     } catch {}
 
-    // main.js mirrors the app frame's URL into the address bar whenever
-    // __uappSiteArchive is set. That is right for a hosted site's chrome
-    // (its top URL is a page of the site) and wrong here, where the top URL
-    // is the shell's own (?open=…): rewritten, a reload or switchTo lands
-    // on the wrong page. It reads the flag once, at import, so hide it for
-    // that moment. (Better keyed on __uappChrome in main.js itself.)
-    const archive = window.__uappSiteArchive;
-    if (archive && !window.__uappChrome) delete window.__uappSiteArchive;
-    try { await import(new URL("shell/main.js", BASE)); }
-    finally { if (archive) window.__uappSiteArchive = archive; }
+    await import(new URL("shell/main.js", BASE));
     await framePainted;
     splashHide();
     // An archive that came from a URL can go back to it: the sync pill in the

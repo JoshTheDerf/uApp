@@ -134,10 +134,11 @@ function mirrorFrameUrl() {
   if (top === null || top === location.pathname + location.search + location.hash) return;
   try { history.pushState({ uappFrame: top }, "", top); } catch {}
 }
-// Hosted-site mode only: there the top URL IS a page of the site and reload
-// serves it from the server. In the native window or the browser demo the
-// top URL is the shell's, and rewriting it would break reload.
-const MIRROR_URL = !!window.__uappSiteArchive;
+// Hosted-site chrome only: there the top URL IS a page of the site and reload
+// serves it from the server. In the native window, the browser demo and an
+// archive opened with ?open= the top URL is the shell's, and rewriting it
+// would break reload.
+const MIRROR_URL = !!window.__uappChrome;
 $("appframe")?.addEventListener("load", () => {
   if (!MIRROR_URL) return;
   mirrorFrameUrl();
