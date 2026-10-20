@@ -2225,17 +2225,20 @@ async fn site_publish(
         .get(header::IF_MATCH)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let done = tokio::task::spawn_blocking(move || -> Result<Value, Response> {
-        let err = |st: StatusCode, e: String| (st, e).into_response();
+    // The refusal is boxed: a Response is large, and every Ok would carry its size.
+    let done = tokio::task::spawn_blocking(move || -> Result<Value, Box<Response>> {
+        let err = |st: StatusCode, e: String| Box::new((st, e).into_response());
         if let Some(want) = if_match {
             let cur = current_archive(&app).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
             if want.split(',').all(|t| t.trim() != cur.etag && t.trim() != "*") {
-                return Err((
-                    StatusCode::CONFLICT,
-                    [(header::ETAG, cur.etag.clone())],
-                    axum::Json(json!({"error": "the site changed since this copy was downloaded", "etag": cur.etag})),
-                )
-                    .into_response());
+                return Err(Box::new(
+                    (
+                        StatusCode::CONFLICT,
+                        [(header::ETAG, cur.etag.clone())],
+                        axum::Json(json!({"error": "the site changed since this copy was downloaded", "etag": cur.etag})),
+                    )
+                        .into_response(),
+                ));
             }
         }
         // Rescue point before a whole-site change, like a template update.
@@ -2254,7 +2257,7 @@ async fn site_publish(
             let etag = v["etag"].as_str().unwrap_or("").to_string();
             ([(header::ETAG, etag)], axum::Json(v)).into_response()
         }
-        Ok(Err(resp)) => resp,
+        Ok(Err(resp)) => *resp,
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("publish failed: {e}"),

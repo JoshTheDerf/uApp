@@ -155,6 +155,10 @@ jobs:
       # The hosted runners no longer ship Android cmdline-tools, so install
       # them (provides sdkmanager on PATH + ANDROID_HOME).
       - uses: android-actions/setup-android@v3
+        with:
+          # The action's default list includes the legacy "tools" package,
+          # which Google has removed from the SDK repository.
+          packages: platform-tools
       - name: Install Android SDK pieces (NDK ${{ env.NDK_VERSION }})
         run: |
           yes | sdkmanager --licenses > /dev/null || true
