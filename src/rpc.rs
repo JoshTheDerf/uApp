@@ -922,6 +922,15 @@ fn app_open_file(app: &Arc<App>) -> Result<Value> {
         Some(p) => std::path::PathBuf::from(p),
         None => return Ok(json!({"opened": false})), // user cancelled
     };
+    open_in_new_window(app, &path)
+}
+
+/// Open `path` in a window of its own (a new process, like a second launch),
+/// and close this one if it only had the untouched scratch app in it. Used
+/// by "Open another app" and by files the OS hands the running app (macOS
+/// Finder opens).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn open_in_new_window(app: &Arc<App>, path: &std::path::Path) -> Result<Value> {
     if !path.is_file() {
         bail!("{} is not a file", path.display());
     }
@@ -932,7 +941,7 @@ fn app_open_file(app: &Arc<App>) -> Result<Value> {
     // Picking the file this window already has would hand the new instance our
     // own server (registry reuse) and then — on the blank-scratch path below —
     // shut it down under them. It's already open; say so instead.
-    if crate::registry::key(&path) == crate::registry::key(&cur_path) {
+    if crate::registry::key(path) == crate::registry::key(&cur_path) {
         bail!("{} is already open in this window", path.display());
     }
     // The running binary IS the desktop app, so it's also the thing that knows
@@ -941,7 +950,7 @@ fn app_open_file(app: &Arc<App>) -> Result<Value> {
     let exe = std::env::current_exe()
         .map_err(|e| anyhow!("couldn't locate the UApp app on disk: {e}"))?;
     let mut child = std::process::Command::new(&exe)
-        .arg(&path)
+        .arg(path)
         .spawn()
         .map_err(|e| anyhow!("couldn't open {}: {e}", path.display()))?;
     // This window can outlive many opened apps; reap each child so closing one

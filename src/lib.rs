@@ -244,6 +244,14 @@ mod native_serve {
             let app = app.clone();
             native::install_drop_sink(Box::new(move |info| app.native_drop(info)));
         }
+        {
+            let app = app.clone();
+            native::install_open_sink(Box::new(move |path| {
+                if let Err(e) = rpc::open_in_new_window(&app, &path) {
+                    tracing::warn!("couldn't open {}: {e:#}", path.display());
+                }
+            }));
+        }
 
         // Permission grants are filed per app, so the broker needs to know which
         // .uapp is open. It deliberately gets NOTHING else from the server: the

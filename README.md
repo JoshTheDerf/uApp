@@ -16,7 +16,7 @@ Revision history, AI chat logs, and such are integrated into the `.uapp`, allowi
 
 ## Installation
 
-Grab a build from [GitHub releases](https://github.com/JoshTheDerf/uApp/releases): the `.deb` or `.AppImage` for Linux, the `-setup.exe` installer for Windows, the `.dmg` for macOS (untested), or `uapp-android-universal.apk` for Android. They register `.uapp` files, so you can double-click one to open it (except on macOS for now, see below). Nothing is code-signed yet, so installation on Windows, macOS, and Android will be a pain. To build it yourself, see [BUILDING.md](BUILDING.md).
+Grab a build from [GitHub releases](https://github.com/JoshTheDerf/uApp/releases): the `.deb` or `.AppImage` for Linux, the `-setup.exe` installer for Windows, the `.dmg` for macOS (untested), or `uapp-android-universal.apk` for Android. They register `.uapp` files, so you can double-click one to open it. Nothing is code-signed yet, so installation on Windows, macOS, and Android will be a pain. To build it yourself, see [BUILDING.md](BUILDING.md).
 
 ## Online demo
 
@@ -154,6 +154,6 @@ The same `uapp` binary does this. On a server, build it with `--no-default-featu
 * **Multiple concurrent users** aren't supported. A second window on the same machine reuses the one that has the file open, but two machines writing to the same file on a network drive will likely corrupt it.
 * **Cloud sync** of a file that's open still isn't recommended. A crash mid-write is rolled back now (the rollback journal stays on disk next to the file), but a sync tool can still copy the file halfway through a write. If a copy does end up damaged, uApp can usually restore the newest snapshot it took on your machine.
 * **Apps run on the same origin as the editor around them**, so an app's code can do anything you can do in the shell, including answering its own approval prompts. Open a `.uapp` from someone you don't trust the way you'd run a program from them. See [docs/design/app-isolation.md](docs/design/app-isolation.md) for the details and the plan to fix it.
-* **macOS and iOS are untested.** I have neither a macOS nor an iOS device, so I can't test on those platforms. It should at least function on macOS, but double-clicking a `.uapp` in Finder opens your scratch app instead of the file (the macOS open-file event isn't handled yet). Not sure about iOS.
+* **macOS and iOS are untested.** I have neither a macOS nor an iOS device, so I can't test on those platforms. It should at least function on macOS (double-clicking a `.uapp` in Finder briefly shows your scratch app before the file's own window opens). Not sure about iOS.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to help out, [SECURITY.md](SECURITY.md) to report a vulnerability and [CHANGELOG.md](CHANGELOG.md) for what changed.

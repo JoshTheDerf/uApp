@@ -48,6 +48,7 @@ Notable changes to uApp. The format is based on [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- On macOS, double-clicking a .uapp in Finder (or Open With) opens that file. It used to open the scratch app.
 - .uapp files could end up as zero bytes on Android after "open with". A zero-byte file uApp has opened before is now restored from its newest snapshot.
 - A failed Save As or encryption change could leave the app on an empty database.
 - Opening a damaged copy of an app could restore a snapshot of a different copy.

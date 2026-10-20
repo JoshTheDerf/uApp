@@ -108,3 +108,21 @@ pub fn deliver_drop(info: DropInfo) {
         sink(info);
     }
 }
+
+type OpenSink = Box<dyn Fn(std::path::PathBuf) + Send + Sync>;
+static OPEN_SINK: OnceLock<OpenSink> = OnceLock::new();
+
+/// Register the server-side receiver for files the OS asks the running app to
+/// open (macOS sends Finder double-clicks to the app instead of starting it
+/// with the path).
+pub fn install_open_sink(sink: OpenSink) {
+    let _ = OPEN_SINK.set(sink);
+}
+
+/// Hand a file the OS wants opened to the server. Blocks while the server
+/// launches it, so never call this on the main thread.
+pub fn deliver_open(path: std::path::PathBuf) {
+    if let Some(sink) = OPEN_SINK.get() {
+        sink(path);
+    }
+}

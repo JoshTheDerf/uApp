@@ -121,8 +121,24 @@ pub fn run_with(launch: Launch) {
             install_permission_prompt(app.handle().clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the UApp desktop shell");
+        .build(tauri::generate_context!())
+        .expect("error while building the UApp desktop shell")
+        .run(|_handle, _event| {
+            // Finder double-clicks (and "Open With") reach a macOS app as an
+            // Opened event, at launch as well as while it runs, instead of as
+            // a command-line path. Treat each like "Open another app": a
+            // window of its own, and the blank scratch window that a cold
+            // start showed first closes. Off the main thread, because opening
+            // waits on window operations that run there.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = _event {
+                for url in urls {
+                    if let Ok(path) = url.to_file_path() {
+                        std::thread::spawn(move || crate::native::deliver_open(path));
+                    }
+                }
+            }
+        });
 }
 
 /// Forward OS file drops to the server, which relays them to the shell over
