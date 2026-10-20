@@ -44,7 +44,7 @@ const TPL = /* html */ `
         <option value="openrouter">${S.settings.providerOpenRouter}</option>
         <option value="openai">${S.settings.providerOpenAI}</option>
         <option value="local">${S.settings.providerLocal}</option>
-        <option value="openai-compatible">${S.settings.providerOpenAICompat || "Other OpenAI-compatible server"}</option>
+        <option value="openai-compatible">${S.settings.providerOpenAICompat}</option>
       </select>
     </label>
     <p class="hint hidden" id="local-hint">${S.settings.localHint}</p>
@@ -60,7 +60,7 @@ const TPL = /* html */ `
     <label>${S.settings.maxTokens}
       <input id="cfg-maxtokens" type="number" min="1024" placeholder="${S.settings.maxTokensPlaceholder}">
     </label>
-    <label>${S.settings.contextTokens || "Context size (tokens)"}
+    <label>${S.settings.contextTokens}
       <input id="cfg-context" type="number" min="4096" placeholder="${S.settings.maxTokensPlaceholder}">
     </label>
     <p class="hint">${S.settings.mcpHint}</p>
@@ -203,6 +203,8 @@ const CSS = /* css */ `
 // Desktop: the server creates/removes the real launcher entry (RPCs below),
 // never leaving duplicates behind. Android native webview: the MainActivity
 // bridge pins a launcher shortcut. Mobile browser: manual hint.
+// The `ai` config as last loaded, for the fields the form has no control for.
+let loadedAi = {};
 let androidBridge = null; // polled: injected once MainActivity finds the webview
 const mobileUA = /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
 let iconB64 = null, iconName = "";
@@ -461,6 +463,7 @@ async function loadSettings() {
     $("toolbar-box").classList.add("hidden");
   }
   const ai = (await rpc("config.get", { key: "ai" })) || {};
+  loadedAi = ai;
   $("cfg-provider").value = ai.provider || "";
   // The key never comes back from the core (it is kept on this machine, out
   // of the .uapp file), only whether one is saved. Blank on save keeps it.
@@ -638,7 +641,11 @@ function wire() {
   $("btn-cancel").onclick = () => { stopRecording(); closePanel("settingspanel"); };
   $("btn-save").onclick = async () => {
     const provider = $("cfg-provider").value;
+    // config.set replaces the whole entry, so carry over the settings this
+    // panel doesn't show (stream, effort, ...) as they were.
+    const { has_api_key: _, ...kept } = loadedAi;
     const ai = provider ? {
+      ...kept,
       provider,
       api_key: ($("cfg-key").value || "").trim() || undefined,
       model: ($("cfg-model").value || "").trim(),
