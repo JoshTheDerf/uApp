@@ -13,6 +13,11 @@
  *     behaviour — see shellPath / clientIsShell below.
  */
 
+// This worker's build (build-web.sh stamps it). Sent with every ask, and
+// told to a shell that announces another one, so a page left open across a
+// deploy learns it is out of date.
+const BUILD = "__UAPP_BUILD__";
+
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
@@ -38,6 +43,7 @@ self.addEventListener("message", (ev) => {
   // /admin, /posts/x are all shell pages), so no path rule can spot them.
   if (m.shellClient) {
     if (ev.source && ev.source.id) { shellClients.add(ev.source.id); clientKind.delete(ev.source.id); learnInst(ev.source.id, m.inst); }
+    if (m.build && m.build !== BUILD && ev.source) { try { ev.source.postMessage({ swBuild: BUILD }); } catch {} }
     return;
   }
   // Any reply at all proves the sender is the shell — free re-registration
@@ -84,7 +90,7 @@ async function askShell(req, frameType, inst) {
     try { const c = id && await self.clients.get(id); if (c) cs = [c]; } catch { /* broadcast */ }
   }
   if (!cs) cs = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  req = { ...req, frameType, inst: inst || null };
+  req = { ...req, frameType, inst: inst || null, build: BUILD };
   const id = seq++;
   const p = new Promise((res) => {
     waiting.set(id, res);
@@ -150,9 +156,18 @@ function b64FromBuffer(buf) {
   return btoa(bin);
 }
 
-// Shell bundle files: never looked up in an archive.
-const BUNDLE = new Set(["/boot.js", "/sw.js", "/worker.js", "/uapp.js", "/uapp_glue.js", "/icons.js", "/shell.css", "/scratch.html",
-  "/chrome.js", "/site-chrome.js", "/sync-pill.js", "/uapp_wasm.js", "/uapp_wasm_bg.wasm", "/index.html", "/launcher.uapp", "/site.uapp", "/health"]);
+// Shell bundle files: never looked up in an archive. The list is
+// uapp-bundle.js, the same one build-web.sh copies the bundle from; an entry
+// ending in "/" is a whole directory of them. Added here: what the servers
+// answer themselves.
+importScripts("uapp-bundle.js");
+const BUNDLE = new Set(["/chrome.js", "/site.uapp", "/health"]);
+const BUNDLE_DIRS = [];
+for (const f of Object.keys(self.UAPP_BUNDLE || {})) {
+  if (f.endsWith("/")) BUNDLE_DIRS.push("/" + f); else BUNDLE.add("/" + f);
+}
+const inBundleDir = (p) => BUNDLE_DIRS.some((d) => p.startsWith(d));
+const inBundle = (p) => BUNDLE.has(p) || inBundleDir(p);
 
 // `probe`: instead of a 404/passthrough response, return null when the
 // archive definitely has no such file (or the shell says passthrough) so the
@@ -173,12 +188,13 @@ async function archiveResponse(req, url, clientId, probe, inst) {
   if (probe && !r) return undefined;
   if (probe && (r.passthrough || r.notFound)) return null;
   if ((!r && req.method === "GET") || (r && r.passthrough)) {
-    try { return withCoi(await netFetch(req, null, !BUNDLE.has(url.pathname))); }
+    try { return withCoi(await netFetch(req, null, !inBundle(url.pathname))); }
     catch (e) { return new Response("offline: " + e, { status: 503 }); }
   }
   if (!r) return withCoi(new Response("uapp shell not ready", { status: 503 }));
   if (r.error) return withCoi(new Response(r.error, { status: r.status || 404 }));
-  const bytes = Uint8Array.from(atob(r.bodyB64 || ""), (c) => c.charCodeAt(0));
+  // `body` (raw bytes) where the shell has them, base64 for archive files.
+  const bytes = r.body instanceof Uint8Array ? r.body : Uint8Array.from(atob(r.bodyB64 || ""), (c) => c.charCodeAt(0));
   const headers = {
     "content-type": r.contentType || "application/octet-stream",
     "cache-control": "no-store",
@@ -248,7 +264,7 @@ function learnInst(clientId, inst) {
 // The paths the shell actually owns: its own documents, its bundle, and the
 // archive routes. Everything else on this origin is somebody else's.
 function shellPath(p) {
-  return p === "/" || BUNDLE.has(p) || ARCHIVE_EXACT.has(p) || ARCHIVE_PREFIX.test(p) || p.startsWith("/shell/");
+  return p === "/" || inBundle(p) || ARCHIVE_EXACT.has(p) || ARCHIVE_PREFIX.test(p);
 }
 
 // Is the client making this request one of the shell's own pages?
@@ -350,7 +366,7 @@ self.addEventListener("fetch", (ev) => {
   // the in-browser copy, not the server's site. Top-level navigations are
   // untouched (the server's page, with its chrome).
   if (ev.request.mode === "navigate" && ev.request.destination === "iframe"
-      && !ARCHIVE_PREFIX.test(p) && !ARCHIVE_EXACT.has(p) && !p.startsWith("/shell/") && !BUNDLE.has(p)) {
+      && !ARCHIVE_PREFIX.test(p) && !ARCHIVE_EXACT.has(p) && !inBundle(p)) {
     const u = new URL(url);
     u.pathname = "/app" + (p === "/" ? "/" : p);
     noteNav();
@@ -427,7 +443,7 @@ self.addEventListener("fetch", (ev) => {
   // published version, and an edit the visitor just made would otherwise be
   // invisible. The shell's own bundle never lives in an archive, so its
   // lookups miss and fall through; before the engine is up the shell
-  // passes straight through (see handleSwRequest in boot.js).
+  // passes straight through (see handleSwRequest in uapp-boot/sw-responder.js).
   ev.respondWith((async () => {
     try {
       // A page that is not ours, whose navigation this worker never saw (it
@@ -441,14 +457,14 @@ self.addEventListener("fetch", (ev) => {
       // Never for a navigation: a top document is the SERVER's page (with
       // its injected chrome) — the shell being navigated away from is still
       // a client here and would hand over the raw archive copy instead.
-      if (ev.request.method === "GET" && ev.request.mode !== "navigate" && p !== "/" && !p.startsWith("/shell/") && !BUNDLE.has(p)) {
+      if (ev.request.method === "GET" && ev.request.mode !== "navigate" && p !== "/" && !inBundle(p)) {
         const u = new URL(url);
         u.pathname = p;
         const r = await archiveResponse(ev.request, u, ev.clientId, true, inst);
         if (r) return r;
       }
       const staticUrl = new URL(SCOPE.slice(1) + p.slice(1) + url.search, url.origin);
-      const isBundle = p.startsWith("/shell/") || BUNDLE.has(p);
+      const isBundle = inBundle(p);
       const bust = p !== "/" && !isBundle;
       // A root-absolute reference from our frame that the archive lacks and
       // that is not the bundle's: the origin root is where it said, so ask
@@ -457,7 +473,7 @@ self.addEventListener("fetch", (ev) => {
       // (Never for a top-level navigation: that must stay the server's page —
       // its 404 page carries the chrome, which then shows the local copy's
       // version of the page in the frame.)
-      if (resp.status === 404 && ev.request.method === "GET" && ev.request.mode !== "navigate" && p !== "/" && !p.startsWith("/shell/")) {
+      if (resp.status === 404 && ev.request.method === "GET" && ev.request.mode !== "navigate" && p !== "/" && !inBundleDir(p)) {
         const u = new URL(url);
         u.pathname = p;
         return archiveResponse(ev.request, u, ev.clientId, false, inst);

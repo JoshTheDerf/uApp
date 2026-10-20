@@ -46,6 +46,10 @@ function load(scope = "/") {
       return new Response("net:" + url, { status: 200, headers: { "content-type": "text/plain" } });
     },
   };
+  // The worker loads its bundle list next to itself (uapp-bundle.js).
+  ctx.importScripts = (...urls) => {
+    for (const u of urls) vm.runInContext(readFileSync(new URL("../web/" + u, import.meta.url), "utf8"), ctx);
+  };
   vm.createContext(ctx);
   vm.runInContext(readFileSync(new URL("../web/sw.js", import.meta.url), "utf8"), ctx);
   return { handlers, clients, self_, calls };
@@ -280,6 +284,27 @@ console.log("\ninstance routing:");
   ok(asks.length === 1 && asks[0].to === "shell-b" && asks[0].m.path === "/js/app.js", "asks that frame's shell for it", JSON.stringify(asks.map((a) => [a.to, a.m.path])));
   ok(!dispatch(sw, { path: "/js/app.js", clientId: "stranger" }).claimed, "a root-absolute path from an unknown client is not ours");
   ok(!dispatch(sw, nav("/keenet", { destination: "iframe", clientId: "frame-b2" })).claimed, "a navigation out of the scope from our frame is still a link out");
+}
+
+// ---- 9. the bundle list ----------------------------------------------------
+// Every file uapp-bundle.js names (the list build-web.sh copies from) is the
+// shell's own: fetched from the server straight away, never looked up in the
+// archive first (which would cost each one the 1.5 s ask timeout here).
+console.log("\nbundle list (uapp-bundle.js):");
+{
+  const sw = load();
+  const list = Object.keys(sw.self_.UAPP_BUNDLE || {});
+  ok(list.includes("boot.js") && list.includes("shell/") && list.includes("uapp_wasm_bg.wasm"), "the worker loaded the list", JSON.stringify(list));
+  sw.clients.set("c-sh", { id: "c-sh", url: "https://thederf.com/", frameType: "top-level" });
+  for (const f of list) {
+    const path = "/" + (f.endsWith("/") ? f + "main.js" : f);
+    const t0 = Date.now();
+    const r = dispatch(sw, { path, destination: "script", clientId: "c-sh" });
+    if (r.promise) await r.promise;
+    const last = sw.calls.at(-1);
+    ok(r.claimed && Date.now() - t0 < 1000 && last && last.url === "https://thederf.com" + path,
+       `serves ${path} from the bundle without an archive lookup`, last && last.url);
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

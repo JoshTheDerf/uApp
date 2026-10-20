@@ -61,6 +61,16 @@ extern "C" {
     pub fn js_stop_requested() -> bool;
     /// Clear the stop flag (called when a run starts).
     pub fn js_clear_stop();
+    /// A panic's message, reported before the module traps (the trap itself
+    /// only says "unreachable"). The worker treats the engine as dead from
+    /// then on: its memory is whatever the panic left behind.
+    pub fn js_panic(msg: &str);
+}
+
+/// Runs once, when the module is instantiated.
+#[wasm_bindgen(start)]
+pub fn start() {
+    std::panic::set_hook(Box::new(|info| js_panic(&info.to_string())));
 }
 
 thread_local! {
@@ -155,6 +165,33 @@ pub fn open_app(bytes: Option<Vec<u8>>, name: String, user: String) -> Result<St
         Ok(info.to_string())
     })();
     opened.map_err(|e| JsValue::from_str(&format!("{e:#}")))
+}
+
+/// The whole database as one byte array, for saves and downloads. It reaches
+/// JS as a Uint8Array (one copy out of wasm memory) that the worker transfers
+/// to the page; `app.export` would take it through base64 and JSON on both
+/// sides, several more copies of a file that can be tens of megabytes.
+#[wasm_bindgen]
+pub fn export_bytes() -> Result<Vec<u8>, JsValue> {
+    let out = (|| -> Result<Vec<u8>> {
+        let app = app()?;
+        let eng = app.engine.lock().unwrap();
+        eng.serialize_bytes()
+    })();
+    out.map_err(|e| JsValue::from_str(&format!("{e:#}")))
+}
+
+/// The copy that leaves the device (Download a copy, /download.uapp,
+/// publishing): `export_bytes` minus API keys, MCP headers and tool approvals,
+/// which only the device-local OPFS copy keeps (see store::export_shareable).
+#[wasm_bindgen]
+pub fn export_shareable() -> Result<Vec<u8>, JsValue> {
+    let out = (|| -> Result<Vec<u8>> {
+        let app = app()?;
+        let eng = app.engine.lock().unwrap();
+        crate::store::export_shareable(&eng.db)
+    })();
+    out.map_err(|e| JsValue::from_str(&format!("{e:#}")))
 }
 
 /// One JSON-RPC call. Returns {"result": ...} or {"error": {"message": ...}}.

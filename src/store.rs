@@ -1969,6 +1969,57 @@ pub fn export_full(db: &Connection, _key: Option<&str>) -> Result<Vec<u8>> {
     serialize_conn(db)
 }
 
+/// The browser build's copy for anything that leaves this device: Download a
+/// copy, /download.uapp, publishing. On native, API keys, MCP headers and
+/// "always allow" approvals live outside the file (secrets.rs); in the
+/// browser they are in it, which is fine for the copy kept in OPFS (that is
+/// device-local, see `export_full`) but not for one the user hands around.
+/// So: a full copy, minus the same three things `populate_export` drops,
+/// then VACUUMed so the removed values aren't left behind in free pages.
+#[cfg(target_arch = "wasm32")]
+pub fn export_shareable(db: &Connection) -> Result<Vec<u8>> {
+    let copy = deserialize_bytes(&serialize_conn(db)?)?;
+    let mut edits: Vec<(String, Option<String>)> = Vec::new();
+    {
+        let mut sel = copy.prepare("SELECT key, value FROM uapp_config")?;
+        let mut rows = sel.query([])?;
+        while let Some(row) = rows.next()? {
+            let key: String = row.get(0)?;
+            if key.starts_with("approvals.") {
+                edits.push((key, None));
+                continue;
+            }
+            if key != "ai" && key != "mcp" {
+                continue;
+            }
+            let raw: String = row.get(1)?;
+            let Ok(mut v) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            if let Some(o) = v.as_object_mut() {
+                o.remove("api_key");
+            }
+            if let Some(servers) = v.as_array_mut() {
+                for srv in servers.iter_mut().filter_map(|s| s.as_object_mut()) {
+                    srv.remove("headers");
+                }
+            }
+            edits.push((key, Some(v.to_string())));
+        }
+    }
+    for (key, value) in edits {
+        match value {
+            Some(v) => copy.execute(
+                "UPDATE uapp_config SET value=?2 WHERE key=?1",
+                rusqlite::params![key, v],
+            )?,
+            None => copy.execute("DELETE FROM uapp_config WHERE key=?1", [key])?,
+        };
+    }
+    copy.execute_batch("VACUUM")?;
+    serialize_conn(&copy)
+}
+
 #[cfg(target_arch = "wasm32")]
 pub fn export_template(mem: &Connection, app_name: &str) -> Result<Vec<u8>> {
     let out = Connection::open_in_memory()?;

@@ -9,10 +9,11 @@
  * reading. From there it is the ordinary shell — chat, SQL browser, file
  * browser, the site's own build pipeline — all against the in-browser copy.
  *
- * Nothing is persisted (boot.js leaves currentAppId null, its "ephemeral,
- * never saved" path), so a reload throws the copy away and comes back from the
- * server's authoritative one. That is the whole contract: edit freely, reload
- * to get the real site back.
+ * The visitor's edits are kept in this browser: boot.js saves the copy (one
+ * per site) from the first change on, so a reload comes back to it, not to
+ * the server's version. The sync pill (sync-pill.js) says when there are
+ * local edits or the server has moved on, and offers Reset (drop the local
+ * copy, reload the server's) and Publish.
  *
  * There is no loader. The server's page stays on screen, untouched, while the
  * shell boots invisibly beneath it; the swap happens only once the shell's
@@ -97,7 +98,7 @@
 
   // ---- the entry path -------------------------------------------------------
   // The frame opens on whatever the reader was looking at. `/app/` is a ROUTE
-  // into the archive, not a stored prefix (see handleSwRequest in boot.js), so
+  // into the archive, not a stored prefix (see handleSwRequest in uapp-boot/sw-responder.js), so
   // "/how-do-bikes-work/" becomes "app/how-do-bikes-work/" and the archive's
   // own index/extension resolution takes it from there.
   function entryPath() {
